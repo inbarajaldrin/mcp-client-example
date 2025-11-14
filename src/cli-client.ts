@@ -11,8 +11,16 @@ export class MCPClientCLI {
   private logger: Logger;
   private isShuttingDown = false;
 
-  constructor(serverConfig: StdioServerParameters) {
-    this.client = new MCPClient(serverConfig);
+  constructor(
+    serverConfig: StdioServerParameters | Array<{ name: string; config: StdioServerParameters }>,
+  ) {
+    if (Array.isArray(serverConfig)) {
+      // Multiple servers
+      this.client = MCPClient.createMultiServer(serverConfig);
+    } else {
+      // Single server (backward compatibility)
+      this.client = new MCPClient(serverConfig);
+    }
     this.logger = new Logger({ mode: 'verbose' });
     
     // Set up signal handlers for graceful shutdown

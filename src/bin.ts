@@ -166,6 +166,8 @@ async function main() {
         'server-command': { type: 'string' },
         'server-args': { type: 'string' },
         'server': { type: 'string', short: 's' },
+        'servers': { type: 'string', multiple: true },
+        'all': { type: 'boolean' },
         'list-servers': { type: 'boolean' },
         'add-server': { type: 'string' },
         'remove-server': { type: 'string' },
@@ -250,11 +252,57 @@ async function main() {
       return;
     }
 
-    // Determine which server to use
+    // Determine which server(s) to use
+    const serversArg = args.values['servers'];
+    const allServers = args.values['all'];
+    const serverName = args.values['server'] || config.defaultServer;
+
+    // Handle multiple servers
+    if (serversArg && serversArg.length > 0) {
+      // Use multiple specified servers
+      const serverConfigs = serversArg.flatMap((name) => {
+        const server = config.servers[name];
+        if (!server) {
+          console.error(`Error: Server "${name}" not found.`);
+          console.error('Use --list-servers to see available servers.');
+          process.exit(1);
+        }
+        return [{ name, config: { command: server.command, args: server.args } }];
+      });
+
+      if (serverConfigs.length === 0) {
+        console.error('Error: No valid servers specified.');
+        process.exit(1);
+      }
+
+      const cli = new MCPClientCLI(serverConfigs);
+      await cli.start();
+      return;
+    }
+
+    // Handle --all flag: use all enabled servers
+    if (allServers) {
+      const enabledServers = Object.entries(config.servers)
+        .filter(([name, server]) => !server.disabled)
+        .map(([name, server]) => ({
+          name,
+          config: { command: server.command, args: server.args },
+        }));
+
+      if (enabledServers.length === 0) {
+        console.error('Error: No enabled servers found.');
+        console.error('Use --list-servers to see available servers.');
+        process.exit(1);
+      }
+
+      const cli = new MCPClientCLI(enabledServers);
+      await cli.start();
+      return;
+    }
+
+    // Single server mode (backward compatibility)
     let serverCommand: string | undefined;
     let serverArgs: string[] = [];
-
-    const serverName = args.values['server'] || config.defaultServer;
 
     if (serverName) {
       // Use server from config
@@ -275,7 +323,7 @@ async function main() {
     if (!serverCommand) {
       console.error('Error: No server specified.');
       console.error(
-        'Use --server <name> to use a configured server, or --server-command to specify a server directly.',
+        'Use --server <name> to use a configured server, --servers <name1> <name2> ... to use multiple servers, --all to use all enabled servers, or --server-command to specify a server directly.',
       );
       console.error('Use --list-servers to see available servers.');
       process.exit(1);

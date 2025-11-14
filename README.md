@@ -109,6 +109,24 @@ npx @neondatabase/mcp-client-cli
 npx @neondatabase/mcp-client-cli --remove-server="my-server"
 ```
 
+#### Run Multiple Servers Simultaneously
+
+The client supports running multiple MCP servers at the same time, allowing you to use tools from all connected servers in a single session:
+
+```bash
+# Run all enabled servers from your configuration
+npx @neondatabase/mcp-client-cli --all
+
+# Run specific servers by name
+npx @neondatabase/mcp-client-cli --servers server1 server2 server3
+```
+
+**How it works:**
+- All tools from connected servers are aggregated and available to the AI
+- Tool names are prefixed with the server name (e.g., `server-name__tool-name`) to avoid conflicts
+- If some servers fail to connect, the client continues with the ones that succeed
+- Tool calls are automatically routed to the correct server based on the tool name prefix
+
 #### Configuration File Location
 
 The configuration file is stored at: `~/.mcp-client/config.json`
