@@ -1,0 +1,46 @@
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/home/aaugus11/Documents/isaac-sim-mcp/mcp_venv/bin/python",
+      "args": [
+        "/home/aaugus11/Documents/isaac-sim-mcp/isaac_mcp/server.py"
+      ]
+    },
+    "ros-mcp-server": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/home/aaugus11/Documents/ros-mcp-server/.venv/bin/python",
+      "args": [
+        "/home/aaugus11/Documents/ros-mcp-server/server.py"
+      ]
+    },
+    "Prompts": {
+      "disabled": false,
+      "command": "/snap/bin/uv",
+      "args": [
+        "run",
+        "--with",
+        "mcp[cli]",
+        "mcp",
+        "run",
+        "/home/aaugus11/Documents/mcp-server-example/prompt.py"
+      ]
+    },
+    "Resources": {
+      "disabled": false,
+      "command": "/snap/bin/uv",
+      "args": [
+        "run",
+        "--with",
+        "mcp[cli]",
+        "mcp",
+        "run",
+        "/home/aaugus11/Documents/mcp-server-example/resource.py"
+      ]
+    }
+  }
+}
