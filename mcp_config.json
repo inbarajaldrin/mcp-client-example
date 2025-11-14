@@ -20,25 +20,19 @@
     },
     "Prompts": {
       "disabled": false,
-      "command": "/snap/bin/uv",
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/home/aaugus11/Documents/mcp-server-example/.venv/bin/python",
       "args": [
-        "run",
-        "--with",
-        "mcp[cli]",
-        "mcp",
-        "run",
         "/home/aaugus11/Documents/mcp-server-example/prompt.py"
       ]
     },
     "Resources": {
       "disabled": false,
-      "command": "/snap/bin/uv",
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/home/aaugus11/Documents/mcp-server-example/.venv/bin/python",
       "args": [
-        "run",
-        "--with",
-        "mcp[cli]",
-        "mcp",
-        "run",
         "/home/aaugus11/Documents/mcp-server-example/resource.py"
       ]
     }
