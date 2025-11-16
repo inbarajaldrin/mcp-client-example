@@ -332,8 +332,8 @@ Selectively enable or disable prompts from all connected servers and add enabled
 
 **Commands:**
 - `/add-prompt` - Add enabled prompts to conversation context (interactive selection)
-- `/prompts-list` - List all prompts with their enabled/disabled status
-- `/prompts-manager` - Interactive prompt enable/disable selection (similar to `/tools`)
+- `/prompts` or `/prompts-list` - List currently enabled prompts
+- `/prompts-manager` or `/prompts-select` - Interactive prompt enable/disable selection
 
 **Features:**
 - Persistent state saved to `~/.mcp-client/config.json`

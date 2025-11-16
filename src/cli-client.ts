@@ -86,8 +86,8 @@ export class MCPClientCLI {
         `  /tools-enable-server <server-name> - Enable all tools from a server\n` +
         `  /tools-disable-server <server-name> - Disable all tools from a server\n` +
         `  /add-prompt - Add enabled prompts to conversation context\n` +
-        `  /prompts-list - List all prompts with enabled/disabled status\n` +
-        `  /prompts-manager - Interactive prompt enable/disable selection\n`,
+        `  /prompts or /prompts-list - List currently enabled prompts\n` +
+        `  /prompts-manager or /prompts-select - Interactive prompt enable/disable selection\n`,
         { type: 'info' },
       );
       this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
@@ -346,7 +346,7 @@ export class MCPClientCLI {
           continue;
         }
 
-        if (query.toLowerCase() === '/prompts-list') {
+        if (query.toLowerCase() === '/prompts' || query.toLowerCase() === '/prompts-list') {
           try {
             await this.displayPromptsList();
           } catch (error) {
@@ -358,7 +358,7 @@ export class MCPClientCLI {
           continue;
         }
 
-        if (query.toLowerCase() === '/prompts-manager') {
+        if (query.toLowerCase() === '/prompts-manager' || query.toLowerCase() === '/prompts-select') {
           try {
             await this.interactivePromptManager();
           } catch (error) {
@@ -901,33 +901,39 @@ export class MCPClientCLI {
     // Get all prompts from all servers
     const allPrompts = this.client.listPrompts();
     
+    // Filter to only enabled prompts
+    const enabledPrompts = promptManager.filterPrompts(allPrompts);
+    
+    if (enabledPrompts.length === 0) {
+      this.logger.log('\n📋 Enabled Prompts:\n', { type: 'info' });
+      this.logger.log('  No enabled prompts.\n', { type: 'warning' });
+      this.logger.log('  Use /prompts-manager to enable prompts.\n', { type: 'info' });
+      return;
+    }
+    
     // Group by server
-    const promptsByServer = new Map<string, Array<{ name: string; enabled: boolean }>>();
-    for (const promptData of allPrompts) {
+    const promptsByServer = new Map<string, Array<{ name: string }>>();
+    for (const promptData of enabledPrompts) {
       if (!promptsByServer.has(promptData.server)) {
         promptsByServer.set(promptData.server, []);
       }
-      const enabled = promptManager.isPromptEnabled(promptData.server, promptData.prompt.name);
       promptsByServer.get(promptData.server)!.push({ 
-        name: promptData.prompt.name, 
-        enabled 
+        name: promptData.prompt.name
       });
     }
     
-    this.logger.log('\n📋 Prompts Status:\n', { type: 'info' });
+    this.logger.log('\n📋 Enabled Prompts:\n', { type: 'info' });
     
     for (const [serverName, prompts] of promptsByServer.entries()) {
-      const enabledCount = prompts.filter(p => p.enabled).length;
       this.logger.log(
-        `\n[${serverName}] (${enabledCount}/${prompts.length} enabled):\n`,
+        `\n[${serverName}] (${prompts.length} enabled):\n`,
         { type: 'info' },
       );
       
       for (const prompt of prompts) {
-        const status = prompt.enabled ? '✓' : '✗';
         this.logger.log(
-          `  ${status} ${prompt.name}\n`,
-          { type: prompt.enabled ? 'info' : 'warning' },
+          `  ✓ ${prompt.name}\n`,
+          { type: 'info' },
         );
       }
     }
