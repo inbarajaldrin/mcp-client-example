@@ -195,6 +195,37 @@ Manually triggering summarization...
 Conversation summarized. Context reduced from 12 to 1 summary message.
 ```
 
+### Todo Mode
+
+Enable task tracking mode where the agent automatically decomposes tasks into todos and cannot exit until all are completed or skipped.
+
+**Commands:**
+- `/todo-on` - Enable todo mode (requires todo server in `mcp_config.json`)
+- `/todo-off` - Disable todo mode
+
+**Features:**
+- Automatic todo clearing when enabling todo mode and before each user query
+- Agent decomposes tasks into actionable todos using `create-todo`
+- Agent marks todos as complete using `complete-todo` as it works
+- Exit prevention: agent cannot exit until all todos are completed or skipped
+- Tool filtering: only essential todo tools available (`create-todo`, `list-todos`, `complete-todo`, `delete-todo`, `skip-todo`, `clear-todo-list`)
+
+**Example:**
+```bash
+You: /todo-on
+Todo mode enabled
+
+You: Assemble 4 line_red objects
+[Client automatically clears existing todos]
+[Agent creates 4 todos and starts working through them]
+
+You: Now assemble 3 line_blue objects
+[Client automatically clears previous todos]
+[Agent creates 3 new todos for the new task]
+```
+
+**Note:** Todo server can be disabled in `mcp_config.json` and will be excluded from `--all` servers, but `/todo-on` will still connect to it on-demand.
+
 ## How to develop
 
 1. Clone the repository

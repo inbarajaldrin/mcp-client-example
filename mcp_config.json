@@ -35,6 +35,15 @@
       "args": [
         "/home/aaugus11/Documents/mcp-server-example/resource.py"
       ]
+    },
+    "todo": {
+      "disabled": true,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "/home/aaugus11/Documents/todo-list-mcp/server.py"
+      ]
     }
   }
 }

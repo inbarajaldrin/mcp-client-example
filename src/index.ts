@@ -14,6 +14,7 @@ import { Tool } from '@anthropic-ai/sdk/resources/index.mjs';
 import { Stream } from '@anthropic-ai/sdk/streaming.mjs';
 import { consoleStyles, Logger, LoggerOptions } from './logger.js';
 import { TokenCounter, SummarizationConfig } from './token-counter.js';
+import { TodoManager } from './todo.js';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -48,6 +49,8 @@ export class MCPClient {
   private tokenCounter: TokenCounter;
   private currentTokenCount: number = 0;
   private model: string;
+  private todoManager: TodoManager;
+  private todoModeInitialized: boolean = false;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -71,6 +74,9 @@ export class MCPClient {
     
     // Initialize token counter
     this.tokenCounter = new TokenCounter(this.model, options?.summarizationConfig);
+    
+    // Initialize todo manager
+    this.todoManager = new TodoManager(this.logger);
   }
 
   // Constructor for multiple named servers
@@ -90,6 +96,7 @@ export class MCPClient {
     client.model = options?.model || 'claude-haiku-4-5-20251001';
     client.currentTokenCount = 0;
     client.tokenCounter = new TokenCounter(client.model, options?.summarizationConfig);
+    client.todoManager = new TodoManager(client.logger);
     return client;
   }
 
@@ -188,7 +195,7 @@ export class MCPClient {
           ListToolsResultSchema,
         );
 
-        const serverTools = toolsResults.tools.map(
+        let serverTools = toolsResults.tools.map(
           ({ inputSchema, name, description }) => {
             // Prefix tool name with server name to avoid conflicts
             // Use double underscore as separator (colon not allowed in Anthropic tool names)
@@ -200,6 +207,11 @@ export class MCPClient {
             };
           },
         );
+
+        // Filter todo server tools if todo mode is enabled
+        if (serverName === this.todoManager.getServerName() && this.todoManager.isEnabled()) {
+          serverTools = this.todoManager.filterTools(serverTools);
+        }
 
         connection.tools = serverTools;
         allTools.push(...serverTools);
@@ -267,6 +279,133 @@ export class MCPClient {
       this.logger.log('\n🧪 Test mode disabled: Summarization threshold reset to 80%\n', {
         type: 'info',
       });
+    }
+  }
+
+  /**
+   * Enable todo mode - connect to todo server and filter tools
+   */
+  async enableTodoMode(): Promise<void> {
+    if (!this.todoManager.isConfigured()) {
+      throw new Error('Todo server not configured. Please add "todo" server to mcp_config.json');
+    }
+
+    try {
+      const todoServerName = this.todoManager.getServerName();
+      
+      // Check if todo server is already connected (from initial start)
+      if (this.servers.has(todoServerName)) {
+        // Use existing connection
+        const existingConnection = this.servers.get(todoServerName)!;
+        this.todoManager.setConnection(existingConnection);
+        this.todoManager.enable();
+      } else {
+        // Connect to todo server
+        const connection = await this.todoManager.connect();
+        this.todoManager.enable();
+        
+        // Add todo server to servers map
+        this.servers.set(todoServerName, connection);
+      }
+      
+      // Reload tools to apply filtering
+      await this.initMCPTools();
+      
+      // Clear any existing todos when enabling todo mode
+      await this.clearAllTodos();
+      
+      // Reset initialization flag - will be set after system prompt is sent
+      this.todoModeInitialized = false;
+      
+      this.logger.log('\n✓ Todo mode enabled\n', { type: 'info' });
+    } catch (error) {
+      this.logger.log(
+        `Failed to enable todo mode: ${error}\n`,
+        { type: 'error' },
+      );
+      throw error;
+    }
+  }
+
+  /**
+   * Disable todo mode - disconnect from todo server
+   */
+  async disableTodoMode(): Promise<void> {
+    this.todoManager.disable();
+    this.todoModeInitialized = false;
+    
+    // Note: We don't disconnect the server or remove it from servers map
+    // because it might be needed by other parts of the system
+    // We just disable todo mode filtering and exit prevention
+    
+    // Reload tools to remove filtering
+    await this.initMCPTools();
+    
+    this.logger.log('\n✓ Todo mode disabled\n', { type: 'info' });
+  }
+
+  /**
+   * Check todo status - returns active todos count and list
+   */
+  async checkTodoStatus(): Promise<{ activeCount: number; todosList: string }> {
+    if (!this.todoManager.isEnabled()) {
+      return { activeCount: 0, todosList: '' };
+    }
+
+    const activeCount = await this.todoManager.getActiveTodosCount();
+    const todosList = await this.todoManager.getActiveTodosList();
+    
+    return { activeCount, todosList };
+  }
+
+  /**
+   * Check if todo mode is enabled
+   */
+  isTodoModeEnabled(): boolean {
+    return this.todoManager.isEnabled();
+  }
+
+  /**
+   * Check if todo server is configured
+   */
+  isTodoServerConfigured(): boolean {
+    return this.todoManager.isConfigured();
+  }
+
+  /**
+   * Mark todo mode as initialized (called after system prompt is sent)
+   */
+  setTodoModeInitialized(initialized: boolean = true): void {
+    this.todoModeInitialized = initialized;
+  }
+
+  /**
+   * Clear all todos (client-side call)
+   */
+  private async clearAllTodos(): Promise<void> {
+    if (!this.todoManager.isEnabled() || !this.todoManager.getConnection()) {
+      return;
+    }
+
+    try {
+      const connection = this.todoManager.getConnection()!;
+      await connection.client.request(
+        {
+          method: 'tools/call',
+          params: {
+            name: 'clear-todo-list',
+            arguments: {},
+          },
+        },
+        CallToolResultSchema,
+      );
+      this.logger.log('\n✓ Cleared existing todos\n', { type: 'info' });
+    } catch (error) {
+      this.logger.log(
+        `Failed to clear todos: ${error}\n`,
+        { type: 'warning' },
+      );
+      // Continue anyway - don't block the query
     }
   }
 
@@ -358,6 +497,7 @@ export class MCPClient {
     let currentToolName = '';
     let currentToolInputString = '';
     let assistantMessageAdded = false;
+    let stopReason: string | null = null;
 
     this.logger.log(consoleStyles.assistant);
     for await (const chunk of stream) {
@@ -368,6 +508,7 @@ export class MCPClient {
           currentMessage = '';
           currentToolName = '';
           currentToolInputString = '';
+          stopReason = null;
           continue;
 
         case 'content_block_stop':
@@ -401,6 +542,11 @@ export class MCPClient {
             assistantMessageAdded = true;
             // Count tokens for assistant message
             this.currentTokenCount += this.tokenCounter.countMessageTokens(assistantMessage);
+          }
+
+          // Track stop reason
+          if (chunk.delta.stop_reason) {
+            stopReason = chunk.delta.stop_reason;
           }
 
           if (chunk.delta.stop_reason === 'tool_use') {
@@ -551,6 +697,36 @@ export class MCPClient {
             // Count tokens for assistant message
             this.currentTokenCount += this.tokenCounter.countMessageTokens(assistantMessage);
           }
+
+          // Check todo status if todo mode is enabled and agent is trying to exit
+          if (this.todoManager.isEnabled() && stopReason !== 'tool_use') {
+            const todoStatus = await this.checkTodoStatus();
+            if (todoStatus.activeCount > 0) {
+              // Agent is trying to exit but has incomplete todos
+              const reminderMessage: Message = {
+                role: 'user',
+                content: `You have ${todoStatus.activeCount} incomplete todo(s). Please complete them using complete-todo or skip them using skip-todo before finishing.\n\nActive todos:\n${todoStatus.todosList}\n\nYou cannot exit until all todos are completed or skipped.`,
+              };
+              this.messages.push(reminderMessage);
+              this.currentTokenCount += this.tokenCounter.countMessageTokens(reminderMessage);
+              
+              this.logger.log(
+                `\n⚠️ Agent attempted to exit with ${todoStatus.activeCount} incomplete todo(s). Prompting to complete or skip.\n`,
+                { type: 'warning' },
+              );
+              
+              // Continue conversation so agent can complete/skip todos
+              const continueStream = await this.anthropicClient.messages.create({
+                messages: this.messages,
+                model: this.model,
+                max_tokens: 8192,
+                tools: this.tools,
+                stream: true,
+              });
+              await this.processStream(continueStream);
+              return; // Exit early since we've handled the reminder
+            }
+          }
           break;
 
         default:
@@ -561,11 +737,21 @@ export class MCPClient {
     }
   }
 
-  async processQuery(query: string) {
+  async processQuery(query: string, isSystemPrompt: boolean = false) {
     try {
       // Check if we need to summarize before adding new message
       if (this.shouldSummarize()) {
         await this.autoSummarize();
+      }
+
+      // If todo mode is enabled and this is a user query (not system prompt),
+      // and todo mode has been initialized, automatically clear todos
+      if (
+        this.todoManager.isEnabled() &&
+        !isSystemPrompt &&
+        this.todoModeInitialized
+      ) {
+        await this.clearAllTodos();
       }
 
       const userMessage: Message = { role: 'user', content: query };

@@ -75,7 +75,9 @@ export class MCPClientCLI {
         `  /token-status or /tokens - Show current token usage\n` +
         `  /summarize or /summarize-now - Manually trigger summarization\n` +
         `  /test-mode [threshold] - Enable test mode (default: 5% threshold)\n` +
-        `  /test-mode off - Disable test mode\n`,
+        `  /test-mode off - Disable test mode\n` +
+        `  /todo-on - Enable todo mode (agent will track tasks)\n` +
+        `  /todo-off - Disable todo mode\n`,
         { type: 'info' },
       );
       this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
@@ -176,6 +178,45 @@ export class MCPClientCLI {
           } else {
             const threshold = parts.length > 1 ? parseFloat(parts[1]) : 5;
             this.client.setTestMode(true, threshold);
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/todo-on') {
+          try {
+            if (!this.client.isTodoServerConfigured()) {
+              this.logger.log(
+                '\nTodo server not configured. Please add "todo" server to mcp_config.json before using this feature.\n',
+                { type: 'error' },
+              );
+              continue;
+            }
+            
+            await this.client.enableTodoMode();
+            
+            // Send system prompt to agent (marked as system prompt so it doesn't trigger clear)
+            const systemPrompt = 'You are now in todo mode. When the user provides a task, you must: 1) Decompose the task into actionable todos using create-todo, 2) As you complete each task, mark it complete using complete-todo. You cannot exit until all todos are completed or skipped using skip-todo.';
+            await this.client.processQuery(systemPrompt, true);
+            
+            // Mark todo mode as initialized so future user queries will auto-clear
+            this.client.setTodoModeInitialized(true);
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to enable todo mode: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/todo-off') {
+          try {
+            await this.client.disableTodoMode();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to disable todo mode: ${error}\n`,
+              { type: 'error' },
+            );
           }
           continue;
         }
