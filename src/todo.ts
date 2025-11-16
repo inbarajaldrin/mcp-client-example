@@ -2,7 +2,7 @@ import { StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ListToolsResultSchema, CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
-import { Tool } from '@anthropic-ai/sdk/resources/index.mjs';
+import type { Tool } from './model-provider.js';
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';

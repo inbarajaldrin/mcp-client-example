@@ -149,6 +149,8 @@ function listServers(config: ClientConfig): void {
   console.log();
 }
 
+// Check for required environment variables
+// Note: Currently defaults to Claude provider, but the codebase now supports provider abstraction
 function checkRequiredEnvVars() {
   if (!process.env.ANTHROPIC_API_KEY) {
     console.error(

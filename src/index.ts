@@ -1,5 +1,3 @@
-import { Anthropic } from '@anthropic-ai/sdk';
-
 import {
   StdioClientTransport,
   StdioServerParameters,
@@ -14,18 +12,19 @@ import {
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import chalk from 'chalk';
-import { Tool } from '@anthropic-ai/sdk/resources/index.mjs';
-import { Stream } from '@anthropic-ai/sdk/streaming.mjs';
 import { consoleStyles, Logger, LoggerOptions } from './logger.js';
-import { TokenCounter, SummarizationConfig } from './token-counter.js';
 import { TodoManager } from './todo.js';
 import { ToolManager } from './tool-manager.js';
 import { PromptManager } from './prompt-manager.js';
-
-interface Message {
-  role: 'user' | 'assistant';
-  content: string;
-}
+import type {
+  ModelProvider,
+  TokenCounter,
+  Tool,
+  Message,
+  SummarizationConfig,
+  MessageStreamEvent,
+} from './model-provider.js';
+import { ClaudeProvider } from './providers/claude.js';
 
 type MCPClientOptions = StdioServerParameters & {
   loggerOptions?: LoggerOptions;
@@ -47,7 +46,7 @@ type ServerConnection = {
 };
 
 export class MCPClient {
-  private anthropicClient: Anthropic;
+  private modelProvider: ModelProvider;
   private messages: Message[] = [];
   private servers: Map<string, ServerConnection> = new Map();
   private tools: Tool[] = [];
@@ -63,11 +62,15 @@ export class MCPClient {
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
-    options?: { loggerOptions?: LoggerOptions; summarizationConfig?: Partial<SummarizationConfig>; model?: string },
+    options?: { 
+      loggerOptions?: LoggerOptions; 
+      summarizationConfig?: Partial<SummarizationConfig>; 
+      model?: string;
+      provider?: ModelProvider;
+    },
   ) {
-    this.anthropicClient = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-    });
+    // Use provided provider or default to Claude
+    this.modelProvider = options?.provider || new ClaudeProvider();
 
     // Support both single server (backward compatibility) and multiple servers
     const configs = Array.isArray(serverConfigs) ? serverConfigs : [serverConfigs];
@@ -78,11 +81,11 @@ export class MCPClient {
 
     this.logger = new Logger(options?.loggerOptions ?? { mode: 'verbose' });
     
-    // Initialize model (default to claude-haiku-4-5-20251001)
-    this.model = options?.model || 'claude-haiku-4-5-20251001';
+    // Initialize model (default to provider's default model)
+    this.model = options?.model || this.modelProvider.getDefaultModel();
     
-    // Initialize token counter
-    this.tokenCounter = new TokenCounter(this.model, options?.summarizationConfig);
+    // Initialize token counter from provider
+    this.tokenCounter = this.modelProvider.createTokenCounter(this.model, options?.summarizationConfig);
     
     // Initialize todo manager
     this.todoManager = new TodoManager(this.logger);
@@ -97,20 +100,24 @@ export class MCPClient {
   // Constructor for multiple named servers
   static createMultiServer(
     servers: Array<{ name: string; config: StdioServerParameters }>,
-    options?: { loggerOptions?: LoggerOptions; summarizationConfig?: Partial<SummarizationConfig>; model?: string },
+    options?: { 
+      loggerOptions?: LoggerOptions; 
+      summarizationConfig?: Partial<SummarizationConfig>; 
+      model?: string;
+      provider?: ModelProvider;
+    },
   ): MCPClient {
     const client = Object.create(MCPClient.prototype);
-    client.anthropicClient = new Anthropic({
-      apiKey: process.env.ANTHROPIC_API_KEY,
-    });
+    // Use provided provider or default to Claude
+    client.modelProvider = options?.provider || new ClaudeProvider();
     client.messages = [];
     client.servers = new Map();
     client.tools = [];
     client.logger = new Logger(options?.loggerOptions ?? { mode: 'verbose' });
     client.serverConfigs = servers;
-    client.model = options?.model || 'claude-haiku-4-5-20251001';
+    client.model = options?.model || client.modelProvider.getDefaultModel();
     client.currentTokenCount = 0;
-    client.tokenCounter = new TokenCounter(client.model, options?.summarizationConfig);
+    client.tokenCounter = client.modelProvider.createTokenCounter(client.model, options?.summarizationConfig);
     client.todoManager = new TodoManager(client.logger);
     client.toolManager = new ToolManager(client.logger);
     client.promptManager = new PromptManager(client.logger);
@@ -691,24 +698,44 @@ export class MCPClient {
         content: m.content,
       }));
 
-      // Call API to summarize
-      const summaryResponse = await this.anthropicClient.messages.create({
-        model: this.model,
-        max_tokens: 2000,
-        messages: [
-          ...messagesToSummarize,
-          {
-            role: 'user',
-            content:
-              'Summarize the above conversation concisely, preserving key decisions, context, important information, and any tool usage patterns. Focus on what was accomplished and what context is needed to continue the conversation.',
-          },
-        ],
-      });
-
-      const summaryText =
-        summaryResponse.content[0]?.type === 'text'
-          ? summaryResponse.content[0].text
-          : JSON.stringify(summaryResponse.content);
+      // Call API to summarize (using ClaudeProvider's createMessage for non-streaming)
+      const summaryMessages: Message[] = [
+        ...messagesToSummarize,
+        {
+          role: 'user',
+          content:
+            'Summarize the above conversation concisely, preserving key decisions, context, important information, and any tool usage patterns. Focus on what was accomplished and what context is needed to continue the conversation.',
+        },
+      ];
+      
+      // Use provider's createMessage if available, otherwise use stream
+      let summaryText: string;
+      if (this.modelProvider instanceof ClaudeProvider) {
+        const summaryResponse = await (this.modelProvider as any).createMessage(
+          summaryMessages,
+          this.model,
+          2000,
+        );
+        summaryText =
+          summaryResponse.content[0]?.type === 'text'
+            ? summaryResponse.content[0].text
+            : JSON.stringify(summaryResponse.content);
+      } else {
+        // Fallback: use streaming and collect text
+        let collectedText = '';
+        const summaryStream = this.modelProvider.createMessageStream(
+          summaryMessages,
+          this.model,
+          [],
+          2000,
+        );
+        for await (const chunk of summaryStream) {
+          if (chunk.type === 'content_block_delta' && (chunk as any).delta?.type === 'text_delta') {
+            collectedText += (chunk as any).delta.text;
+          }
+        }
+        summaryText = collectedText || 'Summary unavailable';
+      }
 
       // Recalculate token count
       // Remove old messages from count
@@ -744,7 +771,7 @@ export class MCPClient {
   }
 
   private async processStream(
-    stream: Stream<Anthropic.Messages.RawMessageStreamEvent>,
+    stream: AsyncIterable<MessageStreamEvent>,
   ): Promise<void> {
     let currentMessage = '';
     let currentToolName = '';
@@ -823,13 +850,12 @@ export class MCPClient {
               );
               
               // Continue conversation so agent can see the error and fix it
-              const errorStream = await this.anthropicClient.messages.create({
-                messages: this.messages,
-                model: this.model,
-                max_tokens: 8192,
-                tools: this.tools,
-                stream: true,
-              });
+              const errorStream = this.modelProvider.createMessageStream(
+                this.messages,
+                this.model,
+                this.tools,
+                8192,
+              );
               await this.processStream(errorStream);
               return; // Exit early since we've handled the error
             }
@@ -899,13 +925,12 @@ export class MCPClient {
               );
               
               // Continue conversation so agent can see the error and handle it
-              const errorStream = await this.anthropicClient.messages.create({
-                messages: this.messages,
-                model: this.model,
-                max_tokens: 8192,
-                tools: this.tools,
-                stream: true,
-              });
+              const errorStream = this.modelProvider.createMessageStream(
+                this.messages,
+                this.model,
+                this.tools,
+                8192,
+              );
               await this.processStream(errorStream);
               return; // Exit early since we've handled the error
             }
@@ -927,13 +952,12 @@ export class MCPClient {
               await this.autoSummarize();
             }
 
-            const nextStream = await this.anthropicClient.messages.create({
-              messages: this.messages,
-              model: this.model,
-              max_tokens: 8192,
-              tools: this.tools,
-              stream: true,
-            });
+            const nextStream = this.modelProvider.createMessageStream(
+              this.messages,
+              this.model,
+              this.tools,
+              8192,
+            );
             await this.processStream(nextStream);
           }
           break;
@@ -969,13 +993,12 @@ export class MCPClient {
               );
               
               // Continue conversation so agent can complete/skip todos
-              const continueStream = await this.anthropicClient.messages.create({
-                messages: this.messages,
-                model: this.model,
-                max_tokens: 8192,
-                tools: this.tools,
-                stream: true,
-              });
+              const continueStream = this.modelProvider.createMessageStream(
+                this.messages,
+                this.model,
+                this.tools,
+                8192,
+              );
               await this.processStream(continueStream);
               return; // Exit early since we've handled the reminder
             }
@@ -1025,13 +1048,12 @@ export class MCPClient {
         await this.autoSummarize();
       }
 
-      const stream = await this.anthropicClient.messages.create({
-        messages: this.messages,
-        model: this.model,
-        max_tokens: 8192,
-        tools: this.tools,
-        stream: true,
-      });
+      const stream = this.modelProvider.createMessageStream(
+        this.messages,
+        this.model,
+        this.tools,
+        8192,
+      );
       await this.processStream(stream);
 
       return this.messages;

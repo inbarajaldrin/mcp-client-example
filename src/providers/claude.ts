@@ -1,4 +1,16 @@
+import { Anthropic } from '@anthropic-ai/sdk';
+import { Tool as AnthropicTool } from '@anthropic-ai/sdk/resources/index.mjs';
+import { Stream } from '@anthropic-ai/sdk/streaming.mjs';
 import { encoding_for_model, get_encoding } from 'tiktoken';
+import type {
+  ModelProvider,
+  TokenCounter,
+  Tool,
+  Message,
+  TokenUsage,
+  SummarizationConfig,
+  MessageStreamEvent,
+} from '../model-provider.js';
 
 // Claude model context window limits (in tokens)
 const CLAUDE_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
@@ -12,20 +24,8 @@ const CLAUDE_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'claude-3-haiku-20240307': 200000,
 };
 
-export interface TokenUsage {
-  current: number;
-  limit: number;
-  percentage: number;
-  suggestion: 'continue' | 'warn' | 'break';
-}
-
-export interface SummarizationConfig {
-  threshold: number; // Percentage (0-100) at which to trigger summarization
-  recentMessagesToKeep: number; // Number of recent messages to preserve
-  enabled: boolean; // Whether auto-summarization is enabled
-}
-
-export class TokenCounter {
+// Claude Token Counter Implementation
+export class ClaudeTokenCounter implements TokenCounter {
   private encoder: any;
   private maxTokens: number;
   private modelName: string;
@@ -116,14 +116,6 @@ export class TokenCounter {
     return usage.percentage >= this.config.threshold;
   }
 
-  getConfig(): SummarizationConfig {
-    return { ...this.config };
-  }
-
-  updateConfig(config: Partial<SummarizationConfig>): void {
-    this.config = { ...this.config, ...config };
-  }
-
   getContextWindow(): number {
     return this.maxTokens;
   }
@@ -139,5 +131,110 @@ export class TokenCounter {
       CLAUDE_MODEL_CONTEXT_WINDOWS['claude-haiku-4-5-20251001'] ||
       200000;
   }
+
+  getConfig(): SummarizationConfig {
+    return { ...this.config };
+  }
+
+  updateConfig(config: Partial<SummarizationConfig>): void {
+    this.config = { ...this.config, ...config };
+  }
 }
+
+// Claude Provider Implementation
+export class ClaudeProvider implements ModelProvider {
+  private anthropicClient: Anthropic;
+
+  constructor() {
+    this.anthropicClient = new Anthropic({
+      apiKey: process.env.ANTHROPIC_API_KEY,
+    });
+  }
+
+  getProviderName(): string {
+    return 'claude';
+  }
+
+  getDefaultModel(): string {
+    return 'claude-haiku-4-5-20251001';
+  }
+
+  getContextWindow(model: string): number {
+    return (
+      CLAUDE_MODEL_CONTEXT_WINDOWS[model] ||
+      CLAUDE_MODEL_CONTEXT_WINDOWS['claude-haiku-4-5-20251001'] ||
+      200000
+    );
+  }
+
+  getToolType(): any {
+    // Return a dummy value - this method is for type compatibility only
+    // The actual Tool type is handled at compile time
+    return undefined;
+  }
+
+  createTokenCounter(
+    model: string,
+    config?: Partial<SummarizationConfig>,
+  ): TokenCounter {
+    return new ClaudeTokenCounter(model, config);
+  }
+
+  async *createMessageStream(
+    messages: Message[],
+    model: string,
+    tools: Tool[],
+    maxTokens: number,
+  ): AsyncIterable<MessageStreamEvent> {
+    // Convert generic Tool[] to Anthropic Tool[]
+    const anthropicTools: AnthropicTool[] = tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.input_schema,
+    }));
+
+    // Convert generic Message[] to Anthropic format
+    const anthropicMessages = messages.map((msg) => ({
+      role: msg.role as 'user' | 'assistant',
+      content: msg.content,
+    }));
+
+    const stream = await this.anthropicClient.messages.create({
+      messages: anthropicMessages,
+      model: model,
+      max_tokens: maxTokens,
+      tools: anthropicTools,
+      stream: true,
+    });
+
+    // Yield events from Anthropic stream
+    for await (const chunk of stream) {
+      yield chunk as MessageStreamEvent;
+    }
+  }
+
+  // Helper method to create a non-streaming message (for summarization)
+  async createMessage(
+    messages: Message[],
+    model: string,
+    maxTokens: number,
+  ): Promise<{ content: Array<{ type: string; text: string }> }> {
+    const anthropicMessages = messages.map((msg) => ({
+      role: msg.role as 'user' | 'assistant',
+      content: msg.content,
+    }));
+
+    const response = await this.anthropicClient.messages.create({
+      messages: anthropicMessages,
+      model: model,
+      max_tokens: maxTokens,
+      stream: false,
+    });
+
+    return response as any;
+  }
+}
+
+// Export Claude-specific Tool type for backward compatibility
+export type { AnthropicTool as Tool };
 

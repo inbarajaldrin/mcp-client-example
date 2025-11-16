@@ -8,7 +8,7 @@ export type LoggerOptions = {
 
 export const consoleStyles = {
   prompt: chalk.green('You: '),
-  assistant: chalk.blue('Claude: '),
+  assistant: chalk.blue('Assistant: '),
   tool: {
     name: chalk.cyan.bold,
     args: chalk.yellow,

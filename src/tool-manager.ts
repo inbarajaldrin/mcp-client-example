@@ -1,4 +1,4 @@
-import { Tool } from '@anthropic-ai/sdk/resources/index.mjs';
+import type { Tool } from './model-provider.js';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';

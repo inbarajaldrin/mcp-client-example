@@ -67,7 +67,7 @@ export class MCPClientCLI {
   async start() {
     try {
       this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
-      this.logger.log('🤖 Interactive Claude CLI\n', { type: 'info' });
+      this.logger.log('🤖 Interactive CLI\n', { type: 'info' });
       this.logger.log(`Type your queries or "${EXIT_COMMAND}" to exit\n`, {
         type: 'info',
       });
