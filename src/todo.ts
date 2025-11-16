@@ -29,6 +29,7 @@ type ServerConnection = {
   client: Client;
   transport: StdioClientTransport;
   tools: Tool[];
+  prompts: any[]; // Prompts are required to match MCPClient's ServerConnection
 };
 
 export class TodoManager {
@@ -126,6 +127,7 @@ export class TodoManager {
       client,
       transport,
       tools: [],
+      prompts: [],
     };
 
     // Load tools from the server

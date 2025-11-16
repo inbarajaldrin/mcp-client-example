@@ -7,6 +7,10 @@ import {
 import {
   ListToolsResultSchema,
   CallToolResultSchema,
+  ListPromptsResultSchema,
+  GetPromptResultSchema,
+  type Prompt,
+  type GetPromptResult,
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import chalk from 'chalk';
@@ -16,6 +20,7 @@ import { consoleStyles, Logger, LoggerOptions } from './logger.js';
 import { TokenCounter, SummarizationConfig } from './token-counter.js';
 import { TodoManager } from './todo.js';
 import { ToolManager } from './tool-manager.js';
+import { PromptManager } from './prompt-manager.js';
 
 interface Message {
   role: 'user' | 'assistant';
@@ -38,6 +43,7 @@ type ServerConnection = {
   client: Client;
   transport: StdioClientTransport;
   tools: Tool[];
+  prompts: Prompt[];
 };
 
 export class MCPClient {
@@ -53,6 +59,7 @@ export class MCPClient {
   private todoManager: TodoManager;
   private todoModeInitialized: boolean = false;
   private toolManager: ToolManager;
+  private promptManager: PromptManager;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -82,6 +89,9 @@ export class MCPClient {
     
     // Initialize tool manager
     this.toolManager = new ToolManager(this.logger);
+    
+    // Initialize prompt manager
+    this.promptManager = new PromptManager(this.logger);
   }
 
   // Constructor for multiple named servers
@@ -103,6 +113,7 @@ export class MCPClient {
     client.tokenCounter = new TokenCounter(client.model, options?.summarizationConfig);
     client.todoManager = new TodoManager(client.logger);
     client.toolManager = new ToolManager(client.logger);
+    client.promptManager = new PromptManager(client.logger);
     return client;
   }
 
@@ -132,6 +143,7 @@ export class MCPClient {
           client,
           transport,
           tools: [],
+          prompts: [],
         };
 
         this.servers.set(serverConfig.name, connection);
@@ -173,6 +185,9 @@ export class MCPClient {
 
     // Initialize tools from all successfully connected servers
     await this.initMCPTools();
+    
+    // Initialize prompts from all successfully connected servers
+    await this.initMCPPrompts();
     
     this.logger.log(
       `Connected to ${this.servers.size} server(s): ${Array.from(this.servers.keys()).join(', ')}\n`,
@@ -240,6 +255,51 @@ export class MCPClient {
       `Loaded ${enabledTools.length} enabled tool(s) from ${allTools.length} total tool(s) across ${this.servers.size} server(s)\n`,
       { type: 'info' },
     );
+  }
+
+  private async initMCPPrompts() {
+    let totalPrompts = 0;
+    const allPrompts: Array<{ server: string; prompt: Prompt }> = [];
+
+    // Load prompts from each server
+    for (const [serverName, connection] of this.servers.entries()) {
+      try {
+        const promptsResults = await connection.client.request(
+          { method: 'prompts/list' },
+          ListPromptsResultSchema,
+        );
+
+        connection.prompts = promptsResults.prompts || [];
+        totalPrompts += connection.prompts.length;
+        
+        // Collect prompts for state management
+        for (const prompt of connection.prompts) {
+          allPrompts.push({ server: serverName, prompt });
+        }
+      } catch (error) {
+        // Some servers may not support prompts, so we handle errors gracefully
+        connection.prompts = [];
+        // Only log if it's not a method not found error
+        if (!(error instanceof Error && error.message.includes('not found'))) {
+          this.logger.log(
+            `Failed to load prompts from server "${serverName}": ${error}\n`,
+            { type: 'warning' },
+          );
+        }
+      }
+    }
+
+    // Update state for new prompts (set them to enabled by default)
+    if (allPrompts.length > 0) {
+      this.promptManager.updateStateForNewPrompts(allPrompts);
+    }
+
+    if (totalPrompts > 0) {
+      this.logger.log(
+        `Loaded ${totalPrompts} prompt(s) across ${this.servers.size} server(s)\n`,
+        { type: 'info' },
+      );
+    }
   }
 
   private formatToolCall(toolName: string, args: any): string {
@@ -389,6 +449,70 @@ export class MCPClient {
    */
   getToolManager(): ToolManager {
     return this.toolManager;
+  }
+
+  /**
+   * Get the prompt manager instance
+   */
+  getPromptManager(): PromptManager {
+    return this.promptManager;
+  }
+
+  /**
+   * List all available prompts from all servers or a specific server
+   */
+  listPrompts(serverName?: string): Array<{ server: string; prompt: Prompt }> {
+    const allPrompts: Array<{ server: string; prompt: Prompt }> = [];
+
+    if (serverName) {
+      const connection = this.servers.get(serverName);
+      if (connection) {
+        for (const prompt of connection.prompts) {
+          allPrompts.push({ server: serverName, prompt });
+        }
+      }
+    } else {
+      for (const [name, connection] of this.servers.entries()) {
+        for (const prompt of connection.prompts) {
+          allPrompts.push({ server: name, prompt });
+        }
+      }
+    }
+
+    return allPrompts;
+  }
+
+  /**
+   * Get a prompt from a server and return its messages
+   */
+  async getPrompt(
+    serverName: string,
+    promptName: string,
+    promptArguments?: Record<string, string>,
+  ): Promise<GetPromptResult> {
+    const connection = this.servers.get(serverName);
+    if (!connection) {
+      throw new Error(`Server "${serverName}" not found`);
+    }
+
+    try {
+      const result = await connection.client.request(
+        {
+          method: 'prompts/get',
+          params: {
+            name: promptName,
+            arguments: promptArguments || {},
+          },
+        },
+        GetPromptResultSchema,
+      );
+
+      return result;
+    } catch (error) {
+      throw new Error(
+        `Failed to get prompt "${promptName}" from server "${serverName}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   /**

@@ -325,6 +325,41 @@ Tool states are stored in `~/.mcp-client/config.json`:
 
 **Note:** Tool states persist across all launch modes. If you disable tools using `--all` mode, those same tools will be disabled when you launch with `--servers` or single server mode.
 
+### Prompt Management
+
+Selectively enable or disable prompts from all connected servers and add enabled prompts to your conversation context.
+
+**Commands:**
+- `/add-prompt` - Add enabled prompts to conversation context (interactive selection)
+- `/prompts-list` - List all prompts with their enabled/disabled status
+- `/prompts-manager` - Interactive prompt enable/disable selection (similar to `/tools`)
+
+**Features:**
+- Persistent state saved to `~/.mcp-client/config.json`
+- `/add-prompt` only shows enabled prompts
+- Interactive argument collection for prompts with arguments
+- Selected prompts are added to conversation context (not sent automatically)
+
+**Usage:**
+
+```bash
+# List all prompts
+You: /prompts-list
+
+# Add enabled prompts to context
+You: /add-prompt
+> 1,3,5        # Select prompts (enter arguments if prompted)
+
+# Manage prompt states (same interface as tools)
+You: /prompts-manager
+> 1,3,5-8      # Toggle prompts
+> S1            # Toggle all in server 1
+> a/n           # Enable/disable all
+> s/q           # Save/cancel
+```
+
+**Note:** Prompt states persist across all launch modes, similar to tool states.
+
 ## How to develop
 
 1. Clone the repository
