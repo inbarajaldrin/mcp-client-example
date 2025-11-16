@@ -231,10 +231,10 @@ You: Now assemble 3 line_blue objects
 Selectively enable or disable tools from all connected servers with persistent state across sessions.
 
 **Commands:**
-- `/tools` or `/tools-select` - Interactive tool selection mode
+- `/tools` or `/tools-list` - List currently enabled tools
+- `/tools-manager` or `/tools-select` - Interactive tool enable/disable selection
 - `/tools-enable-all` - Enable all tools from all servers
 - `/tools-disable-all` - Disable all tools from all servers
-- `/tools-list` - List all tools with their enabled/disabled status
 - `/tools-enable-server <server-name>` - Enable all tools from a specific server
 - `/tools-disable-server <server-name>` - Disable all tools from a specific server
 
@@ -245,9 +245,9 @@ Selectively enable or disable tools from all connected servers with persistent s
 - **Interactive selection**: Visual interface to toggle individual tools or entire servers
 - **Real-time updates**: Display refreshes immediately after toggling tools
 
-**Interactive Tool Selection:**
+**Interactive Tool Manager:**
 
-When you run `/tools`, you'll see an interactive interface:
+When you run `/tools-manager`, you'll see an interactive interface:
 
 ```
 🔧 Tool Selection
@@ -280,7 +280,7 @@ Commands:
 
 ```bash
 # List all tools and their status
-You: /tools-list
+You: /tools or /tools-list
 
 # Enable all tools
 You: /tools-enable-all
@@ -295,12 +295,13 @@ You: /tools-enable-server isaac-sim
 You: /tools-disable-server ros-mcp-server
 
 # Interactive selection mode
-You: /tools
+You: /tools-manager
 > 1,3,5-8        # Toggle tools 1, 3, and 5 through 8
 > S1             # Toggle all tools in server 1
 > a              # Enable all tools
 > n              # Disable all tools
 > s              # Save and exit
+> q              # Cancel and revert changes
 ```
 
 **Configuration:**

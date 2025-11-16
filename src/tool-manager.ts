@@ -143,19 +143,23 @@ export class ToolManager {
   /**
    * Toggle a specific tool
    */
-  toggleTool(toolName: string): boolean {
+  toggleTool(toolName: string, saveImmediately: boolean = true): boolean {
     const newState = !this.isToolEnabled(toolName);
     this.toolStates[toolName] = newState;
-    this.saveState();
+    if (saveImmediately) {
+      this.saveState();
+    }
     return newState;
   }
 
   /**
    * Set the enabled state of a specific tool
    */
-  setToolEnabled(toolName: string, enabled: boolean): void {
+  setToolEnabled(toolName: string, enabled: boolean, saveImmediately: boolean = true): void {
     this.toolStates[toolName] = enabled;
-    this.saveState();
+    if (saveImmediately) {
+      this.saveState();
+    }
   }
 
   /**
@@ -193,6 +197,14 @@ export class ToolManager {
    */
   getEnabledTools(tools: Tool[]): Tool[] {
     return tools.filter((tool) => this.isToolEnabled(tool.name));
+  }
+
+  /**
+   * Restore tool states from a saved state (for canceling changes)
+   */
+  restoreState(states: Record<string, boolean>): void {
+    this.toolStates = { ...states };
+    // Don't save - this is for reverting changes
   }
 }
 

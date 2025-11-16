@@ -79,10 +79,10 @@ export class MCPClientCLI {
         `  /test-mode off - Disable test mode\n` +
         `  /todo-on - Enable todo mode (agent will track tasks)\n` +
         `  /todo-off - Disable todo mode\n` +
-        `  /tools or /tools-select - Interactive tool selection mode\n` +
+        `  /tools or /tools-list - List currently enabled tools\n` +
+        `  /tools-manager or /tools-select - Interactive tool enable/disable selection\n` +
         `  /tools-enable-all - Enable all tools from all servers\n` +
         `  /tools-disable-all - Disable all tools from all servers\n` +
-        `  /tools-list - List all tools with their enabled/disabled status\n` +
         `  /tools-enable-server <server-name> - Enable all tools from a server\n` +
         `  /tools-disable-server <server-name> - Disable all tools from a server\n` +
         `  /add-prompt - Add enabled prompts to conversation context\n` +
@@ -310,12 +310,24 @@ export class MCPClientCLI {
           continue;
         }
 
-        if (query.toLowerCase() === '/tools' || query.toLowerCase() === '/tools-select') {
+        if (query.toLowerCase() === '/tools') {
+          try {
+            await this.displayToolsList();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to list tools: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/tools-manager' || query.toLowerCase() === '/tools-select') {
           try {
             await this.interactiveToolSelection();
           } catch (error) {
             this.logger.log(
-              `\nFailed to open tool selection: ${error}\n`,
+              `\nFailed to open tool manager: ${error}\n`,
               { type: 'error' },
             );
           }
@@ -372,7 +384,6 @@ export class MCPClientCLI {
 
   private async displayToolsList(): Promise<void> {
     const toolManager = this.client.getToolManager();
-    const toolStates = toolManager.getToolStates();
     
     // Get all tools from all servers
     const allTools: Array<{ name: string; server: string; enabled: boolean }> = [];
@@ -402,30 +413,37 @@ export class MCPClientCLI {
       }
     }
     
+    // Filter to only enabled tools
+    const enabledTools = allTools.filter(t => t.enabled);
+    
+    if (enabledTools.length === 0) {
+      this.logger.log('\n📋 Enabled Tools:\n', { type: 'info' });
+      this.logger.log('  No enabled tools.\n', { type: 'warning' });
+      this.logger.log('  Use /tools-manager to enable tools.\n', { type: 'info' });
+      return;
+    }
+    
     // Group by server
-    const toolsByServer = new Map<string, Array<{ name: string; enabled: boolean }>>();
-    for (const tool of allTools) {
+    const toolsByServer = new Map<string, Array<{ name: string }>>();
+    for (const tool of enabledTools) {
       if (!toolsByServer.has(tool.server)) {
         toolsByServer.set(tool.server, []);
       }
-      toolsByServer.get(tool.server)!.push({ name: tool.name, enabled: tool.enabled });
+      toolsByServer.get(tool.server)!.push({ name: tool.name });
     }
     
-    this.logger.log('\n📋 Tools Status:\n', { type: 'info' });
+    this.logger.log('\n📋 Enabled Tools:\n', { type: 'info' });
     
     for (const [serverName, tools] of toolsByServer.entries()) {
-      const enabledCount = tools.filter(t => t.enabled).length;
       this.logger.log(
-        `\n[${serverName}] (${enabledCount}/${tools.length} enabled):\n`,
+        `\n[${serverName}] (${tools.length} enabled):\n`,
         { type: 'info' },
       );
       
       for (const tool of tools) {
-        const status = tool.enabled ? '✓' : '✗';
-        const statusColor = tool.enabled ? 'green' : 'red';
         this.logger.log(
-          `  ${status} ${tool.name}\n`,
-          { type: tool.enabled ? 'info' : 'warning' },
+          `  ✓ ${tool.name}\n`,
+          { type: 'info' },
         );
       }
     }
@@ -439,6 +457,9 @@ export class MCPClientCLI {
     }
     
     const toolManager = this.client.getToolManager();
+    
+    // Save initial state to revert to on cancel
+    const initialState = { ...toolManager.getToolStates() };
     
     // Collect all tools from all servers
     const allTools: Array<{ name: string; server: string; toolName: string; enabled: boolean }> = [];
@@ -543,6 +564,8 @@ export class MCPClientCLI {
       const selection = (await this.rl.question('> ')).trim().toLowerCase();
       
       if (selection === 's' || selection === 'save') {
+        // Save all changes to disk
+        toolManager.saveState();
         // Reload tools to apply changes
         await (this.client as any).initMCPTools();
         this.logger.log('\n✓ Changes saved\n', { type: 'info' });
@@ -550,35 +573,25 @@ export class MCPClientCLI {
       }
       
       if (selection === 'q' || selection === 'quit') {
-        // Reload original state
-        toolManager.loadState();
-        this.logger.log('\n✗ Changes cancelled\n', { type: 'warning' });
+        // Restore original state (revert all changes)
+        toolManager.restoreState(initialState);
+        this.logger.log('\n✗ Changes cancelled - reverted to original state\n', { type: 'warning' });
         break;
       }
       
       if (selection === 'a' || selection === 'all') {
-        const toolObjects = allTools.map(t => ({
-          name: t.toolName,
-          description: `[${t.server}] ${t.name}`,
-          input_schema: {},
-        }));
-        toolManager.enableAllTools(toolObjects as any);
-        // Update all enabled statuses
+        // Enable all tools (don't save yet)
         for (const tool of allTools) {
+          toolManager.setToolEnabled(tool.toolName, true, false);
           tool.enabled = true;
         }
         continue;
       }
       
       if (selection === 'n' || selection === 'none') {
-        const toolObjects = allTools.map(t => ({
-          name: t.toolName,
-          description: `[${t.server}] ${t.name}`,
-          input_schema: {},
-        }));
-        toolManager.disableAllTools(toolObjects as any);
-        // Update all enabled statuses
+        // Disable all tools (don't save yet)
         for (const tool of allTools) {
+          toolManager.setToolEnabled(tool.toolName, false, false);
           tool.enabled = false;
         }
         continue;
@@ -593,7 +606,7 @@ export class MCPClientCLI {
           const newState = !allEnabled;
           
           for (const tool of serverTools) {
-            toolManager.setToolEnabled(tool.toolName, newState);
+            toolManager.setToolEnabled(tool.toolName, newState, false);
             // Update the enabled status in allTools array
             tool.enabled = newState;
           }
@@ -628,7 +641,7 @@ export class MCPClientCLI {
         for (const idx of indices) {
           if (indexToTool.has(idx)) {
             const tool = indexToTool.get(idx)!;
-            toolManager.toggleTool(tool.toolName);
+            toolManager.toggleTool(tool.toolName, false);
             // Update the enabled status in allTools array
             tool.enabled = toolManager.isToolEnabled(tool.toolName);
             toggledCount++;
