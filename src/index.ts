@@ -17,6 +17,7 @@ import { TodoManager } from './todo.js';
 import { ToolManager } from './tool-manager.js';
 import { PromptManager } from './prompt-manager.js';
 import { ChatHistoryManager } from './chat-history-manager.js';
+import { AttachmentManager } from './attachment-manager.js';
 import type {
   ModelProvider,
   TokenCounter,
@@ -65,6 +66,7 @@ export class MCPClient {
   private toolManager: ToolManager;
   private promptManager: PromptManager;
   private chatHistoryManager: ChatHistoryManager;
+  private attachmentManager: AttachmentManager;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -104,6 +106,9 @@ export class MCPClient {
     
     // Initialize chat history manager
     this.chatHistoryManager = new ChatHistoryManager(this.logger);
+    
+    // Initialize attachment manager
+    this.attachmentManager = new AttachmentManager(this.logger);
   }
 
   // Constructor for multiple named servers
@@ -131,6 +136,7 @@ export class MCPClient {
     client.toolManager = new ToolManager(client.logger);
     client.promptManager = new PromptManager(client.logger);
     client.chatHistoryManager = new ChatHistoryManager(client.logger);
+    client.attachmentManager = new AttachmentManager(client.logger);
     return client;
   }
 
@@ -1179,7 +1185,7 @@ export class MCPClient {
     }
   }
 
-  async processQuery(query: string, isSystemPrompt: boolean = false) {
+  async processQuery(query: string, isSystemPrompt: boolean = false, attachments?: Array<{ path: string; fileName: string; ext: string; mediaType: string }>) {
     try {
       // Check if we need to summarize before adding new message
       if (this.shouldSummarize()) {
@@ -1227,9 +1233,26 @@ export class MCPClient {
         this.todosWereSkipped = false; // Reset after first message
       }
 
-      // Add user message to history
-      const userMessage: Message = { role: 'user', content: query };
+      // Handle attachments if provided
+      let userMessage: Message;
+      if (attachments && attachments.length > 0) {
+        // Create content blocks from attachments and query text
+        const contentBlocks = this.attachmentManager.createContentBlocks(attachments, query);
+        
+        // Create message with content_blocks for Claude API
+        userMessage = {
+          role: 'user',
+          content: query, // Keep text content for compatibility
+          content_blocks: contentBlocks, // Add content blocks for Claude
+        };
+      } else {
+        // Standard text message
+        userMessage = { role: 'user', content: query };
+      }
+      
       this.messages.push(userMessage);
+      // Token counting for messages with attachments is approximate
+      // Claude API will provide accurate counts during streaming
       this.currentTokenCount += this.tokenCounter.countMessageTokens(userMessage);
 
       // Check again after adding message
@@ -1262,6 +1285,26 @@ export class MCPClient {
 
       // Process the stream and collect final assistant message
       await this.processToolUseStream(stream);
+
+      // Always update token count using official API after stream completes
+      // This ensures accurate counts including images/attachments
+      if (this.modelProvider.getProviderName() === 'claude') {
+        const provider = this.modelProvider as any;
+        try {
+          const exactCount = await provider.countTokensOfficial(
+            this.messages,
+            this.model,
+            this.tools,
+          );
+          this.currentTokenCount = exactCount;
+        } catch (error) {
+          // If token counting fails, log warning but continue
+          this.logger.log(
+            `\n⚠️  Failed to get exact token count: ${error}\n`,
+            { type: 'warning' },
+          );
+        }
+      }
 
       // Log token usage after agent response
       const usage = this.tokenCounter.getUsage(this.currentTokenCount);

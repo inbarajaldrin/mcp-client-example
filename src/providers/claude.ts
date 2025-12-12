@@ -378,6 +378,14 @@ export class ClaudeProvider implements ModelProvider {
         };
       }
 
+      // Handle user messages with content_blocks (for attachments)
+      if (msg.role === 'user' && msg.content_blocks && Array.isArray(msg.content_blocks)) {
+        return {
+          role: 'user' as const,
+          content: msg.content_blocks,
+        };
+      }
+
       // Handle assistant messages with content_blocks (preserves tool_use blocks)
       if (msg.role === 'assistant' && msg.content_blocks && Array.isArray(msg.content_blocks)) {
         return {
@@ -443,7 +451,7 @@ export class ClaudeProvider implements ModelProvider {
     tools: Tool[],
     system?: string,
   ): Promise<number> {
-    // Convert messages to Anthropic format
+    // Convert messages to Anthropic format (same as convertToAnthropicMessages)
     const anthropicMessages = messages
       .filter((msg) => {
         if (msg.role === 'assistant' && msg.tool_calls && !msg.content) {
@@ -451,10 +459,37 @@ export class ClaudeProvider implements ModelProvider {
         }
         return true;
       })
-      .map((msg) => ({
-        role: (msg.role === 'tool' ? 'user' : msg.role) as 'user' | 'assistant',
-        content: msg.content || '',
-      }));
+      .map((msg) => {
+        // Handle messages with tool results
+        if (msg.tool_results && msg.tool_results.length > 0) {
+          return {
+            role: 'user' as const,
+            content: msg.tool_results,
+          };
+        }
+
+        // Handle user messages with content_blocks (for attachments)
+        if (msg.role === 'user' && msg.content_blocks && Array.isArray(msg.content_blocks)) {
+          return {
+            role: 'user' as const,
+            content: msg.content_blocks,
+          };
+        }
+
+        // Handle assistant messages with content_blocks (preserves tool_use blocks)
+        if (msg.role === 'assistant' && msg.content_blocks && Array.isArray(msg.content_blocks)) {
+          return {
+            role: 'assistant' as const,
+            content: msg.content_blocks,
+          };
+        }
+
+        // Standard text messages
+        return {
+          role: (msg.role === 'tool' ? 'user' : msg.role) as 'user' | 'assistant',
+          content: msg.content || '',
+        };
+      });
 
     // Convert tools to Anthropic format
     const anthropicTools: AnthropicTool[] = tools.map((tool) => ({

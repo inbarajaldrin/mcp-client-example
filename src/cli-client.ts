@@ -4,6 +4,7 @@ import readline from 'readline/promises';
 import { MCPClient } from './index.js';
 import { consoleStyles, Logger } from './logger.js';
 import type { ModelProvider } from './model-provider.js';
+import { AttachmentManager, type AttachmentInfo, type ContentBlock } from './attachment-manager.js';
 
 const EXIT_COMMAND = 'exit';
 
@@ -12,6 +13,8 @@ export class MCPClientCLI {
   private client: MCPClient;
   private logger: Logger;
   private isShuttingDown = false;
+  private attachmentManager: AttachmentManager;
+  private pendingAttachments: AttachmentInfo[] = [];
 
   constructor(
     serverConfig: StdioServerParameters | Array<{ name: string; config: StdioServerParameters }>,
@@ -31,6 +34,7 @@ export class MCPClientCLI {
       });
     }
     this.logger = new Logger({ mode: 'verbose' });
+    this.attachmentManager = new AttachmentManager(this.logger);
     
     // Set up signal handlers for graceful shutdown
     this.setupSignalHandlers();
@@ -109,6 +113,11 @@ export class MCPClientCLI {
         `  /add-prompt - Add enabled prompts to conversation context\n` +
         `  /prompts or /prompts-list - List currently enabled prompts\n` +
         `  /prompts-manager or /prompts-select - Interactive prompt enable/disable selection\n` +
+        `  /attachment-upload - Upload files by drag-and-drop\n` +
+        `  /attachment-list - List available attachments\n` +
+        `  /attachment-insert - Select attachments to send to agent\n` +
+        `  /attachment-rename - Rename an attachment\n` +
+        `  /attachment-clear - Delete one or more attachments\n` +
         `  /chat-list - List recent chat sessions\n` +
         `  /chat-search <keyword> - Search chats by keyword\n` +
         `  /chat-restore - Restore a past chat as context\n` +
@@ -606,13 +615,77 @@ export class MCPClientCLI {
           continue;
         }
 
+        if (query.toLowerCase() === '/attachment-upload') {
+          try {
+            await this.handleAttachmentCommand();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to handle attachment: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/attachment-list') {
+          try {
+            await this.handleAttachmentListCommand();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to list attachments: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/attachment-insert') {
+          try {
+            await this.handleAttachmentSelectCommand();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to select attachments: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/attachment-rename') {
+          try {
+            await this.handleAttachmentRenameCommand();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to rename attachment: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/attachment-clear') {
+          try {
+            await this.handleAttachmentClearCommand();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to clear attachments: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
         // Log user message to history
         this.client.getChatHistoryManager().addUserMessage(query);
 
         // Get message count before processing to find the new assistant message
         const messagesBefore = (this.client as any).messages.length;
         
-        await this.client.processQuery(query);
+        // Process query with attachments if any are pending
+        await this.client.processQuery(query, false, this.pendingAttachments.length > 0 ? this.pendingAttachments : undefined);
+        
+        // Clear pending attachments after they've been used
+        this.pendingAttachments = [];
         
         // Extract assistant response from messages array
         const messages = (this.client as any).messages;
@@ -1758,6 +1831,354 @@ export class MCPClientCLI {
       this.logger.log(`\n✓ Chat ${selectedChat.sessionId} deleted successfully.\n`, { type: 'success' });
     } else {
       this.logger.log(`\n✗ Failed to delete chat ${selectedChat.sessionId}.\n`, { type: 'error' });
+    }
+  }
+
+  private async handleAttachmentCommand(): Promise<void> {
+    if (!this.rl) {
+      throw new Error('Readline interface not initialized');
+    }
+
+    this.logger.log('\n📎 Attachment Mode\n', { type: 'info' });
+    this.logger.log('Drag and drop files into the terminal, or type file paths (one per line).\n', { type: 'info' });
+    this.logger.log('Type "done" when finished, or "cancel" to abort.\n', { type: 'info' });
+
+    const attachments: AttachmentInfo[] = [];
+
+    while (true) {
+      const input = (await this.rl.question('> ')).trim();
+
+      if (input.toLowerCase() === 'done' || input.toLowerCase() === 'd') {
+        if (attachments.length === 0) {
+          this.logger.log('No files attached. Cancelling.\n', { type: 'warning' });
+          return;
+        }
+        break;
+      }
+
+      if (input.toLowerCase() === 'cancel' || input.toLowerCase() === 'c') {
+        this.logger.log('Attachment cancelled.\n', { type: 'warning' });
+        return;
+      }
+
+      if (!input) {
+        continue;
+      }
+
+      // Handle file path (could be from drag-and-drop or typed)
+      // Remove quotes if present (some terminals add them)
+      const filePath = input.replace(/^["']|["']$/g, '');
+
+      const attachment = this.attachmentManager.copyFileToAttachments(filePath);
+      if (attachment) {
+        attachments.push(attachment);
+        this.logger.log(
+          `  (${attachments.length} file${attachments.length > 1 ? 's' : ''} attached)\n`,
+          { type: 'info' },
+        );
+      }
+    }
+
+    // Store attachments to be used with the next user message
+    this.pendingAttachments = attachments;
+    this.logger.log(
+      `\n✓ ${attachments.length} file${attachments.length > 1 ? 's' : ''} attached. They will be included with your next message.\n`,
+      { type: 'success' },
+    );
+    this.logger.log('You can now type your question or prompt.\n', { type: 'info' });
+  }
+
+  private async handleAttachmentListCommand(): Promise<void> {
+    const attachments = this.attachmentManager.listAttachments();
+
+    if (attachments.length === 0) {
+      this.logger.log('\n📎 No attachments found.\n', { type: 'info' });
+      this.logger.log('Use /attachment-insert to add attachments.\n', { type: 'info' });
+      return;
+    }
+
+    this.logger.log(`\n📎 Available Attachments (${attachments.length}):\n`, { type: 'info' });
+
+    for (let i = 0; i < attachments.length; i++) {
+      const att = attachments[i];
+      const fs = await import('fs');
+      const stats = fs.statSync(att.path);
+      const sizeKB = (stats.size / 1024).toFixed(2);
+      const date = new Date(stats.mtime).toLocaleString();
+      
+      this.logger.log(
+        `  ${i + 1}. ${att.fileName}\n`,
+        { type: 'info' },
+      );
+      this.logger.log(
+        `     Type: ${att.mediaType} | Size: ${sizeKB} KB | Modified: ${date}\n`,
+        { type: 'info' },
+      );
+    }
+    this.logger.log('\n');
+  }
+
+  private async handleAttachmentSelectCommand(): Promise<void> {
+    if (!this.rl) {
+      throw new Error('Readline interface not initialized');
+    }
+
+    const attachments = this.attachmentManager.listAttachments();
+
+    if (attachments.length === 0) {
+      this.logger.log('\n📎 No attachments available to select.\n', { type: 'warning' });
+      this.logger.log('Use /attachment-insert to add attachments.\n', { type: 'info' });
+      return;
+    }
+
+    this.logger.log('\n📎 Select Attachments:\n', { type: 'info' });
+    this.logger.log('Enter numbers separated by commas or ranges (e.g., 1,3,5-8) to select attachments.\n', { type: 'info' });
+
+    // Display attachments with indices
+    for (let i = 0; i < attachments.length; i++) {
+      const att = attachments[i];
+      const fs = await import('fs');
+      const stats = fs.statSync(att.path);
+      const sizeKB = (stats.size / 1024).toFixed(2);
+      
+      this.logger.log(
+        `  ${i + 1}. ${att.fileName} (${att.mediaType}, ${sizeKB} KB)\n`,
+        { type: 'info' },
+      );
+    }
+
+    this.logger.log('\nEnter selection (or "q" to cancel):\n', { type: 'info' });
+    const selection = (await this.rl.question('> ')).trim();
+
+    if (selection.toLowerCase() === 'q' || selection.toLowerCase() === 'quit') {
+      this.logger.log('\nSelection cancelled.\n', { type: 'warning' });
+      return;
+    }
+
+    // Parse selection
+    const parts = selection.split(',').map(p => p.trim());
+    const selectedIndices: number[] = [];
+
+    for (const part of parts) {
+      if (part.includes('-')) {
+        const [start, end] = part.split('-').map(n => parseInt(n.trim()));
+        if (!isNaN(start) && !isNaN(end)) {
+          for (let i = start; i <= end; i++) {
+            selectedIndices.push(i);
+          }
+        }
+      } else {
+        const num = parseInt(part);
+        if (!isNaN(num)) {
+          selectedIndices.push(num);
+        }
+      }
+    }
+
+    // Remove duplicates and sort
+    const uniqueIndices = [...new Set(selectedIndices)].sort((a, b) => a - b);
+
+    // Validate indices
+    const validIndices = uniqueIndices.filter(idx => idx >= 1 && idx <= attachments.length);
+    
+    if (validIndices.length === 0) {
+      this.logger.log('\n✗ No valid attachments selected.\n', { type: 'error' });
+      return;
+    }
+
+    // Get selected attachments
+    const selectedAttachments = validIndices.map(idx => attachments[idx - 1]);
+
+    // Store as pending attachments
+    this.pendingAttachments = selectedAttachments;
+
+    this.logger.log(
+      `\n✓ ${selectedAttachments.length} attachment(s) selected. They will be included with your next message.\n`,
+      { type: 'success' },
+    );
+    this.logger.log('You can now type your question or prompt.\n', { type: 'info' });
+  }
+
+  private async handleAttachmentRenameCommand(): Promise<void> {
+    if (!this.rl) {
+      throw new Error('Readline interface not initialized');
+    }
+
+    const attachments = this.attachmentManager.listAttachments();
+
+    if (attachments.length === 0) {
+      this.logger.log('\n📎 No attachments available to rename.\n', { type: 'warning' });
+      this.logger.log('Use /attachment-insert to add attachments.\n', { type: 'info' });
+      return;
+    }
+
+    this.logger.log('\n📎 Select Attachment to Rename:\n', { type: 'info' });
+
+    for (let i = 0; i < attachments.length; i++) {
+      const att = attachments[i];
+      this.logger.log(
+        `  ${i + 1}. ${att.fileName}\n`,
+        { type: 'info' },
+      );
+    }
+
+    const selection = (await this.rl.question('\nEnter number (or "q" to cancel): ')).trim();
+
+    if (selection.toLowerCase() === 'q' || selection.toLowerCase() === 'quit') {
+      this.logger.log('\nCancelled.\n', { type: 'info' });
+      return;
+    }
+
+    const index = parseInt(selection) - 1;
+    if (isNaN(index) || index < 0 || index >= attachments.length) {
+      this.logger.log('\nInvalid selection.\n', { type: 'error' });
+      return;
+    }
+
+    const selectedAttachment = attachments[index];
+    this.logger.log(`\nCurrent name: ${selectedAttachment.fileName}\n`, { type: 'info' });
+
+    const newName = (await this.rl.question('Enter new name: ')).trim();
+
+    if (!newName) {
+      this.logger.log('\nName cannot be empty.\n', { type: 'error' });
+      return;
+    }
+
+    // Validate new name (basic validation)
+    if (newName.includes('/') || newName.includes('\\')) {
+      this.logger.log('\nName cannot contain path separators.\n', { type: 'error' });
+      return;
+    }
+
+    const success = this.attachmentManager.renameAttachment(selectedAttachment.fileName, newName);
+
+    if (success) {
+      // If this attachment was in pending attachments, update it
+      const pendingIndex = this.pendingAttachments.findIndex(
+        att => att.fileName === selectedAttachment.fileName
+      );
+      if (pendingIndex !== -1) {
+        const updatedInfo = this.attachmentManager.getAttachmentInfo(newName);
+        if (updatedInfo) {
+          this.pendingAttachments[pendingIndex] = updatedInfo;
+        }
+      }
+    }
+  }
+
+  private async handleAttachmentClearCommand(): Promise<void> {
+    if (!this.rl) {
+      throw new Error('Readline interface not initialized');
+    }
+
+    const attachments = this.attachmentManager.listAttachments();
+
+    if (attachments.length === 0) {
+      this.logger.log('\n📎 No attachments available to delete.\n', { type: 'warning' });
+      return;
+    }
+
+    this.logger.log('\n🗑️  Select Attachments to Delete:\n', { type: 'info' });
+    this.logger.log('Enter numbers separated by commas or ranges (e.g., 1,3,5-8) to select attachments.\n', { type: 'info' });
+    this.logger.log(`  0. Delete ALL attachments (${attachments.length} total)\n`, { type: 'warning' });
+
+    for (let i = 0; i < attachments.length; i++) {
+      const att = attachments[i];
+      const fs = await import('fs');
+      const stats = fs.statSync(att.path);
+      const sizeKB = (stats.size / 1024).toFixed(2);
+      
+      this.logger.log(
+        `  ${i + 1}. ${att.fileName} (${att.mediaType}, ${sizeKB} KB)\n`,
+        { type: 'info' },
+      );
+    }
+
+    const selection = (await this.rl.question('\nEnter selection (or "q" to cancel): ')).trim();
+
+    if (selection.toLowerCase() === 'q' || selection.toLowerCase() === 'quit') {
+      this.logger.log('\nCancelled.\n', { type: 'info' });
+      return;
+    }
+
+    // Handle "delete all" option
+    if (selection === '0') {
+      const confirm = (await this.rl.question(`\n⚠️  Are you sure you want to delete ALL ${attachments.length} attachment(s)? This cannot be undone! (yes/no): `)).trim().toLowerCase();
+      
+      if (confirm !== 'yes' && confirm !== 'y') {
+        this.logger.log('\nCancelled.\n', { type: 'info' });
+        return;
+      }
+
+      const fileNames = attachments.map(att => att.fileName);
+      const result = this.attachmentManager.deleteAttachments(fileNames);
+
+      if (result.deleted.length > 0) {
+        // Remove deleted attachments from pending list
+        this.pendingAttachments = this.pendingAttachments.filter(
+          att => !result.deleted.includes(att.fileName)
+        );
+      }
+      return;
+    }
+
+    // Parse selection
+    const parts = selection.split(',').map(p => p.trim());
+    const selectedIndices: number[] = [];
+
+    for (const part of parts) {
+      if (part.includes('-')) {
+        const [start, end] = part.split('-').map(n => parseInt(n.trim()));
+        if (!isNaN(start) && !isNaN(end)) {
+          for (let i = start; i <= end; i++) {
+            selectedIndices.push(i);
+          }
+        }
+      } else {
+        const num = parseInt(part);
+        if (!isNaN(num)) {
+          selectedIndices.push(num);
+        }
+      }
+    }
+
+    // Remove duplicates and sort
+    const uniqueIndices = [...new Set(selectedIndices)].sort((a, b) => a - b);
+
+    // Validate indices
+    const validIndices = uniqueIndices.filter(idx => idx >= 1 && idx <= attachments.length);
+    
+    if (validIndices.length === 0) {
+      this.logger.log('\n✗ No valid attachments selected.\n', { type: 'error' });
+      return;
+    }
+
+    // Get selected attachments
+    const selectedAttachments = validIndices.map(idx => attachments[idx - 1]);
+    const fileNames = selectedAttachments.map(att => att.fileName);
+
+    const confirm = (await this.rl.question(`\n⚠️  Are you sure you want to delete ${fileNames.length} attachment(s)? This cannot be undone! (yes/no): `)).trim().toLowerCase();
+    
+    if (confirm !== 'yes' && confirm !== 'y') {
+      this.logger.log('\nCancelled.\n', { type: 'info' });
+      return;
+    }
+
+    const result = this.attachmentManager.deleteAttachments(fileNames);
+
+    if (result.deleted.length > 0) {
+      // Remove deleted attachments from pending list
+      this.pendingAttachments = this.pendingAttachments.filter(
+        att => !result.deleted.includes(att.fileName)
+      );
+    }
+
+    if (result.failed.length > 0) {
+      this.logger.log(
+        `\n⚠️  Failed to delete ${result.failed.length} attachment(s): ${result.failed.join(', ')}\n`,
+        { type: 'warning' },
+      );
     }
   }
 }

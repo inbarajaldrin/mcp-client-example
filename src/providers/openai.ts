@@ -221,6 +221,7 @@ export class OpenAIProvider implements ModelProvider {
       max_completion_tokens: maxTokens,
       tools: openaiTools.length > 0 ? openaiTools : undefined,
       stream: true,
+      stream_options: { include_usage: true },  // Include token usage in final chunk
     });
 
     const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
@@ -369,15 +370,25 @@ export class OpenAIProvider implements ModelProvider {
         max_completion_tokens: maxTokens,
         tools: openaiTools.length > 0 ? openaiTools : undefined,
         stream: true,  // ✅ KEY: Enable streaming
+        stream_options: { include_usage: true },  // ✅ KEY: Include token usage in final chunk
       });
 
       // Track tool calls as they stream in
       const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
       let messageStarted = false;
       let assistantContent = '';
+      let finalUsage: { prompt_tokens: number; completion_tokens: number } | null = null;
 
       // Stream events to user while collecting response
       for await (const chunk of stream) {
+        // Capture usage information from stream chunks FIRST (OpenAI provides this in final chunks, possibly without choices)
+        if (chunk.usage) {
+          finalUsage = {
+            prompt_tokens: chunk.usage.prompt_tokens || 0,
+            completion_tokens: chunk.usage.completion_tokens || 0,
+          };
+        }
+
         const choice = chunk.choices?.[0];
         if (!choice) continue;
 
@@ -465,6 +476,7 @@ export class OpenAIProvider implements ModelProvider {
         }));
 
       // Create response object for compatibility with rest of code
+      // Use actual usage from stream if available, otherwise zeros
       const response = {
         choices: [{ 
           message: {
@@ -472,7 +484,7 @@ export class OpenAIProvider implements ModelProvider {
             tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
           } 
         }],
-        usage: { prompt_tokens: 0, completion_tokens: 0 },
+        usage: finalUsage || { prompt_tokens: 0, completion_tokens: 0 },
       };
 
       const assistantMessage = response.choices[0].message;
@@ -497,12 +509,14 @@ export class OpenAIProvider implements ModelProvider {
           : undefined,
       });
 
-      // Yield token usage from response (OpenAI provides exact counts)
-      if (response.usage) {
+      // Yield token usage from response (OpenAI provides exact counts in final chunk when stream_options.include_usage is true)
+      // Always yield if we have usage data - use finalUsage from stream or fallback to response.usage
+      const usageToYield = finalUsage || response.usage;
+      if (usageToYield) {
         yield {
           type: 'token_usage',
-          input_tokens: response.usage.prompt_tokens,
-          output_tokens: response.usage.completion_tokens,
+          input_tokens: usageToYield.prompt_tokens || 0,
+          output_tokens: usageToYield.completion_tokens || 0,
         } as MessageStreamEvent;
       }
 
@@ -591,7 +605,40 @@ export class OpenAIProvider implements ModelProvider {
    */
   private convertToOpenAIMessages(messages: Message[]): any[] {
     return messages.map((msg) => {
-      // Handle user messages
+      // Handle user messages with content_blocks (for attachments)
+      if (msg.role === 'user' && msg.content_blocks && Array.isArray(msg.content_blocks)) {
+        // Convert content blocks to OpenAI format
+        const openaiContent = msg.content_blocks.map((block: any) => {
+          if (block.type === 'image') {
+            // OpenAI format: { type: 'image_url', image_url: { url: 'data:image/png;base64,...' } }
+            const mediaType = block.source?.media_type || 'image/png';
+            const base64Data = block.source?.data || '';
+            return {
+              type: 'image_url' as const,
+              image_url: {
+                url: `data:${mediaType};base64,${base64Data}`,
+              },
+            };
+          } else if (block.type === 'text') {
+            return {
+              type: 'text' as const,
+              text: block.text || '',
+            };
+          }
+          // Fallback for unknown types
+          return {
+            type: 'text' as const,
+            text: JSON.stringify(block),
+          };
+        });
+        
+        return {
+          role: 'user' as const,
+          content: openaiContent,
+        };
+      }
+      
+      // Handle user messages (standard text)
       if (msg.role === 'user') {
         return {
           role: 'user' as const,
@@ -638,10 +685,7 @@ export class OpenAIProvider implements ModelProvider {
     model: string,
     maxTokens: number,
   ): Promise<{ content: Array<{ type: string; text: string }> }> {
-    const openaiMessages = messages.map((msg) => ({
-      role: msg.role as 'user' | 'assistant' | 'system',
-      content: msg.content,
-    }));
+    const openaiMessages = this.convertToOpenAIMessages(messages);
 
     const response = await this.openaiClient.chat.completions.create({
       model: model,
