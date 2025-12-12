@@ -1013,11 +1013,37 @@ export class MCPClient {
       // Handle tool_use_complete events (from provider)
       if (chunk.type === 'tool_use_complete') {
         // Tool was executed - provider already handled it
-        // Log the tool execution
+        // Log the tool execution and its result
         this.logger.log(
           `\n[Tool executed: ${chunk.toolName}]\n`,
           { type: 'info' },
         );
+        // Pretty-print JSON if applicable
+        if (chunk.result) {
+          try {
+            // Strip ANSI color codes before parsing (from formatJSON)
+            const cleanResult = chunk.result.replace(/\u001b\[[0-9;]*m/g, '');
+            let parsed = JSON.parse(cleanResult);
+            // Handle double-encoded JSON (array with single JSON string element)
+            if (Array.isArray(parsed) && parsed.length === 1 && typeof parsed[0] === 'string') {
+              try {
+                parsed = JSON.parse(parsed[0]);
+              } catch {
+                // Inner string is not JSON, keep the array as-is
+              }
+            }
+            const formatted = JSON.stringify(parsed, null, 2);
+            // Apply color formatting and truncate if needed (increased limit to 10000)
+            const colored = this.formatJSON(formatted);
+            const truncated = colored.length > 10000 
+              ? colored.substring(0, 10000) + '\n     ...(truncated)'
+              : colored;
+            this.logger.log(truncated + '\n', { type: 'success' });
+          } catch {
+            // Non-JSON fallback
+            this.logger.log(chunk.result + '\n', { type: 'success' });
+          }
+        }
         continue;
       }
 
