@@ -362,39 +362,120 @@ export class OpenAIProvider implements ModelProvider {
     while (iterations < maxIterations) {
       iterations++;
 
-      // Step 1: Send request to OpenAI (non-streaming for tool loop)
-      const response = await this.openaiClient.chat.completions.create({
+      // Step 1: Stream request to OpenAI
+      const stream = await this.openaiClient.chat.completions.create({
         model: model,
         messages: this.convertToOpenAIMessages(conversationMessages),
         max_completion_tokens: maxTokens,
         tools: openaiTools.length > 0 ? openaiTools : undefined,
+        stream: true,  // ✅ KEY: Enable streaming
       });
 
-      // Convert OpenAI response to normalized format for streaming
-      const assistantMessage = response.choices[0].message;
+      // Track tool calls as they stream in
+      const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
+      let messageStarted = false;
+      let assistantContent = '';
 
-      // Yield message_start event
-      yield {
-        type: 'message_start',
-      } as MessageStreamEvent;
+      // Stream events to user while collecting response
+      for await (const chunk of stream) {
+        const choice = chunk.choices?.[0];
+        if (!choice) continue;
 
-      // Yield text content if present
-      if (assistantMessage.content) {
-        yield {
-          type: 'content_block_start',
-          content_block: {
-            type: 'text',
-          },
-        } as MessageStreamEvent;
+        if (!messageStarted) {
+          yield { type: 'message_start' } as MessageStreamEvent;
+          messageStarted = true;
+        }
 
-        yield {
-          type: 'content_block_delta',
-          delta: {
-            type: 'text_delta',
-            text: assistantMessage.content,
-          },
-        } as MessageStreamEvent;
+        const delta = choice.delta;
+
+        // Text content - stream to user
+        if (delta.content) {
+          assistantContent += delta.content;
+          yield {
+            type: 'content_block_delta',
+            delta: {
+              type: 'text_delta',
+              text: delta.content,
+            },
+          } as MessageStreamEvent;
+        }
+
+        // Tool calls - stream to user
+        if (delta.tool_calls && delta.tool_calls.length > 0) {
+          for (const toolCall of delta.tool_calls) {
+            const index = toolCall.index;
+
+            if (!toolCallTracker.has(index)) {
+              toolCallTracker.set(index, { arguments: '' });
+            }
+
+            const tracker = toolCallTracker.get(index)!;
+
+            if (toolCall.id && !tracker.id) {
+              tracker.id = toolCall.id;
+            }
+
+            if (toolCall.function?.name && !tracker.name) {
+              tracker.name = toolCall.function.name;
+              yield {
+                type: 'content_block_start',
+                content_block: {
+                  type: 'tool_use',
+                  name: toolCall.function.name,
+                  id: tracker.id,
+                },
+              } as MessageStreamEvent;
+            }
+
+            if (toolCall.function?.arguments && tracker.name) {
+              tracker.arguments += toolCall.function.arguments;
+              yield {
+                type: 'content_block_delta',
+                delta: {
+                  type: 'input_json_delta',
+                  partial_json: toolCall.function.arguments,
+                },
+              } as MessageStreamEvent;
+            }
+          }
+        }
+
+        // Finish reason
+        if (choice.finish_reason) {
+          yield {
+            type: 'message_delta',
+            delta: {
+              stop_reason: choice.finish_reason === 'tool_calls' ? 'tool_use' : choice.finish_reason,
+            },
+          } as MessageStreamEvent;
+
+          yield { type: 'message_stop' } as MessageStreamEvent;
+        }
       }
+
+      // Build tool calls from tracker
+      const toolCalls = Array.from(toolCallTracker.entries())
+        .sort(([a], [b]) => a - b)
+        .map(([_, tracker]) => ({
+          id: tracker.id || `call_${Math.random()}`,
+          function: {
+            name: tracker.name || '',
+            arguments: tracker.arguments,
+          },
+        }));
+
+      // Create response object for compatibility with rest of code
+      const response = {
+        choices: [{ 
+          message: {
+            content: assistantContent || null,
+            tool_calls: toolCalls.length > 0 ? toolCalls : undefined,
+          } 
+        }],
+        usage: { prompt_tokens: 0, completion_tokens: 0 },
+      };
+
+      const assistantMessage = response.choices[0].message;
 
       // Add assistant message to history
       conversationMessages.push({

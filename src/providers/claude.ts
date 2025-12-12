@@ -244,16 +244,21 @@ export class ClaudeProvider implements ModelProvider {
     while (iterations < maxIterations) {
       iterations++;
 
-      // Step 1: Send request to Claude
-      const response = await this.anthropicClient.messages.create({
-        messages: this.convertToAnthropicMessages(conversationMessages),
+      // Step 1: Stream request to Claude (using .stream() for real-time response)
+      const stream = this.anthropicClient.messages.stream({
         model: model,
         max_tokens: maxTokens,
         tools: anthropicTools,
+        messages: this.convertToAnthropicMessages(conversationMessages),
       });
 
-      // Yield the response
-      yield response as MessageStreamEvent;
+      // Stream events to user (they see text in real-time)
+      for await (const chunk of stream) {
+        yield chunk as MessageStreamEvent;
+      }
+
+      // Get the final complete message
+      const response = await stream.finalMessage();
 
       // Step 2: Add Claude's response to conversation
       // Store full content blocks to preserve tool_use blocks for tool_result references
