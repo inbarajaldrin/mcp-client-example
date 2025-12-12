@@ -39,11 +39,15 @@ export class TodoManager {
   private isConfigDisabled: boolean = false;
   private allowedTools: string[] = [
     'create-todo',
+    'insert-todo',
     'list-todos',
+    'read-next-todo',
     'complete-todo',
     'delete-todo',
     'skip-todo',
     'clear-todo-list',
+    'mark-todos-not-completed',
+    'update-todo',
   ];
   private logger: Logger;
   private serverName: string = 'todo';
@@ -227,7 +231,7 @@ export class TodoManager {
   }
 
   /**
-   * Get active todos count (non-completed, non-skipped)
+   * Get incomplete todos count (non-completed, non-skipped)
    */
   async getActiveTodosCount(): Promise<number> {
     if (!this.todoServerConnection) {
@@ -246,7 +250,7 @@ export class TodoManager {
         CallToolResultSchema,
       );
 
-      // Parse the result to count active todos
+      // Parse the result to count incomplete todos
       const content = result.content[0];
       if (content && content.type === 'text') {
         // The result is a text string, we need to parse it
@@ -263,17 +267,51 @@ export class TodoManager {
           }
         } catch {
           // If not JSON, try to count based on text patterns
-          // Count lines that don't contain "completed" or "skipped" markers
+          // Look for todos with Status: Not completed (not Completed or Skipped)
           const lines = todosText.split('\n');
           let activeCount = 0;
-          for (const line of lines) {
-            if (line.includes('✅') || line.includes('completed')) {
-              continue;
+          let currentStatus: string | null = null;
+          
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].toLowerCase();
+            
+            // Check for Status line
+            if (line.includes('status:')) {
+              if (line.includes('not completed') || line.includes('not-completed')) {
+                currentStatus = 'not completed';
+              } else if (line.includes('completed')) {
+                currentStatus = 'completed';
+              } else if (line.includes('skipped')) {
+                currentStatus = 'skipped';
+              } else {
+                // If status line exists but doesn't say completed or skipped, assume not completed
+                currentStatus = 'not completed';
+              }
+              
+              // If we found a not completed status, count it
+              if (currentStatus === 'not completed') {
+                activeCount++;
+                currentStatus = null; // Reset for next todo
+              }
             }
-            if (line.includes('⏳') || line.includes('active') || line.match(/^\d+\./)) {
-              activeCount++;
+            
+            // Also check for visual indicators (✗ for not completed)
+            if (line.includes('✗') && !line.includes('✓') && !line.includes('⁉')) {
+              // Found not completed indicator, check if we haven't already counted this todo
+              // Look backwards for status
+              let foundStatus = false;
+              for (let j = Math.max(0, i - 5); j < i; j++) {
+                if (lines[j].toLowerCase().includes('status:')) {
+                  foundStatus = true;
+                  break;
+                }
+              }
+              if (!foundStatus) {
+                activeCount++;
+              }
             }
           }
+          
           return activeCount;
         }
       }
@@ -329,6 +367,292 @@ export class TodoManager {
   async checkTodosComplete(): Promise<boolean> {
     const activeCount = await this.getActiveTodosCount();
     return activeCount === 0;
+  }
+
+  /**
+   * Get all todos (including completed and skipped) as text
+   */
+  async getAllTodosList(): Promise<string> {
+    if (!this.todoServerConnection) {
+      return 'No todo server connection';
+    }
+
+    try {
+      const result = await this.todoServerConnection.client.request(
+        {
+          method: 'tools/call',
+          params: {
+            name: 'list-todos',
+            arguments: {},
+          },
+        },
+        CallToolResultSchema,
+      );
+
+      const content = result.content[0];
+      if (content && content.type === 'text') {
+        return content.text;
+      }
+
+      return 'No todos found';
+    } catch (error) {
+      this.logger.log(
+        `Failed to get all todos list: ${error}\n`,
+        { type: 'warning' },
+      );
+      return `Error retrieving todos: ${error}`;
+    }
+  }
+
+  /**
+   * Check if any todos exist (including completed/skipped)
+   */
+  async hasTodos(): Promise<boolean> {
+    if (!this.todoServerConnection) {
+      return false;
+    }
+
+    try {
+      const todosList = await this.getAllTodosList();
+      // Check if the response indicates no todos
+      if (todosList === 'No todos found' || todosList === 'No todo server connection') {
+        return false;
+      }
+      // If we get a list, check if it's empty
+      // Try to parse as JSON first
+      try {
+        const todos = JSON.parse(todosList);
+        if (Array.isArray(todos)) {
+          return todos.length > 0;
+        }
+      } catch {
+        // Not JSON, check if there are any todo-like lines
+        const lines = todosList.split('\n').filter(line => line.trim().length > 0);
+        // Filter out empty lines and headers
+        const todoLines = lines.filter(line => 
+          !line.includes('No todos') && 
+          !line.includes('Todo server') &&
+          (line.match(/^\d+\./) || line.includes('✓') || line.includes('✗') || line.includes('⁉'))
+        );
+        return todoLines.length > 0;
+      }
+      return true;
+    } catch (error) {
+      this.logger.log(
+        `Failed to check if todos exist: ${error}\n`,
+        { type: 'warning' },
+      );
+      return false;
+    }
+  }
+
+  /**
+   * Get count of skipped todos
+   */
+  async getSkippedTodosCount(): Promise<number> {
+    if (!this.todoServerConnection) {
+      return 0;
+    }
+
+    try {
+      const result = await this.todoServerConnection.client.request(
+        {
+          method: 'tools/call',
+          params: {
+            name: 'list-todos',
+            arguments: {},
+          },
+        },
+        CallToolResultSchema,
+      );
+
+      const content = result.content[0];
+      if (content && content.type === 'text') {
+        const todosText = content.text;
+        
+        // Try to parse as JSON first
+        try {
+          const todos = JSON.parse(todosText);
+          if (Array.isArray(todos)) {
+            return todos.filter((todo: any) => todo.skipped).length;
+          }
+        } catch {
+          // If not JSON, parse text format to count skipped todos
+          const lines = todosText.split('\n');
+          let skippedCount = 0;
+          
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i].toLowerCase();
+            
+            // Check for Status line with skipped
+            if (line.includes('status:') && line.includes('skipped')) {
+              skippedCount++;
+            }
+            
+            // Also check for visual indicator (⁉ for skipped)
+            if (line.includes('⁉') || (line.includes('skipped') && !line.includes('status:'))) {
+              skippedCount++;
+            }
+          }
+          
+          return skippedCount;
+        }
+      }
+
+      return 0;
+    } catch (error) {
+      this.logger.log(
+        `Failed to get skipped todos count: ${error}\n`,
+        { type: 'warning' },
+      );
+      return 0;
+    }
+  }
+
+  /**
+   * Get active todo IDs (non-completed, non-skipped)
+   */
+  async getActiveTodoIds(): Promise<string[]> {
+    if (!this.todoServerConnection) {
+      return [];
+    }
+
+    try {
+      const result = await this.todoServerConnection.client.request(
+        {
+          method: 'tools/call',
+          params: {
+            name: 'list-todos',
+            arguments: {},
+          },
+        },
+        CallToolResultSchema,
+      );
+
+      const content = result.content[0];
+      if (content && content.type === 'text') {
+        const todosText = content.text;
+        
+        // Try to parse as JSON first
+        try {
+          const todos = JSON.parse(todosText);
+          if (Array.isArray(todos)) {
+            return todos
+              .filter((todo: any) => !todo.completed && !todo.skipped)
+              .map((todo: any) => todo.id || todo.ID);
+          }
+        } catch {
+          // If not JSON, parse text format to extract IDs
+          // Format: ID: uuid-here followed by Status: Not completed/Completed/Skipped
+          const ids: string[] = [];
+          const lines = todosText.split('\n');
+          
+          for (let i = 0; i < lines.length; i++) {
+            const line = lines[i];
+            
+            // Look for ID line
+            const idMatch = line.match(/ID:\s*([a-f0-9-]+)/i);
+            if (idMatch) {
+              const id = idMatch[1];
+              
+              // Check the next few lines for status
+              let isNotCompleted = false;
+              for (let j = i + 1; j < Math.min(i + 5, lines.length); j++) {
+                const statusLine = lines[j].toLowerCase();
+                if (statusLine.includes('status:')) {
+                  // Check if it's not completed (not completed or skipped)
+                  if (statusLine.includes('not completed') || statusLine.includes('not-completed') ||
+                      (!statusLine.includes('completed') && !statusLine.includes('skipped'))) {
+                    isNotCompleted = true;
+                  }
+                  break;
+                }
+              }
+              
+              // Also check if the section has ✗ (not completed indicator) or no ✓ (completed indicator)
+              const sectionStart = Math.max(0, i - 3);
+              const sectionEnd = Math.min(lines.length, i + 10);
+              const section = lines.slice(sectionStart, sectionEnd).join('\n');
+              
+              if (isNotCompleted || (section.includes('✗') && !section.includes('✓'))) {
+                if (!ids.includes(id)) {
+                  ids.push(id);
+                }
+              }
+            }
+          }
+          
+          return ids;
+        }
+      }
+
+      return [];
+    } catch (error) {
+      this.logger.log(
+        `Failed to get active todo IDs: ${error}\n`,
+        { type: 'warning' },
+      );
+      return [];
+    }
+  }
+
+  /**
+   * Skip all active todos
+   */
+  async skipAllActiveTodos(): Promise<number> {
+    if (!this.todoServerConnection) {
+      return 0;
+    }
+
+    try {
+      const activeIds = await this.getActiveTodoIds();
+      
+      if (activeIds.length === 0) {
+        return 0;
+      }
+
+      // The skip-todo tool expects an array of IDs, so batch them all together
+      try {
+        const result = await this.todoServerConnection.client.request(
+          {
+            method: 'tools/call',
+            params: {
+              name: 'skip-todo',
+              arguments: { ids: activeIds },
+            },
+          },
+          CallToolResultSchema,
+        );
+        
+        // Parse the result to get the count of skipped todos
+        const content = result.content[0];
+        if (content && content.type === 'text') {
+          // The server returns a message like "⁉ 5 Todos Skipped:"
+          // Try to extract the number, or just return the length of IDs we sent
+          const text = content.text;
+          const match = text.match(/(\d+)\s+Todos?\s+Skipped/i);
+          if (match) {
+            return parseInt(match[1], 10);
+          }
+          // If we can't parse, assume all were skipped if no error
+          return activeIds.length;
+        }
+        
+        return activeIds.length;
+      } catch (error) {
+        this.logger.log(
+          `Failed to skip todos: ${error}\n`,
+          { type: 'warning' },
+        );
+        return 0;
+      }
+    } catch (error) {
+      this.logger.log(
+        `Failed to skip active todos: ${error}\n`,
+        { type: 'warning' },
+      );
+      return 0;
+    }
   }
 
   /**

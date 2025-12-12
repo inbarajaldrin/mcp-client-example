@@ -139,6 +139,95 @@ export class MCPClientCLI {
     }
   }
 
+  /**
+   * Ask user what to do with existing todos
+   * Returns: 'clear' | 'skip' | 'leave'
+   */
+  private async askUserToClearTodos(todosList: string): Promise<'clear' | 'skip' | 'leave'> {
+    if (!this.rl) {
+      return 'leave';
+    }
+
+    // Get active todos count from the client
+    const todoStatus = await this.client.checkTodoStatus();
+    // Get skipped todos count
+    const skippedCount = await this.client.getSkippedTodosCount();
+    
+    // Display the menu
+    let statusMessage = '';
+    if (todoStatus.activeCount > 0 && skippedCount > 0) {
+      statusMessage = `${todoStatus.activeCount} incomplete todo(s) and ${skippedCount} skipped todo(s)`;
+    } else if (todoStatus.activeCount > 0) {
+      statusMessage = `${todoStatus.activeCount} incomplete todo(s)`;
+    } else if (skippedCount > 0) {
+      statusMessage = `${skippedCount} skipped todo(s)`;
+    } else {
+      statusMessage = '0 todos';
+    }
+    
+    console.log(`\n⚠️  Found ${statusMessage}. What would you like to do?`);
+    console.log('  1. View todos');
+    if (todoStatus.activeCount > 0) {
+      console.log('  2. Skip incomplete todos');
+    }
+    console.log('  3. Leave todos as is');
+    console.log('  4. Clear all todos');
+    if (todoStatus.activeCount > 0) {
+      console.log(`\n   Note:`);
+      console.log(`   - Option 2: The agent will skip these ${todoStatus.activeCount} incomplete todo(s). The current todo list state will be added to the context so the agent can review and update it.`);
+      console.log(`   - Option 3: The agent will resume and complete these ${todoStatus.activeCount} existing incomplete todo(s) before starting any new tasks. The current todo list will be added to the context.`);
+    }
+    console.log('');
+    
+    while (true) {
+      const response = (await this.rl.question('> ')).trim().toLowerCase();
+      
+      if (response === '1' || response === 'view' || response === 'v') {
+        // Show the todos list
+        console.log('\n' + todosList);
+        // Add separator
+        console.log('\n' + '─'.repeat(50) + '\n');
+        // Ask again - get fresh counts
+        const freshTodoStatus = await this.client.checkTodoStatus();
+        const freshSkippedCount = await this.client.getSkippedTodosCount();
+        
+        let freshStatusMessage = '';
+        if (freshTodoStatus.activeCount > 0 && freshSkippedCount > 0) {
+          freshStatusMessage = `${freshTodoStatus.activeCount} incomplete todo(s) and ${freshSkippedCount} skipped todo(s)`;
+        } else if (freshTodoStatus.activeCount > 0) {
+          freshStatusMessage = `${freshTodoStatus.activeCount} incomplete todo(s)`;
+        } else if (freshSkippedCount > 0) {
+          freshStatusMessage = `${freshSkippedCount} skipped todo(s)`;
+        }
+        
+        console.log('What would you like to do?');
+        console.log('  1. View todos');
+        if (freshTodoStatus.activeCount > 0) {
+          console.log('  2. Skip incomplete todos');
+        }
+        console.log('  3. Leave todos as is');
+        console.log('  4. Clear all todos');
+        if (freshTodoStatus.activeCount > 0) {
+          console.log(`\n   Note:`);
+          console.log(`   - Option 2: The agent will skip these ${freshTodoStatus.activeCount} incomplete todo(s). The current todo list state will be added to the context so the agent can review and update it.`);
+          console.log(`   - Option 3: The agent will resume and complete these ${freshTodoStatus.activeCount} existing incomplete todo(s) before starting any new tasks. The current todo list will be added to the context.`);
+        }
+        console.log('');
+        continue;
+      } else if ((response === '2' || response === 'skip' || response === 's') && todoStatus.activeCount > 0) {
+        return 'skip';
+      } else if (response === '3' || response === 'leave' || response === 'l') {
+        return 'leave';
+      } else if (response === '4' || response === 'clear' || response === 'c') {
+        return 'clear';
+      } else {
+        const validOptions = todoStatus.activeCount > 0 ? '1, 2, 3, or 4' : '1, 3, or 4';
+        const validWords = todoStatus.activeCount > 0 ? '(or view/skip/leave/clear)' : '(or view/leave/clear)';
+        console.log(`Please enter ${validOptions} ${validWords}: `);
+      }
+    }
+  }
+
   private async chat_loop() {
     if (!this.rl) {
       throw new Error('Readline interface not initialized');
@@ -210,14 +299,9 @@ export class MCPClientCLI {
               continue;
             }
             
-            await this.client.enableTodoMode();
-            
-            // Send system prompt to agent (marked as system prompt so it doesn't trigger clear)
-            const systemPrompt = 'You are now in todo mode. When the user provides a task, you must: 1) Decompose the task into actionable todos using create-todo, 2) As you complete each task, mark it complete using complete-todo. You cannot exit until all todos are completed or skipped using skip-todo.';
-            await this.client.processQuery(systemPrompt, true);
-            
-            // Mark todo mode as initialized so future user queries will auto-clear
-            this.client.setTodoModeInitialized(true);
+            // Pass the callback to ask user about clearing todos
+            await this.client.enableTodoMode((todosList) => this.askUserToClearTodos(todosList));
+            // Don't send prompt immediately - it will be sent with the first user message
           } catch (error) {
             this.logger.log(
               `\nFailed to enable todo mode: ${error}\n`,

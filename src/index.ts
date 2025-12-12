@@ -57,6 +57,9 @@ export class MCPClient {
   private model: string;
   private todoManager: TodoManager;
   private todoModeInitialized: boolean = false;
+  private todoClearUserCallback?: (todosList: string) => Promise<'clear' | 'skip' | 'leave'>;
+  private todosLeftAsIs: boolean = false; // Track if todos were left as-is (not skipped)
+  private todosWereSkipped: boolean = false; // Track if todos were skipped
   private toolManager: ToolManager;
   private promptManager: PromptManager;
 
@@ -258,10 +261,21 @@ export class MCPClient {
     const enabledTools = this.toolManager.filterTools(allTools);
 
     this.tools = enabledTools;
-    this.logger.log(
-      `Loaded ${enabledTools.length} enabled tool(s) from ${allTools.length} total tool(s) across ${this.servers.size} server(s)\n`,
-      { type: 'info' },
-    );
+    
+    // If todo mode is enabled, only show todo tools in the log message
+    if (this.todoManager.isEnabled()) {
+      const todoServerName = this.todoManager.getServerName();
+      const todoTools = enabledTools.filter(tool => tool.name.startsWith(`${todoServerName}__`));
+      this.logger.log(
+        `Loaded ${todoTools.length} todo tool(s) (todo mode active)\n`,
+        { type: 'info' },
+      );
+    } else {
+      this.logger.log(
+        `Loaded ${enabledTools.length} enabled tool(s) from ${allTools.length} total tool(s) across ${this.servers.size} server(s)\n`,
+        { type: 'info' },
+      );
+    }
   }
 
   private async initMCPPrompts() {
@@ -451,8 +465,9 @@ export class MCPClient {
 
   /**
    * Enable todo mode - connect to todo server and filter tools
+   * @param askUserCallback Optional callback to ask user what to do with incomplete todos
    */
-  async enableTodoMode(): Promise<void> {
+  async enableTodoMode(askUserCallback?: (todosList: string) => Promise<'clear' | 'skip' | 'leave'>): Promise<void> {
     if (!this.todoManager.isConfigured()) {
       throw new Error('Todo server not configured. Please add "todo" server to mcp_config.json');
     }
@@ -478,10 +493,18 @@ export class MCPClient {
       // Reload tools to apply filtering
       await this.initMCPTools();
       
-      // Clear any existing todos when enabling todo mode
-      await this.clearAllTodos();
+      // Store the callback for use in processQuery
+      this.todoClearUserCallback = askUserCallback;
       
-      // Reset initialization flag - will be set after system prompt is sent
+      // Check if todos exist and handle clearing
+      const result = await this.clearTodosIfNeeded(askUserCallback);
+      
+      // Track if todos were left as-is (not skipped or cleared)
+      this.todosLeftAsIs = (result === 'left');
+      // Track if todos were skipped
+      this.todosWereSkipped = (result === 'skipped');
+      
+      // Reset initialization flag - will be set after system prompt is sent with first user message
       this.todoModeInitialized = false;
       
       this.logger.log('\n✓ Todo mode enabled\n', { type: 'info' });
@@ -500,6 +523,9 @@ export class MCPClient {
   async disableTodoMode(): Promise<void> {
     this.todoManager.disable();
     this.todoModeInitialized = false;
+    this.todoClearUserCallback = undefined;
+    this.todosLeftAsIs = false;
+    this.todosWereSkipped = false;
     
     // Note: We don't disconnect the server or remove it from servers map
     // because it might be needed by other parts of the system
@@ -523,6 +549,16 @@ export class MCPClient {
     const todosList = await this.todoManager.getActiveTodosList();
     
     return { activeCount, todosList };
+  }
+
+  /**
+   * Get skipped todos count
+   */
+  async getSkippedTodosCount(): Promise<number> {
+    if (!this.todoManager.isEnabled()) {
+      return 0;
+    }
+    return await this.todoManager.getSkippedTodosCount();
   }
 
   /**
@@ -730,7 +766,92 @@ export class MCPClient {
   /**
    * Clear all todos (client-side call)
    */
-  private async clearAllTodos(): Promise<void> {
+  /**
+   * Check todo status and determine if clearing is needed
+   * Returns: { shouldClear: boolean, needsUserConfirmation: boolean, todosList: string }
+   */
+  async checkTodoClearStatus(): Promise<{ shouldClear: boolean; needsUserConfirmation: boolean; todosList: string }> {
+    if (!this.todoManager.isEnabled() || !this.todoManager.getConnection()) {
+      return { shouldClear: false, needsUserConfirmation: false, todosList: '' };
+    }
+
+    try {
+      // Check if any todos exist
+      const hasTodos = await this.todoManager.hasTodos();
+      if (!hasTodos) {
+        return { shouldClear: false, needsUserConfirmation: false, todosList: '' };
+      }
+
+      // Get all todos list
+      const todosList = await this.todoManager.getAllTodosList();
+      
+      // Check if there are any active (incomplete) todos
+      const activeCount = await this.todoManager.getActiveTodosCount();
+      
+      // Check if there are any skipped todos
+      const skippedCount = await this.todoManager.getSkippedTodosCount();
+      
+      if (activeCount === 0 && skippedCount === 0) {
+        // No active todos and no skipped todos (all are completed), safe to clear automatically
+        return { shouldClear: true, needsUserConfirmation: false, todosList };
+      } else if (activeCount === 0 && skippedCount > 0) {
+        // No active todos but there are skipped todos, need user confirmation
+        return { shouldClear: false, needsUserConfirmation: true, todosList };
+      } else {
+        // There are active/incomplete todos, need user confirmation
+        return { shouldClear: false, needsUserConfirmation: true, todosList };
+      }
+    } catch (error) {
+      this.logger.log(
+        `Failed to check todo status: ${error}\n`,
+        { type: 'warning' },
+      );
+      return { shouldClear: false, needsUserConfirmation: false, todosList: '' };
+    }
+  }
+
+  /**
+   * Clear todos with user confirmation if needed
+   * Returns: 'cleared' | 'skipped' | 'left'
+   */
+  async clearTodosIfNeeded(askUserCallback?: (todosList: string) => Promise<'clear' | 'skip' | 'leave'>): Promise<'cleared' | 'skipped' | 'left'> {
+    const status = await this.checkTodoClearStatus();
+    
+    if (!status.shouldClear && !status.needsUserConfirmation) {
+      // No todos or already handled
+      return 'left';
+    }
+
+    if (status.shouldClear) {
+      // All completed, clear automatically (don't log)
+      await this.clearAllTodos(false);
+      return 'cleared';
+    }
+
+    if (status.needsUserConfirmation && askUserCallback) {
+      // Ask user what to do
+      const userChoice = await askUserCallback(status.todosList);
+      if (userChoice === 'clear') {
+        // User explicitly chose to clear, so log it
+        await this.clearAllTodos(true);
+        return 'cleared';
+      } else if (userChoice === 'skip') {
+        // Automatically skip all incomplete todos
+        const skippedCount = await this.todoManager.skipAllActiveTodos();
+        if (skippedCount > 0) {
+          this.logger.log(`\n✓ Skipped ${skippedCount} incomplete todo(s)\n`, { type: 'info' });
+        }
+        return 'skipped';
+      } else {
+        // Leave todos as is
+        return 'left';
+      }
+    }
+
+    return 'left';
+  }
+
+  private async clearAllTodos(shouldLog: boolean = true): Promise<void> {
     if (!this.todoManager.isEnabled() || !this.todoManager.getConnection()) {
       return;
     }
@@ -747,7 +868,9 @@ export class MCPClient {
         },
         CallToolResultSchema,
       );
-      this.logger.log('\n✓ Cleared existing todos\n', { type: 'info' });
+      if (shouldLog) {
+        this.logger.log('\n✓ Cleared existing todos\n', { type: 'info' });
+      }
     } catch (error) {
       this.logger.log(
         `Failed to clear todos: ${error}\n`,
@@ -1005,14 +1128,45 @@ export class MCPClient {
         await this.autoSummarize();
       }
 
+      // Track if this is the first message after enabling todo mode
+      const isFirstTodoMessage = this.todoManager.isEnabled() && !isSystemPrompt && !this.todoModeInitialized;
+
       // If todo mode is enabled and this is a user query (not system prompt),
-      // and todo mode has been initialized, automatically clear todos
-      if (
-        this.todoManager.isEnabled() &&
-        !isSystemPrompt &&
-        this.todoModeInitialized
-      ) {
-        await this.clearAllTodos();
+      // prepend the system prompt if not yet initialized
+      if (isFirstTodoMessage) {
+        let systemPrompt = 'You are now in todo mode. When the user provides a task, you must: 1) Decompose the task into actionable todos using create-todo, 2) As you complete each task, mark it complete using complete-todo. You cannot exit until all todos are completed or skipped using skip-todo.';
+        
+        // If todos were left as-is, include the current todo list in context
+        if (this.todosLeftAsIs) {
+          const todoStatus = await this.checkTodoStatus();
+          const skippedCount = await this.getSkippedTodosCount();
+          const todosList = await this.todoManager.getAllTodosList();
+          
+          if (todoStatus.activeCount > 0 || skippedCount > 0) {
+            let message = '';
+            if (todoStatus.activeCount > 0 && skippedCount > 0) {
+              message = `There are ${todoStatus.activeCount} existing incomplete todo(s) and ${skippedCount} skipped todo(s) in the todo list. You must resume and complete the incomplete tasks before starting any new tasks.`;
+            } else if (todoStatus.activeCount > 0) {
+              message = `There are ${todoStatus.activeCount} existing incomplete todo(s) in the todo list. You must resume and complete these existing tasks before starting any new tasks.`;
+            } else if (skippedCount > 0) {
+              message = `There are ${skippedCount} skipped todo(s) in the todo list.`;
+            }
+            
+            systemPrompt += `\n\nIMPORTANT: ${message} Here is the current todo list:\n\n${todosList}\n\nContinue working on these todos or create new ones as needed.`;
+          }
+        }
+        
+        // If todos were skipped, include the current todo state so agent can update it
+        if (this.todosWereSkipped) {
+          const todoStatus = await this.checkTodoStatus();
+          const todosList = await this.todoManager.getAllTodosList();
+          systemPrompt += `\n\nIMPORTANT: The previous incomplete todos have been skipped. Here is the current todo list state:\n\n${todosList}\n\nYou should review and update this todo list based on the user's new task. Use update-todo to modify existing todos or create-todo to add new ones as needed.`;
+        }
+        
+        query = `${systemPrompt}\n\nUser: ${query}`;
+        this.todoModeInitialized = true;
+        this.todosLeftAsIs = false; // Reset after first message
+        this.todosWereSkipped = false; // Reset after first message
       }
 
       // Add user message to history
@@ -1059,13 +1213,19 @@ export class MCPClient {
       );
 
       // Check todo status if todo mode is enabled and agent is trying to exit
+      // Loop until all todos are completed or skipped
       if (this.todoManager.isEnabled()) {
-        const todoStatus = await this.checkTodoStatus();
-        if (todoStatus.activeCount > 0) {
+        while (true) {
+          const todoStatus = await this.checkTodoStatus();
+          if (todoStatus.activeCount === 0) {
+            // All todos are complete, we can exit
+            break;
+          }
+          
           // Agent is trying to exit but has incomplete todos
           const reminderMessage: Message = {
             role: 'user',
-            content: `You have ${todoStatus.activeCount} incomplete todo(s). Please complete them using complete-todo or skip them using skip-todo before finishing.\n\nActive todos:\n${todoStatus.todosList}\n\nYou cannot exit until all todos are completed or skipped.`,
+            content: `You have ${todoStatus.activeCount} incomplete todo(s). Please complete them using complete-todo. Only skip them using skip-todo if you cannot perform these tasks.\n\nActive todos:\n${todoStatus.todosList}\n\nYou cannot exit until all todos are completed or skipped.`,
           };
           this.messages.push(reminderMessage);
           this.currentTokenCount += this.tokenCounter.countMessageTokens(reminderMessage);
