@@ -46,7 +46,10 @@ export class MCPClientCLI {
       this.logger.log('\n\nShutting down gracefully...\n', { type: 'info' });
       
       try {
-        // Close readline first
+        // End chat session before shutdown (do this first to ensure it's saved)
+        this.client.getChatHistoryManager().endSession('Chat session ended by user');
+        
+        // Close readline
         if (this.rl) {
           this.rl.close();
           this.rl = null;
@@ -55,20 +58,30 @@ export class MCPClientCLI {
         // Close MCP client connection
         await this.client.stop();
       } catch (error) {
-        // Ignore errors during cleanup
+        this.logger.log(`Error during cleanup: ${error}\n`, { type: 'error' });
       }
       
       process.exit(0);
     };
 
     // Handle SIGINT (Ctrl+C)
-    process.on('SIGINT', () => {
-      void cleanup();
+    process.on('SIGINT', async () => {
+      // Prevent default behavior (immediate exit)
+      // The cleanup will handle saving and exiting
+      await cleanup();
     });
 
     // Handle SIGTERM
-    process.on('SIGTERM', () => {
-      void cleanup();
+    process.on('SIGTERM', async () => {
+      await cleanup();
+    });
+    
+    // Also handle uncaught exceptions to save session
+    process.on('uncaughtException', async (error) => {
+      if (!this.isShuttingDown) {
+        this.logger.log(`\nUncaught exception: ${error}\n`, { type: 'error' });
+        await cleanup();
+      }
     });
   }
 
@@ -95,7 +108,13 @@ export class MCPClientCLI {
         `  /tools-disable-server <server-name> - Disable all tools from a server\n` +
         `  /add-prompt - Add enabled prompts to conversation context\n` +
         `  /prompts or /prompts-list - List currently enabled prompts\n` +
-        `  /prompts-manager or /prompts-select - Interactive prompt enable/disable selection\n`,
+        `  /prompts-manager or /prompts-select - Interactive prompt enable/disable selection\n` +
+        `  /chat-list - List recent chat sessions\n` +
+        `  /chat-search <keyword> - Search chats by keyword\n` +
+        `  /chat-restore - Restore a past chat as context\n` +
+        `  /chat-export - Export a chat to file\n` +
+        `  /chat-rename - Rename a chat session file\n` +
+        `  /chat-clear - Delete a chat session\n`,
         { type: 'info' },
       );
       this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
@@ -289,6 +308,8 @@ export class MCPClientCLI {
         
         if (query.toLowerCase() === EXIT_COMMAND) {
           this.logger.log('\nGoodbye! 👋\n', { type: 'warning' });
+          // End chat session before exiting
+          this.client.getChatHistoryManager().endSession('Chat session ended by user');
           break;
         }
 
@@ -507,14 +528,130 @@ export class MCPClientCLI {
           continue;
         }
 
+        // Chat history commands
+        if (query.toLowerCase() === '/chat-list') {
+          try {
+            await this.displayChatList();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to list chats: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase().startsWith('/chat-search ')) {
+          try {
+            const keyword = query.substring('/chat-search '.length).trim();
+            if (!keyword) {
+              this.logger.log('\nUsage: /chat-search <keyword>\n', { type: 'error' });
+              continue;
+            }
+            await this.searchChats(keyword);
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to search chats: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/chat-restore') {
+          try {
+            await this.restoreChat();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to restore chat: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/chat-export') {
+          try {
+            await this.exportChat();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to export chat: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/chat-rename') {
+          try {
+            await this.renameChat();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to rename chat: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/chat-clear') {
+          try {
+            await this.clearChat();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to clear chat: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        // Log user message to history
+        this.client.getChatHistoryManager().addUserMessage(query);
+
+        // Get message count before processing to find the new assistant message
+        const messagesBefore = (this.client as any).messages.length;
+        
         await this.client.processQuery(query);
+        
+        // Extract assistant response from messages array
+        const messages = (this.client as any).messages;
+        const assistantMessages = messages.filter((msg: any) => msg.role === 'assistant');
+        if (assistantMessages.length > 0) {
+          const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
+          if (lastAssistantMessage.content) {
+            this.client.getChatHistoryManager().addAssistantMessage(lastAssistantMessage.content);
+          }
+        }
+        
         this.logger.log('\n' + consoleStyles.separator + '\n');
       } catch (error: any) {
         // Check if readline was closed (happens during shutdown)
         if (error?.code === 'ERR_USE_AFTER_CLOSE' || this.isShuttingDown) {
+          // Save session before breaking if it was a shutdown
+          if (this.isShuttingDown) {
+            this.client.getChatHistoryManager().endSession('Chat session ended by user');
+          }
           break;
         }
+        
+        // Handle Ctrl+C (AbortError) - save session before exiting
+        if (error?.name === 'AbortError' || error?.message?.includes('Aborted')) {
+          this.logger.log('\n\nSaving chat session...\n', { type: 'info' });
+          this.client.getChatHistoryManager().endSession('Chat session ended by Ctrl+C');
+          break;
+        }
+        
         this.logger.log('\nError: ' + error + '\n', { type: 'error' });
+      }
+    }
+    
+    // Ensure session is saved when loop exits (safety net)
+    if (!this.isShuttingDown) {
+      try {
+        this.client.getChatHistoryManager().endSession('Chat session ended');
+      } catch (error) {
+        // Ignore errors if session was already saved
       }
     }
   }
@@ -1252,6 +1389,375 @@ export class MCPClientCLI {
       
       this.logger.log('\nInvalid selection. Please try again.\n', { type: 'error' });
       await new Promise(resolve => setTimeout(resolve, 1000));
+    }
+  }
+
+  private async displayChatList(): Promise<void> {
+    const historyManager = this.client.getChatHistoryManager();
+    const chats = historyManager.getAllChats();
+    
+    this.logger.log('\n📚 Recent chat sessions:\n', { type: 'info' });
+    
+    if (chats.length === 0) {
+      this.logger.log('  No chat sessions found.\n', { type: 'info' });
+      return;
+    }
+    
+    for (const chat of chats.slice(0, 10)) {
+      const duration = chat.duration ? `${Math.round(chat.duration / 1000)}s` : '∞';
+      const date = new Date(chat.startTime).toLocaleString();
+      this.logger.log(
+        `  ${chat.sessionId} | ${date} | ${chat.messageCount} messages | ${duration}\n`,
+        { type: 'info' }
+      );
+      if (chat.summary) {
+        this.logger.log(`    → ${chat.summary}\n`, { type: 'info' });
+      }
+      if (chat.tags && chat.tags.length > 0) {
+        this.logger.log(`    Tags: ${chat.tags.join(', ')}\n`, { type: 'info' });
+      }
+    }
+    
+    if (chats.length > 10) {
+      this.logger.log(`\n  ... and ${chats.length - 10} more sessions\n`, { type: 'info' });
+    }
+  }
+
+  private async searchChats(keyword: string): Promise<void> {
+    const historyManager = this.client.getChatHistoryManager();
+    const results = historyManager.searchChats(keyword);
+    
+    this.logger.log(`\n📍 Found ${results.length} matching chat(s):\n`, { type: 'info' });
+    
+    if (results.length === 0) {
+      this.logger.log('  No chats found matching your search.\n', { type: 'info' });
+      return;
+    }
+    
+    for (const chat of results) {
+      const date = new Date(chat.startTime).toLocaleString();
+      this.logger.log(
+        `  ${chat.sessionId} | ${date} | ${chat.messageCount} messages\n`,
+        { type: 'info' }
+      );
+      if (chat.summary) {
+        this.logger.log(`    → ${chat.summary}\n`, { type: 'info' });
+      }
+    }
+  }
+
+  private async restoreChat(): Promise<void> {
+    if (!this.rl) {
+      throw new Error('Readline interface not initialized');
+    }
+    
+    const historyManager = this.client.getChatHistoryManager();
+    const chats = historyManager.getAllChats();
+    
+    if (chats.length === 0) {
+      this.logger.log('\nNo chat sessions available to restore.\n', { type: 'warning' });
+      return;
+    }
+    
+    this.logger.log('\n📖 Select a chat to restore as context:\n', { type: 'info' });
+    
+    for (let i = 0; i < Math.min(chats.length, 20); i++) {
+      const chat = chats[i];
+      const date = new Date(chat.startTime).toLocaleString();
+      const summary = chat.summary ? ` - ${chat.summary}` : '';
+      this.logger.log(
+        `  ${i + 1}. ${chat.sessionId} | ${date} | ${chat.messageCount} messages${summary}\n`,
+        { type: 'info' }
+      );
+    }
+    
+    const selection = await this.rl.question('\nEnter number (or "q" to cancel): ');
+    
+    if (selection.toLowerCase() === 'q' || selection.toLowerCase() === 'quit') {
+      this.logger.log('\nCancelled.\n', { type: 'info' });
+      return;
+    }
+    
+    const index = parseInt(selection) - 1;
+    if (isNaN(index) || index < 0 || index >= Math.min(chats.length, 20)) {
+      this.logger.log('\nInvalid selection.\n', { type: 'error' });
+      return;
+    }
+    
+    const selectedChat = chats[index];
+    const fullChat = historyManager.loadChat(selectedChat.sessionId);
+    
+    if (!fullChat) {
+      this.logger.log('\nFailed to load chat session.\n', { type: 'error' });
+      return;
+    }
+    
+    // Load messages into current conversation context
+    const messages = (this.client as any).messages;
+    const newMessages: any[] = [];
+    let restoredCount = 0;
+    
+    // Restore messages in reverse order (oldest first) so they appear in correct order when prepended
+    for (const msg of fullChat.messages) {
+      if (msg.role === 'user' || msg.role === 'assistant') {
+        const messageObj = {
+          role: msg.role,
+          content: msg.content,
+        };
+        newMessages.push(messageObj);
+        
+        // Also add to ChatHistoryManager so they're saved with the current session
+        if (msg.role === 'user') {
+          historyManager.addUserMessage(msg.content);
+        } else if (msg.role === 'assistant') {
+          historyManager.addAssistantMessage(msg.content);
+        }
+        restoredCount++;
+      } else if (msg.role === 'tool') {
+        // Also restore tool executions
+        if (msg.toolName && msg.toolInput !== undefined && msg.toolOutput !== undefined) {
+          historyManager.addToolExecution(
+            msg.toolName,
+            msg.toolInput,
+            msg.toolOutput
+          );
+          restoredCount++;
+        }
+      }
+    }
+    
+    // Prepend restored messages to current conversation (for the model context)
+    messages.unshift(...newMessages);
+    
+    // Update token count (approximate)
+    const tokenCounter = (this.client as any).tokenCounter;
+    for (const msg of newMessages) {
+      (this.client as any).currentTokenCount += tokenCounter.countMessageTokens(msg);
+    }
+    
+    this.logger.log(
+      `\n✓ Restored ${restoredCount} messages from chat session ${selectedChat.sessionId}\n`,
+      { type: 'success' }
+    );
+  }
+
+  private async exportChat(): Promise<void> {
+    if (!this.rl) {
+      throw new Error('Readline interface not initialized');
+    }
+    
+    const historyManager = this.client.getChatHistoryManager();
+    const chats = historyManager.getAllChats();
+    
+    if (chats.length === 0) {
+      this.logger.log('\nNo chat sessions available to export.\n', { type: 'warning' });
+      return;
+    }
+    
+    this.logger.log('\n💾 Select a chat to export:\n', { type: 'info' });
+    
+    for (let i = 0; i < Math.min(chats.length, 20); i++) {
+      const chat = chats[i];
+      const date = new Date(chat.startTime).toLocaleString();
+      const summary = chat.summary ? ` - ${chat.summary}` : '';
+      this.logger.log(
+        `  ${i + 1}. ${chat.sessionId} | ${date} | ${chat.messageCount} messages${summary}\n`,
+        { type: 'info' }
+      );
+    }
+    
+    const selection = await this.rl.question('\nEnter number (or "q" to cancel): ');
+    
+    if (selection.toLowerCase() === 'q' || selection.toLowerCase() === 'quit') {
+      this.logger.log('\nCancelled.\n', { type: 'info' });
+      return;
+    }
+    
+    const index = parseInt(selection) - 1;
+    if (isNaN(index) || index < 0 || index >= Math.min(chats.length, 20)) {
+      this.logger.log('\nInvalid selection.\n', { type: 'error' });
+      return;
+    }
+    
+    const selectedChat = chats[index];
+    
+    const formatSelection = (await this.rl.question('\nExport format (json/md) [md]: ')).trim().toLowerCase();
+    const format = formatSelection === 'json' ? 'json' : 'md';
+    
+    const pathSelection = (await this.rl.question('\nEnter file path (or press Enter for default): ')).trim();
+    
+    let exportPath: string;
+    if (pathSelection) {
+      exportPath = pathSelection;
+    } else {
+      const fs = await import('fs');
+      const path = await import('path');
+      const { fileURLToPath } = await import('url');
+      const { dirname } = await import('path');
+      const __filename = fileURLToPath(import.meta.url);
+      const __dirname = dirname(__filename);
+      const defaultDir = path.join(__dirname, '..', '.mcp-client-data', 'exports');
+      if (!fs.existsSync(defaultDir)) {
+        fs.mkdirSync(defaultDir, { recursive: true });
+      }
+      const ext = format === 'json' ? 'json' : 'md';
+      exportPath = path.join(defaultDir, `chat-${selectedChat.sessionId}.${ext}`);
+    }
+    
+    let content: string | null;
+    if (format === 'json') {
+      content = historyManager.exportChatAsJson(selectedChat.sessionId);
+    } else {
+      content = historyManager.exportChatAsMarkdown(selectedChat.sessionId);
+    }
+    
+    if (!content) {
+      this.logger.log('\nFailed to export chat.\n', { type: 'error' });
+      return;
+    }
+    
+    const fs = await import('fs');
+    fs.writeFileSync(exportPath, content, 'utf-8');
+    
+    this.logger.log(`\n✓ Chat exported to: ${exportPath}\n`, { type: 'success' });
+  }
+
+  private async renameChat(): Promise<void> {
+    if (!this.rl) {
+      throw new Error('Readline interface not initialized');
+    }
+    
+    const historyManager = this.client.getChatHistoryManager();
+    const chats = historyManager.getAllChats();
+    
+    if (chats.length === 0) {
+      this.logger.log('\nNo chat sessions available to rename.\n', { type: 'warning' });
+      return;
+    }
+    
+    this.logger.log('\n📝 Select a chat to rename:\n', { type: 'info' });
+    
+    for (let i = 0; i < Math.min(chats.length, 20); i++) {
+      const chat = chats[i];
+      const date = new Date(chat.startTime).toLocaleString();
+      // Extract current filename from path
+      const currentFileName = chat.filePath.split('/').pop() || chat.filePath;
+      this.logger.log(
+        `  ${i + 1}. ${chat.sessionId} | ${date} | ${chat.messageCount} messages | ${currentFileName}\n`,
+        { type: 'info' }
+      );
+    }
+    
+    const selection = await this.rl.question('\nEnter number (or "q" to cancel): ');
+    
+    if (selection.toLowerCase() === 'q' || selection.toLowerCase() === 'quit') {
+      this.logger.log('\nCancelled.\n', { type: 'info' });
+      return;
+    }
+    
+    const index = parseInt(selection) - 1;
+    if (isNaN(index) || index < 0 || index >= Math.min(chats.length, 20)) {
+      this.logger.log('\nInvalid selection.\n', { type: 'error' });
+      return;
+    }
+    
+    const selectedChat = chats[index];
+    const currentFileName = selectedChat.filePath.split('/').pop() || selectedChat.filePath;
+    
+    this.logger.log(`\nCurrent filename: ${currentFileName}\n`, { type: 'info' });
+    
+    const newName = (await this.rl.question('\nEnter new name for the file: ')).trim();
+    
+    if (!newName) {
+      this.logger.log('\nName cannot be empty.\n', { type: 'error' });
+      return;
+    }
+    
+    const updated = historyManager.renameChat(selectedChat.sessionId, newName);
+    
+    if (updated) {
+      const sanitizedName = newName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+      const sessionIdParts = selectedChat.sessionId.split('-');
+      const sessionIdShort = sessionIdParts[sessionIdParts.length - 1];
+      this.logger.log(`\n✓ Chat ${selectedChat.sessionId} renamed to: chat-${sessionIdShort}-${sanitizedName}.json\n`, { type: 'success' });
+    } else {
+      this.logger.log(`\n✗ Failed to rename chat ${selectedChat.sessionId}.\n`, { type: 'error' });
+    }
+  }
+
+  private async clearChat(): Promise<void> {
+    if (!this.rl) {
+      throw new Error('Readline interface not initialized');
+    }
+    
+    const historyManager = this.client.getChatHistoryManager();
+    const chats = historyManager.getAllChats();
+    
+    if (chats.length === 0) {
+      this.logger.log('\nNo chat sessions available to clear.\n', { type: 'warning' });
+      return;
+    }
+    
+    this.logger.log('\n🗑️  Select a chat to delete:\n', { type: 'info' });
+    this.logger.log(`  0. Delete ALL chats (${chats.length} total)\n`, { type: 'warning' });
+    
+    for (let i = 0; i < Math.min(chats.length, 20); i++) {
+      const chat = chats[i];
+      const date = new Date(chat.startTime).toLocaleString();
+      const summary = chat.summary ? ` - ${chat.summary}` : '';
+      this.logger.log(
+        `  ${i + 1}. ${chat.sessionId} | ${date} | ${chat.messageCount} messages${summary}\n`,
+        { type: 'info' }
+      );
+    }
+    
+    const selection = await this.rl.question('\nEnter number (or "q" to cancel): ');
+    
+    if (selection.toLowerCase() === 'q' || selection.toLowerCase() === 'quit') {
+      this.logger.log('\nCancelled.\n', { type: 'info' });
+      return;
+    }
+    
+    // Handle "delete all" option
+    if (selection === '0') {
+      const confirm = (await this.rl.question(`\n⚠️  Are you sure you want to delete ALL ${chats.length} chat(s)? This cannot be undone! (yes/no): `)).trim().toLowerCase();
+      
+      if (confirm !== 'yes' && confirm !== 'y') {
+        this.logger.log('\nCancelled.\n', { type: 'info' });
+        return;
+      }
+      
+      const deletedCount = historyManager.deleteAllChats();
+      
+      if (deletedCount > 0) {
+        this.logger.log(`\n✓ Successfully deleted ${deletedCount} chat(s).\n`, { type: 'success' });
+      } else {
+        this.logger.log(`\n✗ Failed to delete chats.\n`, { type: 'error' });
+      }
+      return;
+    }
+    
+    const index = parseInt(selection) - 1;
+    if (isNaN(index) || index < 0 || index >= Math.min(chats.length, 20)) {
+      this.logger.log('\nInvalid selection.\n', { type: 'error' });
+      return;
+    }
+    
+    const selectedChat = chats[index];
+    
+    const confirm = (await this.rl.question(`\nAre you sure you want to delete chat ${selectedChat.sessionId}? (yes/no): `)).trim().toLowerCase();
+    
+    if (confirm !== 'yes' && confirm !== 'y') {
+      this.logger.log('\nCancelled.\n', { type: 'info' });
+      return;
+    }
+    
+    const deleted = historyManager.deleteChat(selectedChat.sessionId);
+    
+    if (deleted) {
+      this.logger.log(`\n✓ Chat ${selectedChat.sessionId} deleted successfully.\n`, { type: 'success' });
+    } else {
+      this.logger.log(`\n✗ Failed to delete chat ${selectedChat.sessionId}.\n`, { type: 'error' });
     }
   }
 }

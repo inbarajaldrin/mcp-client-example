@@ -2,13 +2,12 @@ import type { Tool } from './model-provider.js';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { homedir } from 'os';
 import { Logger } from './logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
-const CONFIG_DIR = join(homedir(), '.mcp-client');
+const CONFIG_DIR = join(__dirname, '..', '.mcp-client-data');
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 
 interface ClientConfig {

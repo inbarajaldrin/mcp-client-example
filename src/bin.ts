@@ -4,7 +4,6 @@ import { parseArgs } from 'node:util';
 import { MCPClientCLI } from './cli-client.js';
 import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname, resolve } from 'path';
-import { homedir } from 'os';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import { ClaudeProvider } from './providers/claude.js';
@@ -43,7 +42,7 @@ interface ClaudeDesktopConfig {
   >;
 }
 
-const CONFIG_DIR = join(homedir(), '.mcp-client');
+const CONFIG_DIR = join(__dirname, '..', '.mcp-client-data');
 const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 
 // Try to find local mcp_config.json in mcp-client directory

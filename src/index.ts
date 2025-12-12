@@ -16,6 +16,7 @@ import { consoleStyles, Logger, LoggerOptions } from './logger.js';
 import { TodoManager } from './todo.js';
 import { ToolManager } from './tool-manager.js';
 import { PromptManager } from './prompt-manager.js';
+import { ChatHistoryManager } from './chat-history-manager.js';
 import type {
   ModelProvider,
   TokenCounter,
@@ -63,6 +64,7 @@ export class MCPClient {
   private todosWereSkipped: boolean = false; // Track if todos were skipped
   private toolManager: ToolManager;
   private promptManager: PromptManager;
+  private chatHistoryManager: ChatHistoryManager;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -99,6 +101,9 @@ export class MCPClient {
     
     // Initialize prompt manager
     this.promptManager = new PromptManager(this.logger);
+    
+    // Initialize chat history manager
+    this.chatHistoryManager = new ChatHistoryManager(this.logger);
   }
 
   // Constructor for multiple named servers
@@ -125,6 +130,7 @@ export class MCPClient {
     client.todoManager = new TodoManager(client.logger);
     client.toolManager = new ToolManager(client.logger);
     client.promptManager = new PromptManager(client.logger);
+    client.chatHistoryManager = new ChatHistoryManager(client.logger);
     return client;
   }
 
@@ -200,8 +206,17 @@ export class MCPClient {
     // Initialize prompts from all successfully connected servers
     await this.initMCPPrompts();
     
+    // Start chat session after servers are connected
+    const serverNames = Array.from(this.servers.keys());
+    this.chatHistoryManager.startSession(this.model, serverNames);
+    
     this.logger.log(
       `Connected to ${this.servers.size} server(s): ${Array.from(this.servers.keys()).join(', ')}\n`,
+      { type: 'info' },
+    );
+    
+    this.logger.log(
+      `Chat session started: ${this.chatHistoryManager.getCurrentSessionId()}\n`,
       { type: 'info' },
     );
   }
@@ -594,6 +609,10 @@ export class MCPClient {
    */
   getPromptManager(): PromptManager {
     return this.promptManager;
+  }
+
+  getChatHistoryManager(): ChatHistoryManager {
+    return this.chatHistoryManager;
   }
 
   /**
@@ -1044,6 +1063,12 @@ export class MCPClient {
             this.logger.log(chunk.result + '\n', { type: 'success' });
           }
         }
+        // Log tool execution to history
+        this.chatHistoryManager.addToolExecution(
+          chunk.toolName,
+          chunk.toolInput || {},
+          chunk.result || '',
+        );
         continue;
       }
 

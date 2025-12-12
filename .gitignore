@@ -6,3 +6,6 @@ node_modules/
 
 # Build output
 dist/
+
+# MCP client data (chat history, tool states, config)
+.mcp-client-data/
