@@ -1,7 +1,7 @@
 import { Anthropic } from '@anthropic-ai/sdk';
 import { Tool as AnthropicTool } from '@anthropic-ai/sdk/resources/index.mjs';
 import { Stream } from '@anthropic-ai/sdk/streaming.mjs';
-import { encoding_for_model, get_encoding } from 'tiktoken';
+import { encoding_for_model } from 'tiktoken';
 import type {
   ModelProvider,
   TokenCounter,
@@ -48,18 +48,8 @@ export class ClaudeTokenCounter implements TokenCounter {
       200000;
 
     // Claude models use cl100k_base encoding (same as GPT-4)
-    try {
-      // Use cl100k_base encoding for Claude models via gpt-4 model
-      this.encoder = encoding_for_model('gpt-4'); // gpt-4 uses cl100k_base, compatible with Claude
-    } catch (error) {
-      // Fallback: try to get cl100k_base directly
-      try {
-        this.encoder = get_encoding('cl100k_base');
-      } catch (e) {
-        // Last resort fallback - will use character estimation
-        this.encoder = null;
-      }
-    }
+    // Use cl100k_base encoding for Claude models via gpt-4 model
+    this.encoder = encoding_for_model('gpt-4'); // gpt-4 uses cl100k_base, compatible with Claude
 
     this.config = {
       threshold: 80, // Default: summarize at 80% of context window
@@ -70,18 +60,8 @@ export class ClaudeTokenCounter implements TokenCounter {
   }
 
   countTokens(text: string): number {
-    if (!this.encoder) {
-      // Fallback estimation: ~4 characters per token (rough approximation)
-      return Math.ceil(text.length / 4);
-    }
-
-    try {
-      const tokens = this.encoder.encode(text);
-      return tokens.length;
-    } catch (error) {
-      // Fallback to rough estimation if encoding fails
-      return Math.ceil(text.length / 4);
-    }
+    const tokens = this.encoder.encode(text);
+    return tokens.length;
   }
 
   countMessageTokens(message: { role: string; content: string }): number {
@@ -441,6 +421,60 @@ export class ClaudeProvider implements ModelProvider {
     });
 
     return response as any;
+  }
+
+  /**
+   * Count tokens using official Anthropic Token Counting API
+   * Returns exact token count from Anthropic API
+   * Includes tools, images, PDFs, system prompts
+   * Token counting is free, subject to rate limits
+   * 
+   * Based on official docs: https://docs.anthropic.com/claude/reference/count-tokens
+   * Note: Uses beta API with token-counting-2024-11-01 header
+   */
+  async countTokensOfficial(
+    messages: Message[],
+    model: string,
+    tools: Tool[],
+    system?: string,
+  ): Promise<number> {
+    // Convert messages to Anthropic format
+    const anthropicMessages = messages
+      .filter((msg) => {
+        if (msg.role === 'assistant' && msg.tool_calls && !msg.content) {
+          return false;
+        }
+        return true;
+      })
+      .map((msg) => ({
+        role: (msg.role === 'tool' ? 'user' : msg.role) as 'user' | 'assistant',
+        content: msg.content || '',
+      }));
+
+    // Convert tools to Anthropic format
+    const anthropicTools: AnthropicTool[] = tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.input_schema,
+    }));
+
+    // Call official token counting API using beta method
+    // The beta.messages.countTokens() method requires the beta header
+    const response = await (this.anthropicClient as any).beta.messages.countTokens(
+      {
+        model: model,
+        messages: anthropicMessages,
+        ...(anthropicTools.length > 0 && { tools: anthropicTools }),
+        ...(system && { system }),
+      },
+      {
+        headers: {
+          'anthropic-beta': 'token-counting-2024-11-01',
+        },
+      }
+    );
+
+    return response.input_tokens;
   }
 }
 

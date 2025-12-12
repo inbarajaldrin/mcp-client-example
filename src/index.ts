@@ -436,14 +436,14 @@ export class MCPClient {
         enabled: true,
       });
       this.logger.log(
-        `\n🧪 Test mode enabled: Summarization will trigger at ${testThreshold}% (${Math.round(this.tokenCounter.getContextWindow() * testThreshold / 100)} tokens)\n`,
+        `\nTest mode enabled: Summarization will trigger at ${testThreshold}% (${Math.round(this.tokenCounter.getContextWindow() * testThreshold / 100)} tokens)\n`,
         { type: 'info' },
       );
     } else {
       this.tokenCounter.updateConfig({
         threshold: 80, // Back to normal
       });
-      this.logger.log('\n🧪 Test mode disabled: Summarization threshold reset to 80%\n', {
+      this.logger.log('\nTest mode disabled: Summarization threshold reset to 80%\n', {
         type: 'info',
       });
     }
@@ -913,6 +913,12 @@ export class MCPClient {
         continue;
       }
 
+      // Handle token usage from OpenAI (exact counts from API)
+      if (chunk.type === 'token_usage' && chunk.input_tokens !== undefined) {
+        this.currentTokenCount = chunk.input_tokens + chunk.output_tokens;
+        continue;
+      }
+
       if (chunk.type === 'message_stop') {
         // Message complete - add to history if we have content
         // Note: message_stop doesn't always mean we're done - it could be after tool calls
@@ -923,7 +929,18 @@ export class MCPClient {
             content: currentMessage,
           };
           this.messages.push(assistantMessage);
-          this.currentTokenCount += this.tokenCounter.countMessageTokens(assistantMessage);
+          
+          // Use official token counting for accurate counts
+          if (this.modelProvider.getProviderName() === 'claude') {
+            const provider = this.modelProvider as any;
+            const exactCount = await provider.countTokensOfficial(
+              this.messages,
+              this.model,
+              this.tools,
+            );
+            this.currentTokenCount = exactCount;
+          }
+          // OpenAI: token counts come from token_usage events (already handled above)
         }
 
         // Check if we need to summarize after this response
@@ -953,7 +970,18 @@ export class MCPClient {
               content: textContent,
             };
             this.messages.push(assistantMessage);
-            this.currentTokenCount += this.tokenCounter.countMessageTokens(assistantMessage);
+            
+            // Use official token counting for accurate counts
+            if (this.modelProvider.getProviderName() === 'claude') {
+              const provider = this.modelProvider as any;
+              const exactCount = await provider.countTokensOfficial(
+                this.messages,
+                this.model,
+                this.tools,
+              );
+              this.currentTokenCount = exactCount;
+            }
+            // OpenAI: token counts come from token_usage events (already handled above)
           }
         }
 
@@ -992,13 +1020,6 @@ export class MCPClient {
       this.messages.push(userMessage);
       this.currentTokenCount += this.tokenCounter.countMessageTokens(userMessage);
 
-      // Log token usage
-      const usage = this.tokenCounter.getUsage(this.currentTokenCount);
-      this.logger.log(
-        `[Token usage: ${usage.current}/${usage.limit} (${usage.percentage}%)]\n`,
-        { type: 'info' },
-      );
-
       // Check again after adding message
       if (this.shouldSummarize()) {
         await this.autoSummarize();
@@ -1030,6 +1051,13 @@ export class MCPClient {
       // Process the stream and collect final assistant message
       await this.processToolUseStream(stream);
 
+      // Log token usage after agent response
+      const usage = this.tokenCounter.getUsage(this.currentTokenCount);
+      this.logger.log(
+        `\n[Token usage: ${usage.current}/${usage.limit} (${usage.percentage}%)]\n`,
+        { type: 'info' },
+      );
+
       // Check todo status if todo mode is enabled and agent is trying to exit
       if (this.todoManager.isEnabled()) {
         const todoStatus = await this.checkTodoStatus();
@@ -1056,6 +1084,13 @@ export class MCPClient {
             toolExecutor,
           );
           await this.processToolUseStream(continueStream);
+          
+          // Log token usage after continue stream response
+          const continueUsage = this.tokenCounter.getUsage(this.currentTokenCount);
+          this.logger.log(
+            `\n[Token usage: ${continueUsage.current}/${continueUsage.limit} (${continueUsage.percentage}%)]\n`,
+            { type: 'info' },
+          );
         }
       }
 

@@ -1,5 +1,5 @@
 import OpenAI from 'openai';
-import { encoding_for_model, get_encoding } from 'tiktoken';
+import { encoding_for_model } from 'tiktoken';
 import type {
   ModelProvider,
   TokenCounter,
@@ -47,24 +47,16 @@ export class OpenAITokenCounter implements TokenCounter {
       OPENAI_MODEL_CONTEXT_WINDOWS['gpt-5'] ||
       200000;
 
-    try {
-      const tiktokenModel = modelName.startsWith('gpt-5')
+    const tiktokenModel = modelName.startsWith('gpt-5')
+      ? 'gpt-4'
+      : modelName.startsWith('gpt-4')
         ? 'gpt-4'
-        : modelName.startsWith('gpt-4')
-          ? 'gpt-4'
-          : modelName.startsWith('gpt-3.5')
-            ? 'gpt-3.5-turbo'
-            : modelName.startsWith('o1')
-              ? 'gpt-4'
-              : 'gpt-4';
-      this.encoder = encoding_for_model(tiktokenModel);
-    } catch (error) {
-      try {
-        this.encoder = get_encoding('cl100k_base');
-      } catch (e) {
-        this.encoder = null;
-      }
-    }
+        : modelName.startsWith('gpt-3.5')
+          ? 'gpt-3.5-turbo'
+          : modelName.startsWith('o1')
+            ? 'gpt-4'
+            : 'gpt-4';
+    this.encoder = encoding_for_model(tiktokenModel);
 
     this.config = {
       threshold: 80,
@@ -75,16 +67,8 @@ export class OpenAITokenCounter implements TokenCounter {
   }
 
   countTokens(text: string): number {
-    if (!this.encoder) {
-      return Math.ceil(text.length / 4);
-    }
-
-    try {
-      const tokens = this.encoder.encode(text);
-      return tokens.length;
-    } catch (error) {
-      return Math.ceil(text.length / 4);
-    }
+    const tokens = this.encoder.encode(text);
+    return tokens.length;
   }
 
   countMessageTokens(message: { role: string; content: string }): number {
@@ -325,6 +309,15 @@ export class OpenAIProvider implements ModelProvider {
           } as MessageStreamEvent;
         }
 
+        // Yield token usage at the end of stream
+        if (chunk.usage) {
+          yield {
+            type: 'token_usage',
+            input_tokens: chunk.usage.prompt_tokens,
+            output_tokens: chunk.usage.completion_tokens,
+          } as MessageStreamEvent;
+        }
+
         yield {
           type: 'message_stop',
         } as MessageStreamEvent;
@@ -422,6 +415,15 @@ export class OpenAIProvider implements ModelProvider {
             })
           : undefined,
       });
+
+      // Yield token usage from response (OpenAI provides exact counts)
+      if (response.usage) {
+        yield {
+          type: 'token_usage',
+          input_tokens: response.usage.prompt_tokens,
+          output_tokens: response.usage.completion_tokens,
+        } as MessageStreamEvent;
+      }
 
       // Step 2: Check for tool calls
       if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
@@ -573,6 +575,24 @@ export class OpenAIProvider implements ModelProvider {
           text: response.choices[0]?.message?.content || '',
         },
       ],
+    };
+  }
+
+  /**
+   * Get token counts from OpenAI response metadata
+   * Returns exact token counts from API response
+   * Includes all input and output tokens
+   * Included in every API response
+   * 
+   * Based on official docs: https://help.openai.com/en/articles/4936856-what-are-tokens-and-how-to-count-them
+   */
+  getTokenCountsFromResponse(response: any): {
+    input_tokens: number;
+    output_tokens: number;
+  } {
+    return {
+      input_tokens: response.usage?.prompt_tokens ?? 0,
+      output_tokens: response.usage?.completion_tokens ?? 0,
     };
   }
 }
