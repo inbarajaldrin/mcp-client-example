@@ -228,6 +228,48 @@ export class MCPClientCLI {
     }
   }
 
+  /**
+   * Ask user what to do with completed todos
+   * Returns: 'clear' | 'leave'
+   */
+  private async askUserAboutCompletedTodos(todosList: string): Promise<'clear' | 'leave'> {
+    if (!this.rl) {
+      return 'leave';
+    }
+
+    console.log(`\n✓ All todos have been completed!`);
+    console.log('\n' + '─'.repeat(50));
+    console.log('\nWhat would you like to do with the completed todos?');
+    console.log('  1. View todos');
+    console.log('  2. Leave todos as is');
+    console.log('  3. Clear all todos');
+    console.log('');
+    
+    while (true) {
+      const response = (await this.rl.question('> ')).trim().toLowerCase();
+      
+      if (response === '1' || response === 'view' || response === 'v') {
+        // Show the todos list
+        console.log('\n' + todosList);
+        // Add separator
+        console.log('\n' + '─'.repeat(50) + '\n');
+        // Ask again
+        console.log('What would you like to do?');
+        console.log('  1. View todos');
+        console.log('  2. Leave todos as is');
+        console.log('  3. Clear all todos');
+        console.log('');
+        continue;
+      } else if (response === '2' || response === 'leave' || response === 'l') {
+        return 'leave';
+      } else if (response === '3' || response === 'clear' || response === 'c') {
+        return 'clear';
+      } else {
+        console.log('Please enter 1, 2, or 3 (or view/leave/clear): ');
+      }
+    }
+  }
+
   private async chat_loop() {
     if (!this.rl) {
       throw new Error('Readline interface not initialized');
@@ -299,8 +341,11 @@ export class MCPClientCLI {
               continue;
             }
             
-            // Pass the callback to ask user about clearing todos
-            await this.client.enableTodoMode((todosList) => this.askUserToClearTodos(todosList));
+            // Pass the callbacks to ask user about clearing todos and completed todos
+            await this.client.enableTodoMode(
+              (todosList) => this.askUserToClearTodos(todosList),
+              (todosList) => this.askUserAboutCompletedTodos(todosList)
+            );
             // Don't send prompt immediately - it will be sent with the first user message
           } catch (error) {
             this.logger.log(

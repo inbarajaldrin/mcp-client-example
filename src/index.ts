@@ -58,6 +58,7 @@ export class MCPClient {
   private todoManager: TodoManager;
   private todoModeInitialized: boolean = false;
   private todoClearUserCallback?: (todosList: string) => Promise<'clear' | 'skip' | 'leave'>;
+  private todoCompletionUserCallback?: (todosList: string) => Promise<'clear' | 'leave'>;
   private todosLeftAsIs: boolean = false; // Track if todos were left as-is (not skipped)
   private todosWereSkipped: boolean = false; // Track if todos were skipped
   private toolManager: ToolManager;
@@ -466,8 +467,12 @@ export class MCPClient {
   /**
    * Enable todo mode - connect to todo server and filter tools
    * @param askUserCallback Optional callback to ask user what to do with incomplete todos
+   * @param completionCallback Optional callback to ask user what to do when all todos are completed
    */
-  async enableTodoMode(askUserCallback?: (todosList: string) => Promise<'clear' | 'skip' | 'leave'>): Promise<void> {
+  async enableTodoMode(
+    askUserCallback?: (todosList: string) => Promise<'clear' | 'skip' | 'leave'>,
+    completionCallback?: (todosList: string) => Promise<'clear' | 'leave'>
+  ): Promise<void> {
     if (!this.todoManager.isConfigured()) {
       throw new Error('Todo server not configured. Please add "todo" server to mcp_config.json');
     }
@@ -493,8 +498,9 @@ export class MCPClient {
       // Reload tools to apply filtering
       await this.initMCPTools();
       
-      // Store the callback for use in processQuery
+      // Store the callbacks for use in processQuery
       this.todoClearUserCallback = askUserCallback;
+      this.todoCompletionUserCallback = completionCallback;
       
       // Check if todos exist and handle clearing
       const result = await this.clearTodosIfNeeded(askUserCallback);
@@ -524,6 +530,7 @@ export class MCPClient {
     this.todoManager.disable();
     this.todoModeInitialized = false;
     this.todoClearUserCallback = undefined;
+    this.todoCompletionUserCallback = undefined;
     this.todosLeftAsIs = false;
     this.todosWereSkipped = false;
     
@@ -1218,6 +1225,15 @@ export class MCPClient {
         while (true) {
           const todoStatus = await this.checkTodoStatus();
           if (todoStatus.activeCount === 0) {
+            // All todos are complete, ask user what to do
+            if (this.todoCompletionUserCallback) {
+              const todosList = await this.todoManager.getAllTodosList();
+              const userChoice = await this.todoCompletionUserCallback(todosList);
+              if (userChoice === 'clear') {
+                await this.clearAllTodos(true);
+              }
+              // If 'leave', todos remain as is
+            }
             // All todos are complete, we can exit
             break;
           }
@@ -1225,7 +1241,7 @@ export class MCPClient {
           // Agent is trying to exit but has incomplete todos
           const reminderMessage: Message = {
             role: 'user',
-            content: `You have ${todoStatus.activeCount} incomplete todo(s). Please complete them using complete-todo. Only skip them using skip-todo if you cannot perform these tasks.\n\nActive todos:\n${todoStatus.todosList}\n\nYou cannot exit until all todos are completed or skipped.`,
+            content: `You have ${todoStatus.activeCount} incomplete todo(s). Please complete them using complete-todo. Only skip them using skip-todo if you cannot perform these tasks. Before executing the next action, first update the previous action you completed (mark it as complete using complete-todo), then read the next todo using read-next-todo.\n\nActive todos:\n${todoStatus.todosList}\n\nYou cannot exit until all todos are completed or skipped.`,
           };
           this.messages.push(reminderMessage);
           this.currentTokenCount += this.tokenCounter.countMessageTokens(reminderMessage);
