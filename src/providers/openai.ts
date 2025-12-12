@@ -10,6 +10,12 @@ import type {
   MessageStreamEvent,
 } from '../model-provider.js';
 
+// Tool Executor Type - function that executes tools on your system
+export type ToolExecutor = (
+  toolName: string,
+  toolInput: Record<string, any>,
+) => Promise<string>;
+
 // OpenAI model context window limits (in tokens)
 const OPENAI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'gpt-5': 200000,
@@ -22,7 +28,6 @@ const OPENAI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'gpt-3.5-turbo-16k': 16385,
   'o1-preview': 200000,
   'o1-mini': 128000,
-  // Add other OpenAI model variants as needed
 };
 
 // OpenAI Token Counter Implementation
@@ -42,28 +47,28 @@ export class OpenAITokenCounter implements TokenCounter {
       OPENAI_MODEL_CONTEXT_WINDOWS['gpt-5'] ||
       200000;
 
-    // OpenAI models use cl100k_base encoding
     try {
-      // Map OpenAI model names to tiktoken model names
-      const tiktokenModel = modelName.startsWith('gpt-5') ? 'gpt-4' : // gpt-5 uses gpt-4 encoding
-                           modelName.startsWith('gpt-4') ? 'gpt-4' :
-                           modelName.startsWith('gpt-3.5') ? 'gpt-3.5-turbo' :
-                           modelName.startsWith('o1') ? 'gpt-4' : // o1 models use gpt-4 encoding
-                           'gpt-4'; // Default to gpt-4 encoding
+      const tiktokenModel = modelName.startsWith('gpt-5')
+        ? 'gpt-4'
+        : modelName.startsWith('gpt-4')
+          ? 'gpt-4'
+          : modelName.startsWith('gpt-3.5')
+            ? 'gpt-3.5-turbo'
+            : modelName.startsWith('o1')
+              ? 'gpt-4'
+              : 'gpt-4';
       this.encoder = encoding_for_model(tiktokenModel);
     } catch (error) {
-      // Fallback: try to get cl100k_base directly
       try {
         this.encoder = get_encoding('cl100k_base');
       } catch (e) {
-        // Last resort fallback - will use character estimation
         this.encoder = null;
       }
     }
 
     this.config = {
-      threshold: 80, // Default: summarize at 80% of context window
-      recentMessagesToKeep: 10, // Default: keep last 10 messages
+      threshold: 80,
+      recentMessagesToKeep: 10,
       enabled: true,
       ...config,
     };
@@ -71,7 +76,6 @@ export class OpenAITokenCounter implements TokenCounter {
 
   countTokens(text: string): number {
     if (!this.encoder) {
-      // Fallback estimation: ~4 characters per token (rough approximation)
       return Math.ceil(text.length / 4);
     }
 
@@ -79,17 +83,13 @@ export class OpenAITokenCounter implements TokenCounter {
       const tokens = this.encoder.encode(text);
       return tokens.length;
     } catch (error) {
-      // Fallback to rough estimation if encoding fails
       return Math.ceil(text.length / 4);
     }
   }
 
   countMessageTokens(message: { role: string; content: string }): number {
-    // Count tokens for the message structure
-    // Format: role + content + overhead
     const roleTokens = this.countTokens(message.role);
     const contentTokens = this.countTokens(message.content);
-    // Add overhead for message structure (approximately 4 tokens)
     return roleTokens + contentTokens + 4;
   }
 
@@ -108,7 +108,7 @@ export class OpenAITokenCounter implements TokenCounter {
     return {
       current: currentTokens,
       limit: this.maxTokens,
-      percentage: Math.round(percentage * 100) / 100, // Round to 2 decimal places
+      percentage: Math.round(percentage * 100) / 100,
       suggestion,
     };
   }
@@ -174,8 +174,6 @@ export class OpenAIProvider implements ModelProvider {
   }
 
   getToolType(): any {
-    // Return a dummy value - this method is for type compatibility only
-    // The actual Tool type is handled at compile time
     return undefined;
   }
 
@@ -193,7 +191,7 @@ export class OpenAIProvider implements ModelProvider {
     maxTokens: number,
   ): AsyncIterable<MessageStreamEvent> {
     // Convert generic Tool[] to OpenAI function format
-    const openaiFunctions = tools.map((tool) => ({
+    const openaiTools = tools.map((tool) => ({
       type: 'function' as const,
       function: {
         name: tool.name,
@@ -217,7 +215,7 @@ export class OpenAIProvider implements ModelProvider {
         return {
           role: 'assistant' as const,
           content: msg.content || null,
-          tool_calls: msg.tool_calls.map(tc => ({
+          tool_calls: msg.tool_calls.map((tc) => ({
             id: tc.id,
             type: 'function' as const,
             function: {
@@ -237,21 +235,17 @@ export class OpenAIProvider implements ModelProvider {
       model: model,
       messages: openaiMessages,
       max_completion_tokens: maxTokens,
-      tools: openaiFunctions.length > 0 ? openaiFunctions : undefined,
+      tools: openaiTools.length > 0 ? openaiTools : undefined,
       stream: true,
     });
 
-    // Track tool calls by index to handle streaming chunks properly
     const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
     let messageStarted = false;
 
-    // Convert OpenAI stream events to a normalized format
-    // OpenAI uses a different event structure than Anthropic, so we normalize it
     for await (const chunk of stream) {
       const choice = chunk.choices?.[0];
       if (!choice) continue;
 
-      // Yield message_start on first chunk (OpenAI doesn't send this, but our processor expects it)
       if (!messageStarted) {
         yield {
           type: 'message_start',
@@ -260,8 +254,7 @@ export class OpenAIProvider implements ModelProvider {
       }
 
       const delta = choice.delta;
-      
-      // Handle text content
+
       if (delta.content) {
         yield {
           type: 'content_block_delta',
@@ -272,40 +265,34 @@ export class OpenAIProvider implements ModelProvider {
         } as MessageStreamEvent;
       }
 
-      // Handle tool calls
       if (delta.tool_calls && delta.tool_calls.length > 0) {
         for (const toolCall of delta.tool_calls) {
           const index = toolCall.index;
-          
-          // Initialize tracker for this tool call index if not exists
+
           if (!toolCallTracker.has(index)) {
             toolCallTracker.set(index, { arguments: '' });
           }
-          
+
           const tracker = toolCallTracker.get(index)!;
-          
-          // Handle tool call ID (comes first)
+
           if (toolCall.id && !tracker.id) {
             tracker.id = toolCall.id;
           }
-          
-          // Handle tool name (must come before arguments)
+
           if (toolCall.function?.name) {
             if (!tracker.name) {
-              // First time we see the name - yield start event
               tracker.name = toolCall.function.name;
               yield {
                 type: 'content_block_start',
                 content_block: {
                   type: 'tool_use',
                   name: toolCall.function.name,
-                  id: tracker.id, // Include tool call ID if available
+                  id: tracker.id,
                 },
               } as MessageStreamEvent;
             }
           }
-          
-          // Handle tool arguments (may come in chunks, but only after we have the name)
+
           if (toolCall.function?.arguments && tracker.name) {
             tracker.arguments += toolCall.function.arguments;
             yield {
@@ -319,11 +306,9 @@ export class OpenAIProvider implements ModelProvider {
         }
       }
 
-      // Handle finish reason
       if (choice.finish_reason) {
-        // Clear tracker when message finishes
         toolCallTracker.clear();
-        
+
         if (choice.finish_reason === 'tool_calls') {
           yield {
             type: 'message_delta',
@@ -339,12 +324,229 @@ export class OpenAIProvider implements ModelProvider {
             },
           } as MessageStreamEvent;
         }
-        
+
         yield {
           type: 'message_stop',
         } as MessageStreamEvent;
       }
     }
+  }
+
+  /**
+   * NEW: Agentic loop with tool use support for OpenAI
+   * 
+   * This method implements the full agentic loop:
+   * 1. Send message to OpenAI (non-streaming)
+   * 2. Check if OpenAI returned tool_calls
+   * 3. Execute tools via toolExecutor callback
+   * 4. Send tool results back to OpenAI
+   * 5. Repeat until no more tool_calls
+   * 
+   * Based on official docs:
+   * https://platform.openai.com/docs/guides/function-calling
+   */
+  async *createMessageStreamWithToolUse(
+    messages: Message[],
+    model: string,
+    tools: Tool[],
+    maxTokens: number,
+    toolExecutor: ToolExecutor,
+    maxIterations: number = 10,
+  ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; result: string }> {
+    // Convert generic Tool[] to OpenAI function format
+    const openaiTools = tools.map((tool) => ({
+      type: 'function' as const,
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.input_schema,
+      },
+    }));
+
+    let conversationMessages = [...messages];
+    let iterations = 0;
+
+    while (iterations < maxIterations) {
+      iterations++;
+
+      // Step 1: Send request to OpenAI (non-streaming for tool loop)
+      const response = await this.openaiClient.chat.completions.create({
+        model: model,
+        messages: this.convertToOpenAIMessages(conversationMessages),
+        max_completion_tokens: maxTokens,
+        tools: openaiTools.length > 0 ? openaiTools : undefined,
+      });
+
+      // Convert OpenAI response to normalized format for streaming
+      const assistantMessage = response.choices[0].message;
+
+      // Yield message_start event
+      yield {
+        type: 'message_start',
+      } as MessageStreamEvent;
+
+      // Yield text content if present
+      if (assistantMessage.content) {
+        yield {
+          type: 'content_block_start',
+          content_block: {
+            type: 'text',
+          },
+        } as MessageStreamEvent;
+
+        yield {
+          type: 'content_block_delta',
+          delta: {
+            type: 'text_delta',
+            text: assistantMessage.content,
+          },
+        } as MessageStreamEvent;
+      }
+
+      // Add assistant message to history
+      conversationMessages.push({
+        role: 'assistant',
+        content: assistantMessage.content || '',
+        tool_calls: assistantMessage.tool_calls
+          ? assistantMessage.tool_calls.map((tc) => {
+              // Handle both function and custom tool call types
+              const functionCall = 'function' in tc ? tc.function : null;
+              if (!functionCall) {
+                throw new Error('Tool call does not have function property');
+              }
+              return {
+                id: tc.id,
+                name: functionCall.name,
+                arguments: functionCall.arguments,
+              };
+            })
+          : undefined,
+      });
+
+      // Step 2: Check for tool calls
+      if (!assistantMessage.tool_calls || assistantMessage.tool_calls.length === 0) {
+        // No tool calls → Done! Yield message_stop and exit
+        yield {
+          type: 'message_stop',
+        } as MessageStreamEvent;
+        break;
+      }
+
+      // Step 3: Tools were called - close current message before executing tools
+      yield {
+        type: 'message_stop',
+      } as MessageStreamEvent;
+
+      // Step 4: Execute tools
+      const toolResults: Array<{
+        tool_call_id: string;
+        role: 'tool';
+        name: string;
+        content: string;
+      }> = [];
+
+      for (const toolCall of assistantMessage.tool_calls) {
+        try {
+          // Handle both function and custom tool call types
+          const functionCall = 'function' in toolCall ? toolCall.function : null;
+          if (!functionCall) {
+            throw new Error('Tool call does not have function property');
+          }
+
+          // Parse arguments from JSON string
+          const toolInput = JSON.parse(functionCall.arguments);
+          const result = await toolExecutor(functionCall.name, toolInput);
+
+          // Yield the result so caller can see what happened
+          yield {
+            type: 'tool_use_complete',
+            toolName: functionCall.name,
+            result: result,
+          };
+
+          // Collect result for sending back to OpenAI
+          toolResults.push({
+            tool_call_id: toolCall.id,
+            role: 'tool',
+            name: functionCall.name,
+            content: result,
+          });
+        } catch (error) {
+          // Handle both function and custom tool call types for error message
+          const functionCall = 'function' in toolCall ? toolCall.function : null;
+          const toolName = functionCall?.name || 'unknown';
+          
+          // If tool execution fails, send error back to OpenAI
+          toolResults.push({
+            tool_call_id: toolCall.id,
+            role: 'tool',
+            name: toolName,
+            content: `Error executing tool: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+      }
+
+      // Step 5: Add tool results to conversation
+      // This is critical - tool results must be added so the model can see them
+      for (const toolResult of toolResults) {
+        conversationMessages.push({
+          role: 'tool',
+          tool_call_id: toolResult.tool_call_id,
+          content: toolResult.content,
+        });
+      }
+
+      // Step 6: Loop continues - the next iteration will:
+      // - Make another API call with tool results in conversationMessages
+      // - The model will see the tool outputs and provide the final response
+      // - This response will be yielded in the next iteration (Step 1)
+    }
+  }
+
+  /**
+   * Helper: Convert generic Message[] to OpenAI API format
+   */
+  private convertToOpenAIMessages(messages: Message[]): any[] {
+    return messages.map((msg) => {
+      // Handle user messages
+      if (msg.role === 'user') {
+        return {
+          role: 'user' as const,
+          content: msg.content || '',
+        };
+      }
+
+      // Handle tool role messages - content must be a string (not null)
+      if (msg.role === 'tool' && msg.tool_call_id) {
+        return {
+          role: 'tool' as const,
+          tool_call_id: msg.tool_call_id,
+          content: msg.content || '', // Tool messages require string content
+        };
+      }
+
+      // Handle assistant messages with tool_calls
+      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        return {
+          role: 'assistant' as const,
+          content: msg.content || null,
+          tool_calls: msg.tool_calls.map((tc) => ({
+            id: tc.id,
+            type: 'function' as const,
+            function: {
+              name: tc.name,
+              arguments: tc.arguments,
+            },
+          })),
+        };
+      }
+
+      // Assistant messages without tool_calls
+      return {
+        role: 'assistant' as const,
+        content: msg.content || null,
+      };
+    });
   }
 
   // Helper method to create a non-streaming message (for summarization)
@@ -364,7 +566,6 @@ export class OpenAIProvider implements ModelProvider {
       max_completion_tokens: maxTokens,
     });
 
-    // Convert OpenAI response to a format compatible with Claude's response structure
     return {
       content: [
         {
@@ -375,4 +576,3 @@ export class OpenAIProvider implements ModelProvider {
     };
   }
 }
-

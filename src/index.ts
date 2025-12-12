@@ -24,7 +24,7 @@ import type {
   SummarizationConfig,
   MessageStreamEvent,
 } from './model-provider.js';
-import { ClaudeProvider } from './providers/claude.js';
+import { ClaudeProvider, type ToolExecutor } from './providers/claude.js';
 
 type MCPClientOptions = StdioServerParameters & {
   loggerOptions?: LoggerOptions;
@@ -324,6 +324,94 @@ export class MCPClient {
     return json
       .replace(/"([^"]+)":/g, chalk.blue('"$1":'))
       .replace(/: "([^"]+)"/g, ': ' + chalk.green('"$1"'));
+  }
+
+  /**
+   * Execute a tool via MCP servers
+   * This is the callback that the provider calls when Claude wants to use a tool
+   * 
+   * Extracts server name, routes to correct MCP server, and returns result
+   */
+  private async executeMCPTool(
+    toolName: string,
+    toolInput: Record<string, any>,
+  ): Promise<string> {
+    // Extract server name and actual tool name from prefixed name
+    // Format: "server-name__tool-name"
+    const [serverName, actualToolName] = toolName.includes('__')
+      ? toolName.split('__', 2)
+      : [null, toolName];
+
+    let toolResult;
+
+    try {
+      if (serverName && this.servers.has(serverName)) {
+        // Route to the specific server
+        const connection = this.servers.get(serverName)!;
+        toolResult = await connection.client.request(
+          {
+            method: 'tools/call',
+            params: {
+              name: actualToolName,
+              arguments: toolInput,
+            },
+          },
+          CallToolResultSchema,
+        );
+      } else {
+        // Fallback: try to find the tool in any server (backward compatibility)
+        let found = false;
+        for (const [name, connection] of this.servers.entries()) {
+          const tool = connection.tools.find(
+            (t) =>
+              t.name === toolName || t.name.endsWith(`__${toolName}`),
+          );
+          if (tool) {
+            const actualName = tool.name.includes('__')
+              ? tool.name.split('__')[1]
+              : tool.name;
+            toolResult = await connection.client.request(
+              {
+                method: 'tools/call',
+                params: {
+                  name: actualName,
+                  arguments: toolInput,
+                },
+              },
+              CallToolResultSchema,
+            );
+            found = true;
+            break;
+          }
+        }
+        if (!found || !toolResult) {
+          throw new Error(
+            `Tool "${toolName}" not found in any server`,
+          );
+        }
+      }
+
+      // Format and return result
+      const formattedResult = this.formatJSON(
+        JSON.stringify(toolResult.content.flatMap((c) => c.text)),
+      );
+
+      this.logger.log(
+        this.formatToolCall(toolName, toolInput) + '\n',
+      );
+
+      return formattedResult;
+    } catch (toolError) {
+      const errorMessage = `Error executing tool "${toolName}": ${
+        toolError instanceof Error ? toolError.message : String(toolError)
+      }`;
+
+      this.logger.log(`\n⚠️ ${errorMessage}\n`, {
+        type: 'error',
+      });
+
+      throw new Error(errorMessage);
+    }
   }
 
   private shouldSummarize(): boolean {
@@ -770,283 +858,114 @@ export class MCPClient {
     }
   }
 
-  private async processStream(
-    stream: AsyncIterable<MessageStreamEvent>,
+  /**
+   * Simplified stream processor for tool use loop
+   * Handles text output and final message collection
+   * 
+   * The provider handles:
+   * - Tool detection (stop_reason === 'tool_use')
+   * - Tool execution (via our callback)
+   * - Tool result feedback
+   * - Looping
+   * 
+   * We just need to display text and collect assistant messages
+   * Supports both Claude (complete response objects) and OpenAI (streaming events)
+   */
+  private async processToolUseStream(
+    stream: AsyncIterable<any>,
   ): Promise<void> {
-    let currentMessage = '';
-    let currentToolName = '';
-    let currentToolInputString = '';
-    let currentToolCallId: string | undefined = undefined;
-    let assistantMessageAdded = false;
-    let stopReason: string | null = null;
-    let messageStarted = false;
-    const toolCalls: Array<{ id?: string; name: string; arguments: string }> = []; // Track all tool calls in this message
-
     this.logger.log(consoleStyles.assistant);
+    
+    let currentMessage = '';
+    let messageStarted = false;
+    
     for await (const chunk of stream) {
-      switch (chunk.type) {
-        case 'message_start':
-          // Reset flags for new message
-          messageStarted = true;
-          assistantMessageAdded = false;
+      // Handle tool_use_complete events (from provider)
+      if (chunk.type === 'tool_use_complete') {
+        // Tool was executed - provider already handled it
+        // Log the tool execution
+        this.logger.log(
+          `\n[Tool executed: ${chunk.toolName}]\n`,
+          { type: 'info' },
+        );
+        continue;
+      }
+
+      // Handle OpenAI streaming events
+      if (chunk.type === 'message_start') {
+        messageStarted = true;
+        currentMessage = '';
+        continue;
+      }
+
+      if (chunk.type === 'content_block_start') {
+        // Content block starting - reset message if it's a new text block
+        if (chunk.content_block?.type === 'text') {
           currentMessage = '';
-          currentToolName = '';
-          currentToolInputString = '';
-          currentToolCallId = undefined;
-          toolCalls.length = 0; // Clear tool calls array
-          stopReason = null;
-          continue;
+        }
+        continue;
+      }
 
-        case 'content_block_stop':
-          continue;
+      if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'text_delta') {
+        // Accumulate text from OpenAI streaming
+        currentMessage += chunk.delta.text;
+        this.logger.log(chunk.delta.text);
+        continue;
+      }
 
-        case 'content_block_start':
-          if (chunk.content_block?.type === 'tool_use') {
-            currentToolName = chunk.content_block.name;
-            currentToolInputString = ''; // Reset for new tool call
-            currentToolCallId = (chunk.content_block as any).id; // Extract tool call ID if present
-            // Track this tool call
-            toolCalls.push({
-              id: currentToolCallId,
-              name: currentToolName,
-              arguments: '',
-            });
-          }
-          // Initialize message start if not already done (for OpenAI compatibility)
-          if (!messageStarted) {
-            messageStarted = true;
-            assistantMessageAdded = false;
-            currentMessage = '';
-            currentToolName = '';
-            currentToolInputString = '';
-            currentToolCallId = undefined;
-            toolCalls.length = 0; // Clear tool calls array
-            stopReason = null;
-          }
-          break;
+      if (chunk.type === 'message_stop') {
+        // Message complete - add to history if we have content
+        // Note: message_stop doesn't always mean we're done - it could be after tool calls
+        // The provider will continue the loop if tools were called
+        if (currentMessage.trim()) {
+          const assistantMessage: Message = {
+            role: 'assistant',
+            content: currentMessage,
+          };
+          this.messages.push(assistantMessage);
+          this.currentTokenCount += this.tokenCounter.countMessageTokens(assistantMessage);
+        }
 
-        case 'content_block_delta':
-          if (chunk.delta.type === 'text_delta') {
-            this.logger.log(chunk.delta.text);
-            currentMessage += chunk.delta.text;
-          } else if (chunk.delta.type === 'input_json_delta') {
-            if (currentToolName && chunk.delta.partial_json) {
-              currentToolInputString += chunk.delta.partial_json;
-              // Update the last tool call's arguments
-              if (toolCalls.length > 0) {
-                toolCalls[toolCalls.length - 1].arguments += chunk.delta.partial_json;
-              }
-            }
-          }
-          break;
+        // Check if we need to summarize after this response
+        if (this.shouldSummarize()) {
+          await this.autoSummarize();
+        }
 
-        case 'message_delta':
-          // Track stop reason
-          if (chunk.delta.stop_reason) {
-            stopReason = chunk.delta.stop_reason;
-          }
+        // Reset for next message (if loop continues)
+        currentMessage = '';
+        messageStarted = false;
+        continue;
+      }
+
+      // Handle complete response objects from Claude API
+      // These come from Claude's createMessageStreamWithToolUse
+      if (chunk.content && Array.isArray(chunk.content)) {
+        // Extract and display text content
+        const textBlocks = chunk.content.filter((block: any) => block.type === 'text');
+        if (textBlocks.length > 0) {
+          const textContent = textBlocks.map((block: any) => block.text).join('\n');
+          this.logger.log(textContent);
           
-          // Only add assistant message once when we have content and haven't added it yet
-          // Or when we have a stop reason (which means the message is complete)
-          if (!assistantMessageAdded && (currentMessage || stopReason)) {
+          // Add assistant message to history (only if there's actual content)
+          if (textContent.trim()) {
             const assistantMessage: Message = {
               role: 'assistant',
-              content: currentMessage,
-              // Include tool_calls if we have any (for OpenAI compatibility)
-              tool_calls: toolCalls.length > 0 ? toolCalls.map(tc => ({
-                id: tc.id || '',
-                name: tc.name,
-                arguments: tc.arguments,
-              })) : undefined,
+              content: textContent,
             };
             this.messages.push(assistantMessage);
-            assistantMessageAdded = true;
-            // Count tokens for assistant message
             this.currentTokenCount += this.tokenCounter.countMessageTokens(assistantMessage);
           }
+        }
 
-          if (chunk.delta.stop_reason === 'tool_use') {
-            let toolArgs = {};
-            try {
-              toolArgs = currentToolInputString
-                ? JSON.parse(currentToolInputString)
-                : {};
-            } catch (parseError) {
-              // JSON parsing failed - feed error back to agent so it can fix it
-              const errorMessage: Message = {
-                role: 'user',
-                content: `Error parsing tool arguments for "${currentToolName}": ${parseError instanceof Error ? parseError.message : String(parseError)}\n\nInvalid JSON: ${currentToolInputString}\n\nPlease fix the tool call with valid JSON arguments.`,
-              };
-              this.messages.push(errorMessage);
-              this.currentTokenCount += this.tokenCounter.countMessageTokens(errorMessage);
-              
-              this.logger.log(
-                `\n⚠️ JSON parse error for tool "${currentToolName}": ${parseError instanceof Error ? parseError.message : String(parseError)}\n`,
-                { type: 'error' },
-              );
-              
-              // Continue conversation so agent can see the error and fix it
-              const errorStream = this.modelProvider.createMessageStream(
-                this.messages,
-                this.model,
-                this.tools,
-                8192,
-              );
-              await this.processStream(errorStream);
-              return; // Exit early since we've handled the error
-            }
+        // Check if we need to summarize after this response
+        if (this.shouldSummarize()) {
+          await this.autoSummarize();
+        }
 
-            this.logger.log(
-              this.formatToolCall(currentToolName, toolArgs) + '\n',
-            );
-
-            // Extract server name and actual tool name from prefixed name
-            // Format: "server-name__tool-name" (double underscore separator)
-            const [serverName, actualToolName] = currentToolName.includes('__')
-              ? currentToolName.split('__', 2)
-              : [null, currentToolName];
-
-            let toolResult;
-            try {
-              if (serverName && this.servers.has(serverName)) {
-                // Route to the specific server
-                const connection = this.servers.get(serverName)!;
-                toolResult = await connection.client.request(
-                  {
-                    method: 'tools/call',
-                    params: {
-                      name: actualToolName,
-                      arguments: toolArgs,
-                    },
-                  },
-                  CallToolResultSchema,
-                );
-              } else {
-                // Fallback: try to find the tool in any server (backward compatibility)
-                let found = false;
-                for (const [name, connection] of this.servers.entries()) {
-                  const tool = connection.tools.find((t) => t.name === currentToolName || t.name.endsWith(`__${currentToolName}`));
-                  if (tool) {
-                    const actualName = tool.name.includes('__') ? tool.name.split('__')[1] : tool.name;
-                    toolResult = await connection.client.request(
-                      {
-                        method: 'tools/call',
-                        params: {
-                          name: actualName,
-                          arguments: toolArgs,
-                        },
-                      },
-                      CallToolResultSchema,
-                    );
-                    found = true;
-                    break;
-                  }
-                }
-                if (!found || !toolResult) {
-                  throw new Error(`Tool "${currentToolName}" not found in any server`);
-                }
-              }
-            } catch (toolError) {
-              // Tool execution failed - feed error back to agent so it can handle it
-              const errorMessage: Message = {
-                role: 'user',
-                content: `Error executing tool "${currentToolName}": ${toolError instanceof Error ? toolError.message : String(toolError)}\n\nTool arguments: ${JSON.stringify(toolArgs, null, 2)}\n\nPlease handle this error and continue.`,
-              };
-              this.messages.push(errorMessage);
-              this.currentTokenCount += this.tokenCounter.countMessageTokens(errorMessage);
-              
-              this.logger.log(
-                `\n⚠️ Tool execution error for "${currentToolName}": ${toolError instanceof Error ? toolError.message : String(toolError)}\n`,
-                { type: 'error' },
-              );
-              
-              // Continue conversation so agent can see the error and handle it
-              const errorStream = this.modelProvider.createMessageStream(
-                this.messages,
-                this.model,
-                this.tools,
-                8192,
-              );
-              await this.processStream(errorStream);
-              return; // Exit early since we've handled the error
-            }
-
-            const formattedResult = this.formatJSON(
-              JSON.stringify(toolResult.content.flatMap((c) => c.text)),
-            );
-
-            // For OpenAI, use 'tool' role with tool_call_id; for Claude, use 'user' role
-            const toolResultMessage: Message = {
-              role: currentToolCallId ? 'tool' : 'user',
-              content: formattedResult,
-              tool_call_id: currentToolCallId,
-            };
-            this.messages.push(toolResultMessage);
-            // Count tokens for tool result message
-            this.currentTokenCount += this.tokenCounter.countMessageTokens(toolResultMessage);
-
-            // Check if we need to summarize before continuing
-            if (this.shouldSummarize()) {
-              await this.autoSummarize();
-            }
-
-            const nextStream = this.modelProvider.createMessageStream(
-              this.messages,
-              this.model,
-              this.tools,
-              8192,
-            );
-            await this.processStream(nextStream);
-          }
+        // If stop_reason is 'end_turn', Claude is done
+        if (chunk.stop_reason === 'end_turn') {
           break;
-
-        case 'message_stop':
-          // Ensure assistant message is added if it wasn't added in message_delta
-          if (currentMessage && !assistantMessageAdded) {
-            const assistantMessage: Message = {
-              role: 'assistant',
-              content: currentMessage,
-            };
-            this.messages.push(assistantMessage);
-            assistantMessageAdded = true;
-            // Count tokens for assistant message
-            this.currentTokenCount += this.tokenCounter.countMessageTokens(assistantMessage);
-          }
-
-          // Check todo status if todo mode is enabled and agent is trying to exit
-          if (this.todoManager.isEnabled() && stopReason !== 'tool_use') {
-            const todoStatus = await this.checkTodoStatus();
-            if (todoStatus.activeCount > 0) {
-              // Agent is trying to exit but has incomplete todos
-              const reminderMessage: Message = {
-                role: 'user',
-                content: `You have ${todoStatus.activeCount} incomplete todo(s). Please complete them using complete-todo or skip them using skip-todo before finishing.\n\nActive todos:\n${todoStatus.todosList}\n\nYou cannot exit until all todos are completed or skipped.`,
-              };
-              this.messages.push(reminderMessage);
-              this.currentTokenCount += this.tokenCounter.countMessageTokens(reminderMessage);
-              
-              this.logger.log(
-                `\n⚠️ Agent attempted to exit with ${todoStatus.activeCount} incomplete todo(s). Prompting to complete or skip.\n`,
-                { type: 'warning' },
-              );
-              
-              // Continue conversation so agent can complete/skip todos
-              const continueStream = this.modelProvider.createMessageStream(
-                this.messages,
-                this.model,
-                this.tools,
-                8192,
-              );
-              await this.processStream(continueStream);
-              return; // Exit early since we've handled the reminder
-            }
-          }
-          break;
-
-        default:
-          this.logger.log(`Unknown event type: ${JSON.stringify(chunk)}\n`, {
-            type: 'warning',
-          });
+        }
       }
     }
   }
@@ -1068,31 +987,77 @@ export class MCPClient {
         await this.clearAllTodos();
       }
 
+      // Add user message to history
       const userMessage: Message = { role: 'user', content: query };
       this.messages.push(userMessage);
-      
-      // Count tokens for user message
       this.currentTokenCount += this.tokenCounter.countMessageTokens(userMessage);
-      
-      // Log token usage after each message (for testing/debugging)
+
+      // Log token usage
       const usage = this.tokenCounter.getUsage(this.currentTokenCount);
       this.logger.log(
         `[Token usage: ${usage.current}/${usage.limit} (${usage.percentage}%)]\n`,
         { type: 'info' },
       );
 
-      // Check again after adding message (in case we're very close to limit)
+      // Check again after adding message
       if (this.shouldSummarize()) {
         await this.autoSummarize();
       }
 
-      const stream = this.modelProvider.createMessageStream(
+      // Define how to execute MCP tools (callback for the provider)
+      const toolExecutor: ToolExecutor = async (
+        toolName: string,
+        toolInput: Record<string, any>,
+      ) => {
+        return await this.executeMCPTool(toolName, toolInput);
+      };
+
+      // Use the provider's agentic loop instead of manual processing
+      // This handles:
+      // - Sending messages to Claude
+      // - Detecting tool use (stop_reason === 'tool_use')
+      // - Executing tools via our callback
+      // - Sending results back to Claude
+      // - Repeating until Claude is done
+      const stream = (this.modelProvider as any).createMessageStreamWithToolUse(
         this.messages,
         this.model,
         this.tools,
         8192,
+        toolExecutor,
       );
-      await this.processStream(stream);
+
+      // Process the stream and collect final assistant message
+      await this.processToolUseStream(stream);
+
+      // Check todo status if todo mode is enabled and agent is trying to exit
+      if (this.todoManager.isEnabled()) {
+        const todoStatus = await this.checkTodoStatus();
+        if (todoStatus.activeCount > 0) {
+          // Agent is trying to exit but has incomplete todos
+          const reminderMessage: Message = {
+            role: 'user',
+            content: `You have ${todoStatus.activeCount} incomplete todo(s). Please complete them using complete-todo or skip them using skip-todo before finishing.\n\nActive todos:\n${todoStatus.todosList}\n\nYou cannot exit until all todos are completed or skipped.`,
+          };
+          this.messages.push(reminderMessage);
+          this.currentTokenCount += this.tokenCounter.countMessageTokens(reminderMessage);
+          
+          this.logger.log(
+            `\n⚠️ Agent attempted to exit with ${todoStatus.activeCount} incomplete todo(s). Prompting to complete or skip.\n`,
+            { type: 'warning' },
+          );
+          
+          // Continue conversation so agent can complete/skip todos
+          const continueStream = (this.modelProvider as any).createMessageStreamWithToolUse(
+            this.messages,
+            this.model,
+            this.tools,
+            8192,
+            toolExecutor,
+          );
+          await this.processToolUseStream(continueStream);
+        }
+      }
 
       return this.messages;
     } catch (error) {

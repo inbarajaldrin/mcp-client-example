@@ -13,6 +13,13 @@ export interface Message {
   content: string;
   tool_call_id?: string; // For OpenAI tool result messages
   tool_calls?: ToolCall[]; // For assistant messages that contain tool calls (OpenAI-specific)
+  tool_results?: Array<{ // For Claude tool result messages
+    type: 'tool_result';
+    tool_use_id: string;
+    content: string;
+  }>;
+  // For Claude: store raw content blocks to preserve tool_use blocks
+  content_blocks?: Array<{ type: string; [key: string]: any }>;
 }
 
 // Generic Tool interface (provider-agnostic)

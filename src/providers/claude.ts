@@ -24,6 +24,12 @@ const CLAUDE_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'claude-3-haiku-20240307': 200000,
 };
 
+// Tool Executor Type - function that executes tools on your system
+export type ToolExecutor = (
+  toolName: string,
+  toolInput: Record<string, any>,
+) => Promise<string>;
+
 // Claude Token Counter Implementation
 export class ClaudeTokenCounter implements TokenCounter {
   private encoder: any;
@@ -225,6 +231,184 @@ export class ClaudeProvider implements ModelProvider {
     }
   }
 
+  /**
+   * NEW: Agent loop with tool use support
+   * 
+   * This method implements the full agentic loop:
+   * 1. Send message to Claude
+   * 2. Check if Claude wants to use tools (stop_reason === 'tool_use')
+   * 3. Execute tools via toolExecutor callback
+   * 4. Send tool results back to Claude
+   * 5. Repeat until Claude is done (stop_reason === 'end_turn')
+   * 
+   * Based on official docs:
+   * https://platform.claude.com/docs/en/agents-and-tools/tool-use/implement-tool-use
+   */
+  async *createMessageStreamWithToolUse(
+    messages: Message[],
+    model: string,
+    tools: Tool[],
+    maxTokens: number,
+    toolExecutor: ToolExecutor,
+    maxIterations: number = 10,
+  ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; result: string }> {
+    const anthropicTools: AnthropicTool[] = tools.map((tool) => ({
+      name: tool.name,
+      description: tool.description,
+      input_schema: tool.input_schema,
+    }));
+
+    let conversationMessages = [...messages];
+    let iterations = 0;
+
+    while (iterations < maxIterations) {
+      iterations++;
+
+      // Step 1: Send request to Claude
+      const response = await this.anthropicClient.messages.create({
+        messages: this.convertToAnthropicMessages(conversationMessages),
+        model: model,
+        max_tokens: maxTokens,
+        tools: anthropicTools,
+      });
+
+      // Yield the response
+      yield response as MessageStreamEvent;
+
+      // Step 2: Add Claude's response to conversation
+      // Store full content blocks to preserve tool_use blocks for tool_result references
+      conversationMessages.push({
+        role: 'assistant',
+        content: this.extractTextContent(response.content),
+        tool_calls: this.extractToolCalls(response.content),
+        content_blocks: response.content, // Preserve full content array with tool_use blocks
+      });
+
+      // Step 3: Check stop reason
+      if (response.stop_reason === 'end_turn') {
+        // Claude is done, no more tool calls needed
+        break;
+      }
+
+      if (response.stop_reason === 'tool_use') {
+        // Step 4: Extract tool calls
+        const toolUseBlocks = response.content.filter(
+          (block: any) => block.type === 'tool_use',
+        );
+
+        if (toolUseBlocks.length === 0) {
+          // No actual tool uses found, break to avoid infinite loop
+          break;
+        }
+
+        // Step 5: Execute tools and collect results
+        const toolResults: Array<{
+          type: 'tool_result';
+          tool_use_id: string;
+          content: string;
+        }> = [];
+
+        for (const toolUseBlock of toolUseBlocks) {
+          if (toolUseBlock.type !== 'tool_use') continue;
+
+          try {
+            // Execute the tool
+            const toolInput = toolUseBlock.input as Record<string, any>;
+            const result = await toolExecutor(toolUseBlock.name, toolInput);
+
+            // Yield the result so caller can see what happened
+            yield {
+              type: 'tool_use_complete',
+              toolName: toolUseBlock.name,
+              result: result,
+            };
+
+            // Collect result for sending back to Claude
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: toolUseBlock.id,
+              content: result,
+            });
+          } catch (error) {
+            // If tool execution fails, send error back to Claude
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: toolUseBlock.id,
+              content: `Error executing tool: ${error instanceof Error ? error.message : String(error)}`,
+            });
+          }
+        }
+
+        // Step 6: Send tool results back to Claude in the next iteration
+        conversationMessages.push({
+          role: 'user',
+          content: '',
+          tool_results: toolResults,
+        });
+
+        // Loop continues - go back to step 1 with tool results in context
+      } else {
+        // Unexpected stop reason, break
+        break;
+      }
+    }
+  }
+
+  /**
+   * Helper: Extract text content from Claude's response
+   */
+  private extractTextContent(content: any[]): string {
+    return content
+      .filter((block) => block.type === 'text')
+      .map((block) => block.text)
+      .join('\n');
+  }
+
+  /**
+   * Helper: Extract tool calls from Claude's response
+   */
+  private extractToolCalls(content: any[]): any[] {
+    return content
+      .filter((block) => block.type === 'tool_use')
+      .map((block) => ({
+        id: block.id,
+        name: block.name,
+        input: block.input,
+      }));
+  }
+
+  /**
+   * Helper: Convert generic Message[] to Anthropic API format
+   */
+  private convertToAnthropicMessages(messages: Message[]): Array<{
+    role: 'user' | 'assistant';
+    content: any;
+  }> {
+    return messages.map((msg) => {
+      // Handle messages with tool results
+      if (msg.tool_results && msg.tool_results.length > 0) {
+        return {
+          role: 'user' as const,
+          content: msg.tool_results,
+        };
+      }
+
+      // Handle assistant messages with content_blocks (preserves tool_use blocks)
+      if (msg.role === 'assistant' && msg.content_blocks && Array.isArray(msg.content_blocks)) {
+        return {
+          role: 'assistant' as const,
+          content: msg.content_blocks,
+        };
+      }
+
+      // Standard text messages
+      return {
+        role: (msg.role === 'tool' ? 'user' : msg.role) as 'user' | 'assistant',
+        content: msg.content || '',
+      };
+    });
+  }
+
   // Helper method to create a non-streaming message (for summarization)
   async createMessage(
     messages: Message[],
@@ -262,4 +446,3 @@ export class ClaudeProvider implements ModelProvider {
 
 // Export Claude-specific Tool type for backward compatibility
 export type { AnthropicTool as Tool };
-
