@@ -14,9 +14,34 @@ export interface AttachmentInfo {
   mediaType: string;
 }
 
+// OPTION 2: Proper separation of document and image types
 export type ContentBlock = 
-  | { type: 'image'; source: { type: 'base64'; media_type: string; data: string } }
-  | { type: 'text'; text: string };
+  | DocumentBlock
+  | ImageBlock
+  | TextBlock;
+
+export interface DocumentBlock {
+  type: 'document';
+  source: {
+    type: 'base64';
+    media_type: 'application/pdf';
+    data: string;
+  };
+}
+
+export interface ImageBlock {
+  type: 'image';
+  source: {
+    type: 'base64';
+    media_type: 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp';
+    data: string;
+  };
+}
+
+export interface TextBlock {
+  type: 'text';
+  text: string;
+}
 
 export class AttachmentManager {
   private logger: Logger;
@@ -24,7 +49,6 @@ export class AttachmentManager {
 
   constructor(logger: Logger) {
     this.logger = logger;
-    // Use same directory pattern as other managers: .mcp-client-data/attachments
     this.attachmentsDir = join(__dirname, '..', '.mcp-client-data', 'attachments');
     this.ensureAttachmentsDir();
   }
@@ -145,8 +169,12 @@ export class AttachmentManager {
   }
 
   /**
-   * Create Claude-compatible content blocks from attachments and optional text
-   * Returns an array of content blocks that can be used in Claude API messages
+   * Create content blocks from attachments and optional text
+   * Properly separates PDFs from images using dedicated content block types
+   * 
+   * @param attachments - Array of attachment info
+   * @param text - Optional text to include
+   * @returns Array of properly typed content blocks
    */
   createContentBlocks(attachments: AttachmentInfo[], text?: string): ContentBlock[] {
     const contentBlocks: ContentBlock[] = [];
@@ -162,42 +190,63 @@ export class AttachmentManager {
         continue;
       }
 
-      // Determine content type based on media type
-      if (attachment.mediaType.startsWith('image/')) {
-        // Image attachment
+      // OPTION 2: Properly separate PDFs from images
+      if (attachment.mediaType === 'application/pdf') {
+        // PDF: Use dedicated 'document' type
+        contentBlocks.push({
+          type: 'document',
+          source: {
+            type: 'base64',
+            media_type: 'application/pdf',
+            data: base64Data,
+          },
+        } as DocumentBlock);
+        this.logger.log(`✓ Added PDF: ${attachment.fileName}\n`, { type: 'success' });
+      } 
+      else if (attachment.mediaType.startsWith('image/')) {
+        // Image: Use 'image' type with validation
+        const validImageTypes = ['image/jpeg', 'image/png', 'image/gif', 'image/webp'];
+        
+        if (!validImageTypes.includes(attachment.mediaType)) {
+          this.logger.log(
+            `⚠️  Skipping image ${attachment.fileName} - unsupported format ${attachment.mediaType}\n`,
+            { type: 'warning' },
+          );
+          continue;
+        }
+
         contentBlocks.push({
           type: 'image',
           source: {
             type: 'base64',
-            media_type: attachment.mediaType,
+            media_type: attachment.mediaType as 'image/jpeg' | 'image/png' | 'image/gif' | 'image/webp',
             data: base64Data,
           },
-        });
-      } else if (attachment.mediaType === 'application/pdf') {
-        // PDF attachment - Claude supports PDFs as base64
-        contentBlocks.push({
-          type: 'image', // Claude treats PDFs similar to images in content blocks
-          source: {
-            type: 'base64',
-            media_type: attachment.mediaType,
-            data: base64Data,
-          },
-        });
-      } else {
-        // For text files, read and include as text content
+        } as ImageBlock);
+        this.logger.log(`✓ Added image: ${attachment.fileName}\n`, { type: 'success' });
+      }
+      else if (attachment.mediaType.startsWith('text/')) {
+        // Text: Read and include as text content
         try {
           const textContent = fs.readFileSync(attachment.path, 'utf-8');
           contentBlocks.push({
             type: 'text',
             text: `[File: ${attachment.fileName}]\n${textContent}`,
-          });
+          } as TextBlock);
+          this.logger.log(`✓ Added text file: ${attachment.fileName}\n`, { type: 'success' });
         } catch (error) {
-          // If reading as text fails, include as base64
-          contentBlocks.push({
-            type: 'text',
-            text: `[File: ${attachment.fileName} - binary content, base64 encoded]\n${base64Data}`,
-          });
+          this.logger.log(
+            `⚠️  Skipping text file ${attachment.fileName} - failed to read\n`,
+            { type: 'warning' },
+          );
         }
+      }
+      else {
+        // Unsupported format
+        this.logger.log(
+          `⚠️  Skipping ${attachment.fileName} - unsupported format ${attachment.mediaType}\n`,
+          { type: 'warning' },
+        );
       }
     }
 
@@ -206,7 +255,7 @@ export class AttachmentManager {
       contentBlocks.push({
         type: 'text',
         text: text.trim(),
-      });
+      } as TextBlock);
     }
 
     return contentBlocks;
@@ -392,4 +441,3 @@ export class AttachmentManager {
     }
   }
 }
-

@@ -30,6 +30,9 @@ const OPENAI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'o1-mini': 128000,
 };
 
+// OpenAI does not support PDFs through the vision API
+// PDFs are not supported by OpenAI models
+
 // OpenAI Token Counter Implementation
 export class OpenAITokenCounter implements TokenCounter {
   private encoder: any;
@@ -185,21 +188,17 @@ export class OpenAIProvider implements ModelProvider {
     }));
 
     // Convert generic Message[] to OpenAI format
-    const openaiMessages = messages.map((msg) => {
-      // Handle tool role messages (OpenAI-specific)
-      if (msg.role === 'tool' && msg.tool_call_id) {
-        return {
-          role: 'tool' as const,
-          tool_call_id: msg.tool_call_id,
-          content: msg.content,
-        };
-      }
-      // Handle assistant messages with tool_calls (OpenAI-specific)
+    // Use the helper method that properly handles content_blocks (attachments)
+    let openaiMessages = this.convertToOpenAIMessages(messages, model);
+    
+    // Now handle tool-specific conversions for ongoing conversations
+    openaiMessages = openaiMessages.map((msg: any) => {
+      // For assistant messages with tool_calls, ensure proper format
       if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
         return {
           role: 'assistant' as const,
           content: msg.content || null,
-          tool_calls: msg.tool_calls.map((tc) => ({
+          tool_calls: msg.tool_calls.map((tc: any) => ({
             id: tc.id,
             type: 'function' as const,
             function: {
@@ -209,10 +208,7 @@ export class OpenAIProvider implements ModelProvider {
           })),
         };
       }
-      return {
-        role: msg.role as 'user' | 'assistant' | 'system',
-        content: msg.content,
-      };
+      return msg;
     });
 
     const stream = await this.openaiClient.chat.completions.create({
@@ -366,7 +362,7 @@ export class OpenAIProvider implements ModelProvider {
       // Step 1: Stream request to OpenAI
       const stream = await this.openaiClient.chat.completions.create({
         model: model,
-        messages: this.convertToOpenAIMessages(conversationMessages),
+        messages: this.convertToOpenAIMessages(conversationMessages, model),
         max_completion_tokens: maxTokens,
         tools: openaiTools.length > 0 ? openaiTools : undefined,
         stream: true,  // ✅ KEY: Enable streaming
@@ -601,30 +597,62 @@ export class OpenAIProvider implements ModelProvider {
   }
 
   /**
-   * Helper: Convert generic Message[] to OpenAI API format
+   * Check if a model supports PDFs
+   * OpenAI does not support PDFs - always returns false
    */
-  private convertToOpenAIMessages(messages: Message[]): any[] {
+  private modelSupportsPDFs(model: string): boolean {
+    return false; // OpenAI does not support PDFs
+  }
+
+  /**
+   * Helper: Convert generic Message[] to OpenAI API format
+   * OPTION 2: Properly handles document (PDF) blocks with official conversion
+   */
+  private convertToOpenAIMessages(messages: Message[], model?: string): any[] {
     return messages.map((msg) => {
       // Handle user messages with content_blocks (for attachments)
       if (msg.role === 'user' && msg.content_blocks && Array.isArray(msg.content_blocks)) {
         // Convert content blocks to OpenAI format
         const openaiContent = msg.content_blocks.map((block: any) => {
+          // Handle document (PDF) blocks
+          // OpenAI does not support PDFs - return error message
+          if (block.type === 'document') {
+            console.warn('Warning: OpenAI does not support PDF attachments. Converting to text representation.');
+            return {
+              type: 'text' as const,
+              text: `[PDF File: document.pdf]\n⚠️  PDF attachments are not supported by OpenAI. Please use Claude provider for PDF support, or convert the PDF to images/text before attaching.`,
+            };
+          }
+
+          // Existing: Handle image blocks
           if (block.type === 'image') {
-            // OpenAI format: { type: 'image_url', image_url: { url: 'data:image/png;base64,...' } }
             const mediaType = block.source?.media_type || 'image/png';
             const base64Data = block.source?.data || '';
+
+            if (!base64Data) {
+              console.warn('Warning: Image block has no base64 data');
+              return {
+                type: 'text' as const,
+                text: '[Failed to load image]',
+              };
+            }
+
             return {
               type: 'image_url' as const,
               image_url: {
                 url: `data:${mediaType};base64,${base64Data}`,
               },
             };
-          } else if (block.type === 'text') {
+          }
+
+          // Existing: Handle text blocks
+          if (block.type === 'text') {
             return {
               type: 'text' as const,
               text: block.text || '',
             };
           }
+
           // Fallback for unknown types
           return {
             type: 'text' as const,
@@ -685,7 +713,7 @@ export class OpenAIProvider implements ModelProvider {
     model: string,
     maxTokens: number,
   ): Promise<{ content: Array<{ type: string; text: string }> }> {
-    const openaiMessages = this.convertToOpenAIMessages(messages);
+    const openaiMessages = this.convertToOpenAIMessages(messages, model);
 
     const response = await this.openaiClient.chat.completions.create({
       model: model,

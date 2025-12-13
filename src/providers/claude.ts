@@ -364,6 +364,7 @@ export class ClaudeProvider implements ModelProvider {
 
   /**
    * Helper: Convert generic Message[] to Anthropic API format
+   * OPTION 2: Properly handles document (PDF) blocks
    */
   private convertToAnthropicMessages(messages: Message[]): Array<{
     role: 'user' | 'assistant';
@@ -380,9 +381,39 @@ export class ClaudeProvider implements ModelProvider {
 
       // Handle user messages with content_blocks (for attachments)
       if (msg.role === 'user' && msg.content_blocks && Array.isArray(msg.content_blocks)) {
+        // OPTION 2: Convert content blocks - properly handles documents
+        const anthropicContent = msg.content_blocks.map((block: any) => {
+          // NEW: Handle document (PDF) blocks - Claude native support
+          if (block.type === 'document') {
+            return {
+              type: 'document',
+              source: block.source,  // Claude supports base64 natively
+            };
+          }
+
+          // Existing: Handle image blocks
+          if (block.type === 'image') {
+            return {
+              type: 'image',
+              source: block.source,
+            };
+          }
+
+          // Existing: Handle text blocks
+          if (block.type === 'text') {
+            return {
+              type: 'text',
+              text: block.text,
+            };
+          }
+
+          // Fallback for unknown types
+          return block;
+        });
+
         return {
           role: 'user' as const,
-          content: msg.content_blocks,
+          content: anthropicContent,
         };
       }
 

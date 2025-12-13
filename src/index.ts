@@ -1370,13 +1370,37 @@ export class MCPClient {
         type: 'error',
       });
       if (error instanceof Error) {
-        this.logger.log(
-          consoleStyles.assistant +
-            'I apologize, but I encountered an error: ' +
-            error.message +
-            '\n',
-        );
+        // Check if it's a PDF-related error for OpenAI
+        if (
+          this.modelProvider.getProviderName() === 'openai' &&
+          (error.message.includes('Invalid MIME type') ||
+            error.message.includes('Only image types are supported'))
+        ) {
+          this.logger.log(
+            consoleStyles.assistant +
+              'I apologize, but I encountered an error processing the PDF attachment.\n' +
+              'PDF support requires a vision-capable model like GPT-4o or GPT-4o-mini.\n' +
+              'Please try using: --model=gpt-4o or --model=gpt-4o-mini\n' +
+              'Error details: ' +
+              error.message +
+              '\n',
+          );
+        } else {
+          this.logger.log(
+            consoleStyles.assistant +
+              'I apologize, but I encountered an error: ' +
+              error.message +
+              '\n',
+          );
+        }
       }
     }
+  }
+
+  /**
+   * Get the model provider name
+   */
+  getProviderName(): string {
+    return this.modelProvider.getProviderName();
   }
 }

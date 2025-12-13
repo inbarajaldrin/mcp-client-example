@@ -1893,7 +1893,7 @@ export class MCPClientCLI {
 
     if (attachments.length === 0) {
       this.logger.log('\n📎 No attachments found.\n', { type: 'info' });
-      this.logger.log('Use /attachment-insert to add attachments.\n', { type: 'info' });
+      this.logger.log('Use /attachment-upload to add attachments.\n', { type: 'info' });
       return;
     }
 
@@ -1927,7 +1927,7 @@ export class MCPClientCLI {
 
     if (attachments.length === 0) {
       this.logger.log('\n📎 No attachments available to select.\n', { type: 'warning' });
-      this.logger.log('Use /attachment-insert to add attachments.\n', { type: 'info' });
+      this.logger.log('Use /attachment-upload to add attachments.\n', { type: 'info' });
       return;
     }
 
@@ -1989,11 +1989,45 @@ export class MCPClientCLI {
     // Get selected attachments
     const selectedAttachments = validIndices.map(idx => attachments[idx - 1]);
 
-    // Store as pending attachments
-    this.pendingAttachments = selectedAttachments;
+    // Check if OpenAI is being used and filter out PDFs
+    const providerName = this.client.getProviderName();
+    let finalAttachments = selectedAttachments;
+    
+    if (providerName === 'openai') {
+      const pdfAttachments = selectedAttachments.filter(att => att.mediaType === 'application/pdf');
+      const nonPdfAttachments = selectedAttachments.filter(att => att.mediaType !== 'application/pdf');
+      
+      if (pdfAttachments.length > 0) {
+        this.logger.log(
+          `\n⚠️  Warning: PDF attachments are not supported by OpenAI.\n`,
+          { type: 'warning' },
+        );
+        this.logger.log(
+          `   ${pdfAttachments.length} PDF file(s) excluded: ${pdfAttachments.map(a => a.fileName).join(', ')}\n`,
+          { type: 'warning' },
+        );
+        this.logger.log(
+          `   Please use Claude provider (--provider=claude) for PDF support.\n`,
+          { type: 'info' },
+        );
+        
+        if (nonPdfAttachments.length === 0) {
+          this.logger.log(
+            `\n✗ No valid attachments selected (all were PDFs).\n`,
+            { type: 'error' },
+          );
+          return;
+        }
+      }
+      
+      finalAttachments = nonPdfAttachments;
+    }
+
+    // Store as pending attachments (only non-PDFs for OpenAI)
+    this.pendingAttachments = finalAttachments;
 
     this.logger.log(
-      `\n✓ ${selectedAttachments.length} attachment(s) selected. They will be included with your next message.\n`,
+      `\n✓ ${finalAttachments.length} attachment(s) selected. They will be included with your next message.\n`,
       { type: 'success' },
     );
     this.logger.log('You can now type your question or prompt.\n', { type: 'info' });
@@ -2008,7 +2042,7 @@ export class MCPClientCLI {
 
     if (attachments.length === 0) {
       this.logger.log('\n📎 No attachments available to rename.\n', { type: 'warning' });
-      this.logger.log('Use /attachment-insert to add attachments.\n', { type: 'info' });
+      this.logger.log('Use /attachment-upload to add attachments.\n', { type: 'info' });
       return;
     }
 
