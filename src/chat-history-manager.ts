@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, renameSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, renameSync, readdirSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { Logger } from './logger.js';
@@ -40,8 +40,13 @@ export interface ChatSession {
   servers: string[];
   messages: Array<{
     timestamp: string;
-    role: 'user' | 'assistant' | 'tool';
+    role: 'user' | 'assistant' | 'tool' | 'client';
     content: string;
+    attachments?: Array<{
+      fileName: string;
+      ext: string;
+      mediaType: string;
+    }>;
     toolName?: string;
     toolInput?: Record<string, any>;
     toolOutput?: string;
@@ -151,7 +156,7 @@ export class ChatHistoryManager {
   /**
    * Add a user message to current session
    */
-  addUserMessage(content: string): void {
+  addUserMessage(content: string, attachments?: Array<{ fileName: string; ext: string; mediaType: string }>): void {
     if (!this.currentSession) {
       this.logger.log('No active session. Call startSession() first.\n', {
         type: 'warning',
@@ -162,6 +167,27 @@ export class ChatHistoryManager {
     this.currentSession.messages.push({
       timestamp: new Date().toISOString(),
       role: 'user',
+      content,
+      attachments: attachments && attachments.length > 0 ? attachments : undefined,
+    });
+
+    this.currentSession.metadata.messageCount++;
+  }
+
+  /**
+   * Add a client message to current session (for automatic client-generated messages)
+   */
+  addClientMessage(content: string): void {
+    if (!this.currentSession) {
+      this.logger.log('No active session. Call startSession() first.\n', {
+        type: 'warning',
+      });
+      return;
+    }
+
+    this.currentSession.messages.push({
+      timestamp: new Date().toISOString(),
+      role: 'client',
       content,
     });
 
@@ -336,7 +362,17 @@ export class ChatHistoryManager {
       const time = new Date(msg.timestamp).toLocaleTimeString();
 
       if (msg.role === 'user') {
-        md += `### You (${time})\n\n${msg.content}\n\n`;
+        md += `### You (${time})\n\n`;
+        if (msg.attachments && msg.attachments.length > 0) {
+          md += `**Attachments:**\n`;
+          for (const att of msg.attachments) {
+            md += `- ${att.fileName} (${att.mediaType})\n`;
+          }
+          md += `\n`;
+        }
+        md += `${msg.content}\n\n`;
+      } else if (msg.role === 'client') {
+        md += `### Client (${time})\n\n${msg.content}\n\n`;
       } else if (msg.role === 'assistant') {
         md += `### Assistant (${time})\n\n${msg.content}\n\n`;
       } else if (msg.role === 'tool') {
@@ -525,9 +561,53 @@ export class ChatHistoryManager {
   }
 
   /**
-   * Rename chat session files
+   * Get list of existing folders in the chats directory
    */
-  renameChat(sessionId: string, newName: string): boolean {
+  getExistingFolders(): string[] {
+    try {
+      if (!existsSync(CHATS_DIR)) {
+        return [];
+      }
+
+      const items = readdirSync(CHATS_DIR);
+      const folders: string[] = [];
+
+      for (const item of items) {
+        // Skip index.json and other files
+        if (item === 'index.json') {
+          continue;
+        }
+
+        const itemPath = join(CHATS_DIR, item);
+        try {
+          const stats = statSync(itemPath);
+          if (stats.isDirectory()) {
+            folders.push(item);
+          }
+        } catch {
+          // Skip items we can't access
+          continue;
+        }
+      }
+
+      // Sort folders alphabetically
+      folders.sort();
+      return folders;
+    } catch (error) {
+      this.logger.log(`Failed to list folders: ${error}\n`, {
+        type: 'warning',
+      });
+      return [];
+    }
+  }
+
+  /**
+   * Rename chat session files
+   * @param sessionId - The session ID to rename
+   * @param newName - The new name for the chat
+   * @param folderName - Optional folder name to move the chat to (within chats directory)
+   */
+  renameChat(sessionId: string, newName: string, folderName?: string): boolean {
     const metadata = this.index.get(sessionId);
     if (!metadata) {
       this.logger.log(`Chat session not found: ${sessionId}\n`, {
@@ -550,20 +630,47 @@ export class ChatHistoryManager {
         return false;
       }
 
+      // Determine target directory
+      let targetDir: string;
+      if (folderName) {
+        // Sanitize folder name
+        const sanitizedFolderName = folderName
+          .toLowerCase()
+          .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
+          .replace(/\s+/g, '-') // Replace spaces with hyphens
+          .replace(/-+/g, '-') // Replace multiple hyphens with single
+          .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
+        
+        if (!sanitizedFolderName) {
+          this.logger.log('Invalid folder name provided\n', { type: 'error' });
+          return false;
+        }
+        
+        // Create folder path within chats directory
+        targetDir = join(CHATS_DIR, sanitizedFolderName);
+        
+        // Create folder if it doesn't exist
+        if (!existsSync(targetDir)) {
+          mkdirSync(targetDir, { recursive: true });
+        }
+      } else {
+        // Use existing directory
+        targetDir = dirname(metadata.filePath);
+      }
+
       // Generate new filenames using last part of sessionId and name
       const oldJsonPath = metadata.filePath;
       const oldMdPath = metadata.mdFilePath;
-      const dir = dirname(oldJsonPath);
       
       // Extract last part of sessionId (e.g., "s46w4z" from "20251212-214813-s46w4z")
       const sessionIdParts = sessionId.split('-');
       const sessionIdShort = sessionIdParts[sessionIdParts.length - 1];
       
       // Use short sessionId and name as filename: chat-{shortSessionId}-{name}.json
-      const newJsonPath = join(dir, `chat-${sessionIdShort}-${sanitizedName}.json`);
-      const newMdPath = join(dir, `chat-${sessionIdShort}-${sanitizedName}.md`);
+      const newJsonPath = join(targetDir, `chat-${sessionIdShort}-${sanitizedName}.json`);
+      const newMdPath = join(targetDir, `chat-${sessionIdShort}-${sanitizedName}.md`);
 
-      // Rename files if they exist and paths are different
+      // Move/rename files if they exist and paths are different
       if (existsSync(oldJsonPath) && oldJsonPath !== newJsonPath) {
         renameSync(oldJsonPath, newJsonPath);
       }

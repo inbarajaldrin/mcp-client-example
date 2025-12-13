@@ -675,14 +675,25 @@ export class MCPClientCLI {
           continue;
         }
 
-        // Log user message to history
-        this.client.getChatHistoryManager().addUserMessage(query);
+        // Check if system prompt needs to be logged and log it FIRST (before user message)
+        const systemPrompt = await (this.client as any).prepareAndLogSystemPrompt();
+        const finalQuery = systemPrompt ? `${systemPrompt}\n\nUser: ${query}` : query;
+
+        // Log user message to history (including attachment metadata)
+        const attachmentMetadata = this.pendingAttachments.length > 0
+          ? this.pendingAttachments.map(att => ({
+              fileName: att.fileName,
+              ext: att.ext,
+              mediaType: att.mediaType,
+            }))
+          : undefined;
+        this.client.getChatHistoryManager().addUserMessage(query, attachmentMetadata);
 
         // Get message count before processing to find the new assistant message
         const messagesBefore = (this.client as any).messages.length;
         
-        // Process query with attachments if any are pending
-        await this.client.processQuery(query, false, this.pendingAttachments.length > 0 ? this.pendingAttachments : undefined);
+        // Process query with attachments if any are pending (use finalQuery which includes system prompt if needed)
+        await this.client.processQuery(finalQuery, false, this.pendingAttachments.length > 0 ? this.pendingAttachments : undefined);
         
         // Clear pending attachments after they've been used
         this.pendingAttachments = [];
@@ -1210,6 +1221,9 @@ export class MCPClientCLI {
               content: contentText,
             });
             
+            // Log prompt message to chat history
+            this.client.getChatHistoryManager().addUserMessage(contentText);
+            
             // Update token count
             const tokenCounter = (this.client as any).tokenCounter;
             if (tokenCounter) {
@@ -1736,8 +1750,10 @@ export class MCPClientCLI {
     
     const selectedChat = chats[index];
     const currentFileName = selectedChat.filePath.split('/').pop() || selectedChat.filePath;
+    const currentDir = selectedChat.filePath.split('/').slice(-2, -1)[0] || 'root';
     
-    this.logger.log(`\nCurrent filename: ${currentFileName}\n`, { type: 'info' });
+    this.logger.log(`\nCurrent filename: ${currentFileName}`, { type: 'info' });
+    this.logger.log(`Current folder: ${currentDir}\n`, { type: 'info' });
     
     const newName = (await this.rl.question('\nEnter new name for the file: ')).trim();
     
@@ -1746,13 +1762,60 @@ export class MCPClientCLI {
       return;
     }
     
-    const updated = historyManager.renameChat(selectedChat.sessionId, newName);
+    // Ask if user wants to move to a folder
+    const moveToFolder = (await this.rl.question('\nMove to a folder? (y/n, default: n): ')).trim().toLowerCase();
+    let folderName: string | undefined;
+    
+    if (moveToFolder === 'y' || moveToFolder === 'yes') {
+      // Get existing folders
+      const existingFolders = historyManager.getExistingFolders();
+      
+      if (existingFolders.length > 0) {
+        this.logger.log('\n📁 Existing folders:\n', { type: 'info' });
+        existingFolders.forEach((folder: string, i: number) => {
+          this.logger.log(`  ${i + 1}. ${folder}`, { type: 'info' });
+        });
+        this.logger.log(`  ${existingFolders.length + 1}. Create new folder\n`, { type: 'info' });
+        
+        const folderChoice = (await this.rl.question('Select folder number (or enter new folder name): ')).trim();
+        
+        // Check if it's a number
+        const folderIndex = parseInt(folderChoice) - 1;
+        if (!isNaN(folderIndex) && folderIndex >= 0 && folderIndex < existingFolders.length) {
+          // Selected existing folder
+          folderName = existingFolders[folderIndex];
+          this.logger.log(`\nSelected folder: ${folderName}\n`, { type: 'info' });
+        } else if (!isNaN(folderIndex) && folderIndex === existingFolders.length) {
+          // User wants to create new folder
+          const newFolderName = (await this.rl.question('Enter new folder name: ')).trim();
+          if (newFolderName) {
+            folderName = newFolderName;
+          } else {
+            this.logger.log('\nFolder name cannot be empty. Keeping chat in current folder.\n', { type: 'warning' });
+          }
+        } else {
+          // User entered a folder name directly
+          folderName = folderChoice;
+        }
+      } else {
+        // No existing folders, just ask for new folder name
+        const folderInput = (await this.rl.question('Enter folder name (will be created if it doesn\'t exist): ')).trim();
+        if (folderInput) {
+          folderName = folderInput;
+        } else {
+          this.logger.log('\nFolder name cannot be empty. Keeping chat in current folder.\n', { type: 'warning' });
+        }
+      }
+    }
+    
+    const updated = historyManager.renameChat(selectedChat.sessionId, newName, folderName);
     
     if (updated) {
       const sanitizedName = newName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
       const sessionIdParts = selectedChat.sessionId.split('-');
       const sessionIdShort = sessionIdParts[sessionIdParts.length - 1];
-      this.logger.log(`\n✓ Chat ${selectedChat.sessionId} renamed to: chat-${sessionIdShort}-${sanitizedName}.json\n`, { type: 'success' });
+      const locationMsg = folderName ? ` in folder "${folderName}"` : '';
+      this.logger.log(`\n✓ Chat ${selectedChat.sessionId} renamed to: chat-${sessionIdShort}-${sanitizedName}.json${locationMsg}\n`, { type: 'success' });
     } else {
       this.logger.log(`\n✗ Failed to rename chat ${selectedChat.sessionId}.\n`, { type: 'error' });
     }

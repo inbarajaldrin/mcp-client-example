@@ -796,6 +796,52 @@ export class MCPClient {
   }
 
   /**
+   * Check if system prompt needs to be logged and log it if needed
+   * Returns the system prompt text if it was logged, null otherwise
+   * This should be called BEFORE logging the user message to ensure correct chronological order
+   */
+  async prepareAndLogSystemPrompt(): Promise<string | null> {
+    // Check if this is the first message after enabling todo mode
+    const isFirstTodoMessage = this.todoManager.isEnabled() && !this.todoModeInitialized;
+
+    if (!isFirstTodoMessage) {
+      return null;
+    }
+
+    let systemPrompt = 'You are now in todo mode. When the user provides a task, you must: 1) Decompose the task into actionable todos using create-todo, 2) As you complete each task, mark it complete using complete-todo. You cannot exit until all todos are completed or skipped using skip-todo.';
+    
+    // If todos were left as-is, include the current todo list in context
+    if (this.todosLeftAsIs) {
+      const todoStatus = await this.checkTodoStatus();
+      const skippedCount = await this.getSkippedTodosCount();
+      const todosList = await this.todoManager.getAllTodosList();
+      
+      if (todoStatus.activeCount > 0 || skippedCount > 0) {
+        let message = '';
+        if (todoStatus.activeCount > 0 && skippedCount > 0) {
+          message = `There are ${todoStatus.activeCount} existing incomplete todo(s) and ${skippedCount} skipped todo(s) in the todo list. You must resume and complete the incomplete tasks before starting any new tasks.`;
+        } else if (todoStatus.activeCount > 0) {
+          message = `There are ${todoStatus.activeCount} existing incomplete todo(s) in the todo list. You must resume and complete these existing tasks before starting any new tasks.`;
+        } else if (skippedCount > 0) {
+          message = `There are ${skippedCount} skipped todo(s) in the todo list.`;
+        }
+        
+        systemPrompt += `\n\nIMPORTANT: ${message} Here is the current todo list:\n\n${todosList}\n\nContinue working on these todos or create new ones as needed.`;
+      }
+    }
+    
+    // Log the system prompt to chat history (as client message) BEFORE user message
+    this.chatHistoryManager.addClientMessage(systemPrompt);
+    
+    // Mark as initialized
+    this.todoModeInitialized = true;
+    this.todosLeftAsIs = false; // Reset after first message
+    this.todosWereSkipped = false; // Reset after first message
+    
+    return systemPrompt;
+  }
+
+  /**
    * Clear all todos (client-side call)
    */
   /**
@@ -1033,16 +1079,23 @@ export class MCPClient {
     
     let currentMessage = '';
     let messageStarted = false;
+    let hasOutputContent = false; // Track if we've output any content after "Assistant:"
     
     for await (const chunk of stream) {
       // Handle tool_use_complete events (from provider)
       if (chunk.type === 'tool_use_complete') {
         // Tool was executed - provider already handled it
-        // Log the tool execution and its result
+        // Always ensure tool execution log starts on a new line
+        // This prevents server logs or previous content from appearing on the same line
+        if (!hasOutputContent || !currentMessage.endsWith('\n')) {
+          this.logger.log('\n');
+        }
+        // Log the tool execution and its result (always on its own line)
         this.logger.log(
-          `\n[Tool executed: ${chunk.toolName}]\n`,
+          `[Tool executed: ${chunk.toolName}]\n`,
           { type: 'info' },
         );
+        hasOutputContent = true;
         // Pretty-print JSON if applicable
         if (chunk.result) {
           try {
@@ -1095,8 +1148,10 @@ export class MCPClient {
 
       if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'text_delta') {
         // Accumulate text from OpenAI streaming
+        // Text will appear on the same line as "Assistant:" if it's the first content
         currentMessage += chunk.delta.text;
         this.logger.log(chunk.delta.text);
+        hasOutputContent = true;
         continue;
       }
 
@@ -1110,6 +1165,13 @@ export class MCPClient {
         // Message complete - add to history if we have content
         // Note: message_stop doesn't always mean we're done - it could be after tool calls
         // The provider will continue the loop if tools were called
+        // If no content has been output yet, tools are likely about to be executed
+        // Add a newline now to prevent server logs from appearing on the same line as "Assistant:"
+        if (!hasOutputContent) {
+          this.logger.log('\n');
+          hasOutputContent = true;
+        }
+        
         if (currentMessage.trim()) {
           const assistantMessage: Message = {
             role: 'assistant',
@@ -1128,6 +1190,11 @@ export class MCPClient {
             this.currentTokenCount = exactCount;
           }
           // OpenAI: token counts come from token_usage events (already handled above)
+          
+          // Add newline after assistant message to ensure tool execution logs appear on new line
+          if (currentMessage && !currentMessage.endsWith('\n')) {
+            this.logger.log('\n');
+          }
         }
 
         // Check if we need to summarize after this response
@@ -1144,11 +1211,28 @@ export class MCPClient {
       // Handle complete response objects from Claude API
       // These come from Claude's createMessageStreamWithToolUse
       if (chunk.content && Array.isArray(chunk.content)) {
+        // Check if response has tool_use blocks (tools are about to be executed)
+        const toolUseBlocks = chunk.content.filter((block: any) => block.type === 'tool_use');
+        // If tools are about to be executed and no content has been output yet,
+        // add a newline to prevent server logs from appearing on the same line as "Assistant:"
+        if (toolUseBlocks.length > 0 && !hasOutputContent) {
+          this.logger.log('\n');
+          hasOutputContent = true;
+        }
+        
         // Extract and display text content
         const textBlocks = chunk.content.filter((block: any) => block.type === 'text');
         if (textBlocks.length > 0) {
           const textContent = textBlocks.map((block: any) => block.text).join('\n');
+          // Text will appear on the same line as "Assistant:" if it's the first content
           this.logger.log(textContent);
+          hasOutputContent = true;
+          
+          // Add newline after text content to ensure tool execution logs appear on new line
+          // This prevents server logs from appearing on the same line as assistant text
+          if (textContent && !textContent.endsWith('\n')) {
+            this.logger.log('\n');
+          }
           
           // Add assistant message to history (only if there's actual content)
           if (textContent.trim()) {
@@ -1192,46 +1276,9 @@ export class MCPClient {
         await this.autoSummarize();
       }
 
-      // Track if this is the first message after enabling todo mode
-      const isFirstTodoMessage = this.todoManager.isEnabled() && !isSystemPrompt && !this.todoModeInitialized;
-
-      // If todo mode is enabled and this is a user query (not system prompt),
-      // prepend the system prompt if not yet initialized
-      if (isFirstTodoMessage) {
-        let systemPrompt = 'You are now in todo mode. When the user provides a task, you must: 1) Decompose the task into actionable todos using create-todo, 2) As you complete each task, mark it complete using complete-todo. You cannot exit until all todos are completed or skipped using skip-todo.';
-        
-        // If todos were left as-is, include the current todo list in context
-        if (this.todosLeftAsIs) {
-          const todoStatus = await this.checkTodoStatus();
-          const skippedCount = await this.getSkippedTodosCount();
-          const todosList = await this.todoManager.getAllTodosList();
-          
-          if (todoStatus.activeCount > 0 || skippedCount > 0) {
-            let message = '';
-            if (todoStatus.activeCount > 0 && skippedCount > 0) {
-              message = `There are ${todoStatus.activeCount} existing incomplete todo(s) and ${skippedCount} skipped todo(s) in the todo list. You must resume and complete the incomplete tasks before starting any new tasks.`;
-            } else if (todoStatus.activeCount > 0) {
-              message = `There are ${todoStatus.activeCount} existing incomplete todo(s) in the todo list. You must resume and complete these existing tasks before starting any new tasks.`;
-            } else if (skippedCount > 0) {
-              message = `There are ${skippedCount} skipped todo(s) in the todo list.`;
-            }
-            
-            systemPrompt += `\n\nIMPORTANT: ${message} Here is the current todo list:\n\n${todosList}\n\nContinue working on these todos or create new ones as needed.`;
-          }
-        }
-        
-        // If todos were skipped, include the current todo state so agent can update it
-        if (this.todosWereSkipped) {
-          const todoStatus = await this.checkTodoStatus();
-          const todosList = await this.todoManager.getAllTodosList();
-          systemPrompt += `\n\nIMPORTANT: The previous incomplete todos have been skipped. Here is the current todo list state:\n\n${todosList}\n\nYou should review and update this todo list based on the user's new task. Use update-todo to modify existing todos or create-todo to add new ones as needed.`;
-        }
-        
-        query = `${systemPrompt}\n\nUser: ${query}`;
-        this.todoModeInitialized = true;
-        this.todosLeftAsIs = false; // Reset after first message
-        this.todosWereSkipped = false; // Reset after first message
-      }
+      // Note: System prompt is now logged BEFORE the user message in cli-client.ts
+      // to ensure correct chronological order. The query passed here may already
+      // include the system prompt prepended.
 
       // Handle attachments if provided
       let userMessage: Message;
@@ -1340,10 +1387,16 @@ export class MCPClient {
           this.messages.push(reminderMessage);
           this.currentTokenCount += this.tokenCounter.countMessageTokens(reminderMessage);
           
+          // Log the reminder message to chat history (as client message)
+          this.chatHistoryManager.addClientMessage(reminderMessage.content);
+          
           this.logger.log(
             `\n⚠️ Agent attempted to exit with ${todoStatus.activeCount} incomplete todo(s). Prompting to complete or skip.\n`,
             { type: 'warning' },
           );
+          
+          // Get message count before processing to find the new assistant message
+          const messagesBeforeReminder = this.messages.length;
           
           // Continue conversation so agent can complete/skip todos
           const continueStream = (this.modelProvider as any).createMessageStreamWithToolUse(
@@ -1354,6 +1407,18 @@ export class MCPClient {
             toolExecutor,
           );
           await this.processToolUseStream(continueStream);
+          
+          // Extract and log assistant response to reminder message
+          const messagesAfterReminder = this.messages;
+          const assistantMessagesAfterReminder = messagesAfterReminder
+            .slice(messagesBeforeReminder)
+            .filter((msg: any) => msg.role === 'assistant');
+          if (assistantMessagesAfterReminder.length > 0) {
+            const lastAssistantMessage = assistantMessagesAfterReminder[assistantMessagesAfterReminder.length - 1];
+            if (lastAssistantMessage.content) {
+              this.chatHistoryManager.addAssistantMessage(lastAssistantMessage.content);
+            }
+          }
           
           // Log token usage after continue stream response
           const continueUsage = this.tokenCounter.getUsage(this.currentTokenCount);
@@ -1366,9 +1431,52 @@ export class MCPClient {
 
       return this.messages;
     } catch (error) {
-      this.logger.log('\nError during query processing: ' + error + '\n', {
+      // Extract clean error message
+      let cleanErrorMessage = 'An unknown error occurred';
+      
+      if (error instanceof Error) {
+        let errorMessage = error.message;
+        
+        // Check if error message contains HTML (like Cloudflare error pages)
+        if (errorMessage.includes('<!DOCTYPE html>') || errorMessage.includes('<html')) {
+          // Extract HTTP status code if present
+          const statusMatch = errorMessage.match(/(\d{3})\s*<!DOCTYPE/i);
+          if (statusMatch) {
+            const statusCode = statusMatch[1];
+            if (statusCode === '520') {
+              cleanErrorMessage = 'OpenAI API error 520: Connection issue between Cloudflare and the origin server. Please try again in a few minutes.';
+            } else {
+              cleanErrorMessage = `OpenAI API error ${statusCode}: Server connection issue. Please try again.`;
+            }
+          } else {
+            // Try to extract error code from title tag
+            const titleMatch = errorMessage.match(/<title>.*?(\d{3}):\s*([^<]+)<\/title>/i);
+            if (titleMatch) {
+              cleanErrorMessage = `OpenAI API error ${titleMatch[1]}: ${titleMatch[2].trim()}`;
+            } else {
+              cleanErrorMessage = 'OpenAI API error: Server connection issue. Please try again.';
+            }
+          }
+        } else {
+          cleanErrorMessage = errorMessage;
+        }
+        
+        // Check for HTTP status codes in error message
+        const httpStatusMatch = errorMessage.match(/\b(\d{3})\b/);
+        if (httpStatusMatch && !cleanErrorMessage.includes('error')) {
+          const statusCode = httpStatusMatch[1];
+          if (statusCode.startsWith('5')) {
+            cleanErrorMessage = `OpenAI API error ${statusCode}: Server error. Please try again.`;
+          } else if (statusCode.startsWith('4')) {
+            cleanErrorMessage = `OpenAI API error ${statusCode}: Client error. ${cleanErrorMessage}`;
+          }
+        }
+      }
+      
+      this.logger.log('\nError during query processing: ' + cleanErrorMessage + '\n', {
         type: 'error',
       });
+      
       if (error instanceof Error) {
         // Check if it's a PDF-related error for OpenAI
         if (
@@ -1382,14 +1490,14 @@ export class MCPClient {
               'PDF support requires a vision-capable model like GPT-4o or GPT-4o-mini.\n' +
               'Please try using: --model=gpt-4o or --model=gpt-4o-mini\n' +
               'Error details: ' +
-              error.message +
+              cleanErrorMessage +
               '\n',
           );
         } else {
           this.logger.log(
             consoleStyles.assistant +
               'I apologize, but I encountered an error: ' +
-              error.message +
+              cleanErrorMessage +
               '\n',
           );
         }
