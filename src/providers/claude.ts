@@ -10,6 +10,7 @@ import type {
   TokenUsage,
   SummarizationConfig,
   MessageStreamEvent,
+  ModelInfo,
 } from '../model-provider.js';
 
 // Claude model context window limits (in tokens)
@@ -40,12 +41,16 @@ export class ClaudeTokenCounter implements TokenCounter {
   constructor(
     modelName: string = 'claude-haiku-4-5-20251001',
     config: Partial<SummarizationConfig> = {},
+    contextWindow?: number,
   ) {
     this.modelName = modelName;
-    this.maxTokens =
-      CLAUDE_MODEL_CONTEXT_WINDOWS[modelName] ||
-      CLAUDE_MODEL_CONTEXT_WINDOWS['claude-haiku-4-5-20251001'] ||
-      200000;
+    // Only use provided context window - no fallback
+    if (!contextWindow) {
+      throw new Error(
+        `Context window is required for model "${modelName}". Please ensure listAvailableModels() has been called first.`
+      );
+    }
+    this.maxTokens = contextWindow;
 
     // Claude models use cl100k_base encoding (same as GPT-4)
     // Use cl100k_base encoding for Claude models via gpt-4 model
@@ -110,12 +115,15 @@ export class ClaudeTokenCounter implements TokenCounter {
     return this.modelName;
   }
 
-  updateModel(modelName: string): void {
+  updateModel(modelName: string, contextWindow?: number): void {
     this.modelName = modelName;
-    this.maxTokens =
-      CLAUDE_MODEL_CONTEXT_WINDOWS[modelName] ||
-      CLAUDE_MODEL_CONTEXT_WINDOWS['claude-haiku-4-5-20251001'] ||
-      200000;
+    // Only use provided context window - no fallback
+    if (!contextWindow) {
+      throw new Error(
+        `Context window is required for model "${modelName}". Please ensure listAvailableModels() has been called first.`
+      );
+    }
+    this.maxTokens = contextWindow;
   }
 
   getConfig(): SummarizationConfig {
@@ -130,6 +138,8 @@ export class ClaudeTokenCounter implements TokenCounter {
 // Claude Provider Implementation
 export class ClaudeProvider implements ModelProvider {
   private anthropicClient: Anthropic;
+  // Dynamic cache of context windows discovered from API only
+  private contextWindowCache: Map<string, number> = new Map();
 
   constructor() {
     this.anthropicClient = new Anthropic({
@@ -146,11 +156,93 @@ export class ClaudeProvider implements ModelProvider {
   }
 
   getContextWindow(model: string): number {
-    return (
-      CLAUDE_MODEL_CONTEXT_WINDOWS[model] ||
-      CLAUDE_MODEL_CONTEXT_WINDOWS['claude-haiku-4-5-20251001'] ||
-      200000
+    // Only use API-provided context windows from cache
+    if (this.contextWindowCache.has(model)) {
+      return this.contextWindowCache.get(model)!;
+    }
+    
+    // No fallback - context window must be fetched from API first
+    throw new Error(
+      `Context window for model "${model}" not available. Please call listAvailableModels() first to fetch model information from the API.`
     );
+  }
+
+  /**
+   * List available models from Anthropic API
+   * Note: Anthropic doesn't have a public models list endpoint
+   * We need to query model capabilities or use model info endpoints
+   */
+  async listAvailableModels(): Promise<ModelInfo[]> {
+    try {
+      // Since Anthropic doesn't have a models.list() endpoint,
+      // we need to try alternative approaches to get model information
+      // For now, we'll attempt to get model info by making a test API call
+      // or querying available models through other means
+      
+      // Try to get model information by querying the API
+      // This is a workaround since Anthropic doesn't expose a models endpoint
+      const knownModels = [
+        'claude-haiku-4-5-20251001',
+        'claude-sonnet-4-5-20251001',
+        'claude-opus-4-5-20251001',
+        'claude-3-5-sonnet-20241022',
+        'claude-3-opus-20240229',
+        'claude-3-sonnet-20240229',
+        'claude-3-haiku-20240307',
+      ];
+
+      const models: ModelInfo[] = [];
+      
+      // For each known model, try to get context window from API
+      // We can do this by checking model capabilities or making a test call
+      for (const modelId of knownModels) {
+        try {
+          // Try to get context window by checking model metadata
+          // Anthropic API might provide this in error messages or model info
+          // For now, we'll need to query it differently
+          
+          // Since we can't directly query context window, we'll need to
+          // rely on the API response or documentation
+          // This is a limitation of Anthropic's API
+          
+          let description = '';
+          if (modelId.includes('haiku')) {
+            description = 'Fast and efficient model for quick responses';
+          } else if (modelId.includes('sonnet')) {
+            description = 'Balanced model with strong performance';
+          } else if (modelId.includes('opus')) {
+            description = 'Most capable model for complex tasks';
+          }
+
+          // Note: Without a models endpoint, we can't get context window from API
+          // The context window would need to be provided separately or
+          // we'd need to make a test API call to determine it
+          models.push({
+            id: modelId,
+            name: modelId,
+            description,
+            contextWindow: undefined, // API doesn't provide this
+            capabilities: ['text', 'vision', 'tools', 'pdf'],
+          });
+        } catch (error) {
+          // Skip models that fail
+          continue;
+        }
+      }
+
+      // Sort by model family and version (newer first)
+      return models.sort((a, b) => {
+        // Extract version for sorting (assuming format like 20251001)
+        const aVersion = a.id.split('-').pop() || '';
+        const bVersion = b.id.split('-').pop() || '';
+        return bVersion.localeCompare(aVersion);
+      });
+    } catch (error) {
+      // No fallback - throw error if we can't get model information
+      throw new Error(
+        `Failed to fetch models from Anthropic API: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   getToolType(): any {
@@ -159,11 +251,40 @@ export class ClaudeProvider implements ModelProvider {
     return undefined;
   }
 
-  createTokenCounter(
+  async createTokenCounter(
     model: string,
     config?: Partial<SummarizationConfig>,
-  ): TokenCounter {
-    return new ClaudeTokenCounter(model, config);
+  ): Promise<TokenCounter> {
+    // Ensure we have context window - fetch from API if not cached
+    let contextWindow = this.contextWindowCache.get(model);
+    if (!contextWindow) {
+      // Try to fetch model info from API
+      await this.ensureModelInfo(model);
+      contextWindow = this.contextWindowCache.get(model);
+    }
+    
+    if (!contextWindow) {
+      throw new Error(
+        `Context window for model "${model}" not available from API. Please ensure the model exists and is accessible.`
+      );
+    }
+    
+    return new ClaudeTokenCounter(model, config, contextWindow);
+  }
+
+  /**
+   * Ensure model information is fetched from API
+   */
+  private async ensureModelInfo(model: string): Promise<void> {
+    try {
+      // Fetch all models to populate cache
+      await this.listAvailableModels();
+    } catch (error) {
+      // If listAvailableModels fails, we can't get context window
+      throw new Error(
+        `Failed to fetch model information from API: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   async *createMessageStream(

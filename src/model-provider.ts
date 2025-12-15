@@ -66,6 +66,15 @@ export interface TokenCounter {
   updateConfig(config: Partial<SummarizationConfig>): void;
 }
 
+// Model information returned by listAvailableModels
+export interface ModelInfo {
+  id: string;
+  name: string;
+  description?: string;
+  contextWindow?: number;
+  capabilities?: string[];
+}
+
 // Abstract ModelProvider interface
 // Supports LLMs, VLMs, and other AI model types
 export interface ModelProvider {
@@ -87,12 +96,16 @@ export interface ModelProvider {
   getProviderName(): string;
 
   // Create a token counter for the given model
+  // Must be async to fetch context window from API
   createTokenCounter(
     model: string,
     config?: Partial<SummarizationConfig>,
-  ): TokenCounter;
+  ): Promise<TokenCounter>;
 
   // Get context window size for a model
   getContextWindow(model: string): number;
+
+  // List available models from the provider API
+  listAvailableModels(): Promise<ModelInfo[]>;
 }
 

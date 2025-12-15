@@ -54,7 +54,7 @@ export class MCPClient {
   private tools: Tool[] = [];
   private logger: Logger;
   private serverConfigs: MultiServerConfig[];
-  private tokenCounter: TokenCounter;
+  private tokenCounter: TokenCounter | null = null;
   private currentTokenCount: number = 0;
   private model: string;
   private todoManager: TodoManager;
@@ -92,8 +92,10 @@ export class MCPClient {
     // Initialize model (default to provider's default model)
     this.model = options?.model || this.modelProvider.getDefaultModel();
     
-    // Initialize token counter from provider
-    this.tokenCounter = this.modelProvider.createTokenCounter(this.model, options?.summarizationConfig);
+    // Token counter will be initialized asynchronously in start() method
+    // We can't initialize it here because createTokenCounter is now async
+    // and we need to fetch context window from API
+    this.tokenCounter = null as any; // Will be set in start()
     
     // Initialize todo manager
     this.todoManager = new TodoManager(this.logger);
@@ -131,7 +133,8 @@ export class MCPClient {
     client.serverConfigs = servers;
     client.model = options?.model || client.modelProvider.getDefaultModel();
     client.currentTokenCount = 0;
-    client.tokenCounter = client.modelProvider.createTokenCounter(client.model, options?.summarizationConfig);
+    // Token counter will be initialized asynchronously - set to null for now
+    client.tokenCounter = null as any;
     client.todoManager = new TodoManager(client.logger);
     client.toolManager = new ToolManager(client.logger);
     client.promptManager = new PromptManager(client.logger);
@@ -141,6 +144,11 @@ export class MCPClient {
   }
 
   async start() {
+    // Initialize token counter from provider (async, fetches context window from API)
+    if (!this.tokenCounter) {
+      this.tokenCounter = await this.modelProvider.createTokenCounter(this.model, undefined);
+    }
+    
     const connectionErrors: Array<{ name: string; error: any }> = [];
 
     // Connect to all servers with individual error handling
@@ -346,12 +354,54 @@ export class MCPClient {
   }
 
   private formatToolCall(toolName: string, args: any): string {
+    // Custom formatter that handles multiline strings nicely
+    const formatValue = (value: any, indent: string = ''): string => {
+      if (typeof value === 'string' && value.includes('\n')) {
+        // Multiline string - display with actual newlines
+        const lines = value.split('\n');
+        const isCode = lines.some(line => 
+          line.trim().match(/^(import|from|def|class|if|for|while|#|print|return|const|let|var|function)/)
+        );
+        if (isCode) {
+          // Format as code block
+          return '```\n' + value + '\n```';
+        }
+        // Format with triple quotes
+        return '"""\n' + value + '\n"""';
+      }
+      if (Array.isArray(value)) {
+        if (value.length === 0) return '[]';
+        const items = value.map((item, i) => 
+          indent + '  ' + formatValue(item, indent + '  ') + (i < value.length - 1 ? ',' : '')
+        );
+        return '[\n' + items.join('\n') + '\n' + indent + ']';
+      }
+      if (value && typeof value === 'object') {
+        const entries = Object.entries(value);
+        if (entries.length === 0) return '{}';
+        const formatted = entries.map(([key, val], i) => {
+          const formattedVal = formatValue(val, indent + '  ');
+          return indent + '  ' + JSON.stringify(key) + ': ' + formattedVal + (i < entries.length - 1 ? ',' : '');
+        });
+        return '{\n' + formatted.join('\n') + '\n' + indent + '}';
+      }
+      return JSON.stringify(value);
+    };
+
+    const formattedArgs = formatValue(args);
+
+    // If formatted args starts with '{', put the bracket on a new line
+    let argsDisplay = formattedArgs;
+    if (formattedArgs.startsWith('{')) {
+      argsDisplay = '\n' + formattedArgs;
+    }
+
     return (
       '\n' +
       consoleStyles.tool.bracket('[') +
       consoleStyles.tool.name(toolName) +
-      consoleStyles.tool.bracket('] ') +
-      consoleStyles.tool.args(JSON.stringify(args, null, 2)) +
+      consoleStyles.tool.bracket(']') +
+      consoleStyles.tool.args(argsDisplay) +
       '\n'
     );
   }
@@ -377,6 +427,11 @@ export class MCPClient {
     const [serverName, actualToolName] = toolName.includes('__')
       ? toolName.split('__', 2)
       : [null, toolName];
+
+    // Log the tool call BEFORE execution
+    this.logger.log(
+      this.formatToolCall(toolName, toolInput) + '\n',
+    );
 
     let toolResult;
 
@@ -432,10 +487,6 @@ export class MCPClient {
         JSON.stringify(toolResult.content.flatMap((c) => c.text)),
       );
 
-      this.logger.log(
-        this.formatToolCall(toolName, toolInput) + '\n',
-      );
-
       return formattedResult;
     } catch (toolError) {
       const errorMessage = `Error executing tool "${toolName}": ${
@@ -450,33 +501,47 @@ export class MCPClient {
     }
   }
 
+  private async ensureTokenCounter(): Promise<void> {
+    if (!this.tokenCounter) {
+      this.tokenCounter = await this.modelProvider.createTokenCounter(this.model, undefined);
+    }
+  }
+
   private shouldSummarize(): boolean {
+    if (!this.tokenCounter) {
+      throw new Error('Token counter not initialized. Please call start() first.');
+    }
     return this.tokenCounter.shouldSummarize(this.currentTokenCount);
   }
 
   // Public method to get token usage status (for testing/debugging)
   getTokenUsage() {
+    if (!this.tokenCounter) {
+      throw new Error('Token counter not initialized. Please call start() first.');
+    }
     return this.tokenCounter.getUsage(this.currentTokenCount);
   }
 
   // Public method to manually trigger summarization (for testing)
   async manualSummarize(): Promise<void> {
+    await this.ensureTokenCounter();
     await this.autoSummarize();
   }
 
   // Public method to set test mode (lower threshold for easier testing)
-  setTestMode(enabled: boolean = true, testThreshold: number = 5) {
+  async setTestMode(enabled: boolean = true, testThreshold: number = 5) {
+    await this.ensureTokenCounter();
     if (enabled) {
-      this.tokenCounter.updateConfig({
+      this.tokenCounter!.updateConfig({
         threshold: testThreshold, // Very low threshold for testing
         enabled: true,
       });
       this.logger.log(
-        `\nTest mode enabled: Summarization will trigger at ${testThreshold}% (${Math.round(this.tokenCounter.getContextWindow() * testThreshold / 100)} tokens)\n`,
+        `\nTest mode enabled: Summarization will trigger at ${testThreshold}% (${Math.round(this.tokenCounter!.getContextWindow() * testThreshold / 100)} tokens)\n`,
         { type: 'info' },
       );
     } else {
-      this.tokenCounter.updateConfig({
+      this.tokenCounter!.updateConfig({
         threshold: 80, // Back to normal
       });
       this.logger.log('\nTest mode disabled: Summarization threshold reset to 80%\n', {
@@ -959,11 +1024,12 @@ export class MCPClient {
   }
 
   private async autoSummarize(): Promise<void> {
-    if (!this.tokenCounter.getConfig().enabled) {
+    await this.ensureTokenCounter();
+    if (!this.tokenCounter!.getConfig().enabled) {
       return;
     }
 
-    const config = this.tokenCounter.getConfig();
+    const config = this.tokenCounter!.getConfig();
     const recentCount = config.recentMessagesToKeep;
 
     // Need at least recentCount + 1 messages to summarize
@@ -971,10 +1037,10 @@ export class MCPClient {
       return;
     }
 
-    this.logger.log(
-      `\n⚠️ Context window approaching limit (${this.tokenCounter.getUsage(this.currentTokenCount).percentage}% used). Summarizing conversation...\n`,
-      { type: 'warning' },
-    );
+      this.logger.log(
+        `\n⚠️ Context window approaching limit (${this.tokenCounter!.getUsage(this.currentTokenCount).percentage}% used). Summarizing conversation...\n`,
+        { type: 'warning' },
+      );
 
     try {
       // Keep recent messages
@@ -1030,7 +1096,7 @@ export class MCPClient {
       // Remove old messages from count
       let oldTokenCount = 0;
       for (const msg of oldMessages) {
-        oldTokenCount += this.tokenCounter.countMessageTokens(msg);
+        oldTokenCount += this.tokenCounter!.countMessageTokens(msg);
       }
 
       // Count summary message
@@ -1039,7 +1105,7 @@ export class MCPClient {
         content: `[Previous conversation summary: ${summaryText}]`,
       };
       const summaryTokenCount =
-        this.tokenCounter.countMessageTokens(summaryMessage);
+        this.tokenCounter!.countMessageTokens(summaryMessage);
 
       // Update messages and token count
       this.messages = [summaryMessage, ...recentMessages];
@@ -1047,7 +1113,7 @@ export class MCPClient {
         this.currentTokenCount - oldTokenCount + summaryTokenCount;
 
       this.logger.log(
-        `✓ Conversation summarized. Context reduced from ${oldMessages.length} to 1 summary message. Token usage: ${this.tokenCounter.getUsage(this.currentTokenCount).percentage}%\n`,
+        `✓ Conversation summarized. Context reduced from ${oldMessages.length} to 1 summary message. Token usage: ${this.tokenCounter!.getUsage(this.currentTokenCount).percentage}%\n`,
         { type: 'info' },
       );
     } catch (error) {
@@ -1106,20 +1172,39 @@ export class MCPClient {
             if (Array.isArray(parsed) && parsed.length === 1 && typeof parsed[0] === 'string') {
               try {
                 parsed = JSON.parse(parsed[0]);
+                // If inner string was valid JSON, format it normally
+                const formatted = JSON.stringify(parsed, null, 2);
+                const colored = this.formatJSON(formatted);
+                const truncated = colored.length > 10000 
+                  ? colored.substring(0, 10000) + '\n     ...(truncated)'
+                  : colored;
+                // JSON.stringify already handles indentation, just display as-is
+                this.logger.log(truncated + '\n', { type: 'success' });
               } catch {
-                // Inner string is not JSON, keep the array as-is
+                // Inner string is not JSON - display it directly to preserve newlines
+                const stringValue = parsed[0];
+                const truncated = stringValue.length > 10000 
+                  ? stringValue.substring(0, 10000) + '\n     ...(truncated)'
+                  : stringValue;
+                // Indent the content
+                const indented = truncated.split('\n').map((line: string) => '  ' + line).join('\n');
+                this.logger.log(indented + '\n', { type: 'success' });
               }
+            } else {
+              // Not an array with single string - format normally
+              const formatted = JSON.stringify(parsed, null, 2);
+              // Apply color formatting and truncate if needed (increased limit to 10000)
+              const colored = this.formatJSON(formatted);
+              const truncated = colored.length > 10000 
+                ? colored.substring(0, 10000) + '\n     ...(truncated)'
+                : colored;
+              // JSON.stringify already handles indentation, just display as-is
+              this.logger.log(truncated + '\n', { type: 'success' });
             }
-            const formatted = JSON.stringify(parsed, null, 2);
-            // Apply color formatting and truncate if needed (increased limit to 10000)
-            const colored = this.formatJSON(formatted);
-            const truncated = colored.length > 10000 
-              ? colored.substring(0, 10000) + '\n     ...(truncated)'
-              : colored;
-            this.logger.log(truncated + '\n', { type: 'success' });
           } catch {
-            // Non-JSON fallback
-            this.logger.log(chunk.result + '\n', { type: 'success' });
+            // Non-JSON fallback - indent the content
+            const indented = chunk.result.split('\n').map((line: string) => '  ' + line).join('\n');
+            this.logger.log(indented + '\n', { type: 'success' });
           }
         }
         // Log tool execution to history
@@ -1300,7 +1385,8 @@ export class MCPClient {
       this.messages.push(userMessage);
       // Token counting for messages with attachments is approximate
       // Claude API will provide accurate counts during streaming
-      this.currentTokenCount += this.tokenCounter.countMessageTokens(userMessage);
+      await this.ensureTokenCounter();
+      this.currentTokenCount += this.tokenCounter!.countMessageTokens(userMessage);
 
       // Check again after adding message
       if (this.shouldSummarize()) {
@@ -1354,7 +1440,7 @@ export class MCPClient {
       }
 
       // Log token usage after agent response
-      const usage = this.tokenCounter.getUsage(this.currentTokenCount);
+      const usage = this.tokenCounter!.getUsage(this.currentTokenCount);
       this.logger.log(
         `\n[Token usage: ${usage.current}/${usage.limit} (${usage.percentage}%)]\n`,
         { type: 'info' },
@@ -1385,7 +1471,7 @@ export class MCPClient {
             content: `You have ${todoStatus.activeCount} incomplete todo(s). Please complete them using complete-todo. Only skip them using skip-todo if you cannot perform these tasks. Before executing the next action, first update the previous action you completed (mark it as complete using complete-todo), then read the next todo using read-next-todo.\n\nActive todos:\n${todoStatus.todosList}\n\nYou cannot exit until all todos are completed or skipped.`,
           };
           this.messages.push(reminderMessage);
-          this.currentTokenCount += this.tokenCounter.countMessageTokens(reminderMessage);
+          this.currentTokenCount += this.tokenCounter!.countMessageTokens(reminderMessage);
           
           // Log the reminder message to chat history (as client message)
           this.chatHistoryManager.addClientMessage(reminderMessage.content);
@@ -1421,7 +1507,7 @@ export class MCPClient {
           }
           
           // Log token usage after continue stream response
-          const continueUsage = this.tokenCounter.getUsage(this.currentTokenCount);
+          const continueUsage = this.tokenCounter!.getUsage(this.currentTokenCount);
           this.logger.log(
             `\n[Token usage: ${continueUsage.current}/${continueUsage.limit} (${continueUsage.percentage}%)]\n`,
             { type: 'info' },

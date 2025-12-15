@@ -6,9 +6,10 @@ import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
+import readline from 'readline';
 import { ClaudeProvider } from './providers/claude.js';
 import { OpenAIProvider } from './providers/openai.js';
-import type { ModelProvider } from './model-provider.js';
+import type { ModelProvider, ModelInfo } from './model-provider.js';
 
 // Load .env file from mcp-client directory
 const __filename = fileURLToPath(import.meta.url);
@@ -151,6 +152,108 @@ function listServers(config: ClientConfig): void {
   console.log();
 }
 
+async function listModels(provider: ModelProvider): Promise<void> {
+  try {
+    console.log(`\nFetching available models from ${provider.getProviderName()}...\n`);
+    const models = await provider.listAvailableModels();
+    
+    if (models.length === 0) {
+      console.log('No models found.');
+      return;
+    }
+
+    console.log(`Available models (${models.length}):\n`);
+    models.forEach((model, index) => {
+      const isDefault = model.id === provider.getDefaultModel() ? ' (default)' : '';
+      console.log(`  ${index + 1}. ${model.id}${isDefault}`);
+      if (model.description) {
+        console.log(`     ${model.description}`);
+      }
+      if (model.contextWindow) {
+        const contextWindowK = Math.round(model.contextWindow / 1000);
+        console.log(`     Context window: ${contextWindowK}K tokens`);
+      }
+      if (model.capabilities && model.capabilities.length > 0) {
+        console.log(`     Capabilities: ${model.capabilities.join(', ')}`);
+      }
+      console.log();
+    });
+    
+    console.log('Usage:');
+    console.log(`  --model=<model-id> to use a specific model`);
+    console.log(`  --select-model for interactive model selection\n`);
+  } catch (error) {
+    console.error('Failed to list models:', error);
+    process.exit(1);
+  }
+}
+
+async function selectModel(provider: ModelProvider): Promise<string> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const question = (prompt: string): Promise<string> => {
+    return new Promise((resolve) => {
+      rl.question(prompt, resolve);
+    });
+  };
+
+  try {
+    console.log(`\nFetching available models from ${provider.getProviderName()}...\n`);
+    const models = await provider.listAvailableModels();
+    
+    if (models.length === 0) {
+      console.log('No models found.');
+      rl.close();
+      process.exit(1);
+    }
+
+    console.log(`Available models (${models.length}):\n`);
+    models.forEach((model, index) => {
+      const isDefault = model.id === provider.getDefaultModel() ? ' (default)' : '';
+      console.log(`  ${index + 1}. ${model.id}${isDefault}`);
+      if (model.description) {
+        console.log(`     ${model.description}`);
+      }
+      if (model.contextWindow) {
+        const contextWindowK = Math.round(model.contextWindow / 1000);
+        console.log(`     Context window: ${contextWindowK}K tokens`);
+      }
+      if (model.capabilities && model.capabilities.length > 0) {
+        console.log(`     Capabilities: ${model.capabilities.join(', ')}`);
+      }
+      console.log();
+    });
+
+    while (true) {
+      const answer = await question(`Select a model (1-${models.length}) or press Enter for default [${provider.getDefaultModel()}]: `);
+      const trimmed = answer.trim();
+      
+      if (!trimmed) {
+        // User pressed Enter, use default
+        rl.close();
+        return provider.getDefaultModel();
+      }
+
+      const selection = parseInt(trimmed, 10);
+      if (selection >= 1 && selection <= models.length) {
+        const selectedModel = models[selection - 1];
+        console.log(`\n✓ Selected model: ${selectedModel.id}\n`);
+        rl.close();
+        return selectedModel.id;
+      }
+
+      console.log(`\nInvalid selection. Please enter a number between 1 and ${models.length}.\n`);
+    }
+  } catch (error) {
+    console.error('Failed to select model:', error);
+    rl.close();
+    process.exit(1);
+  }
+}
+
 // Check for required environment variables based on provider
 function checkRequiredEnvVars(provider?: string) {
   const providerName = provider?.toLowerCase() || 'claude';
@@ -207,11 +310,13 @@ async function main() {
         'servers': { type: 'string', multiple: true },
         'all': { type: 'boolean' },
         'list-servers': { type: 'boolean' },
+        'list-models': { type: 'boolean' },
         'add-server': { type: 'string' },
         'remove-server': { type: 'string' },
         'set-default': { type: 'string' },
         'provider': { type: 'string' },
         'model': { type: 'string' },
+        'select-model': { type: 'boolean' },
       },
       allowPositionals: true,
     });
@@ -227,6 +332,30 @@ async function main() {
     // Determine provider early (for env var checks)
     const providerName = args.values['provider'];
     const provider = createProvider(providerName);
+
+    // Handle list-models command (needs API key)
+    if (args.values['list-models']) {
+      if (!provider) {
+        console.error('Error: --provider is required when listing models.');
+        console.error('Use --provider=claude or --provider=openai');
+        process.exit(1);
+      }
+      checkRequiredEnvVars(providerName);
+      await listModels(provider);
+      return;
+    }
+
+    // Handle select-model flag (needs API key)
+    let selectedModel = args.values['model'];
+    if (args.values['select-model']) {
+      if (!provider) {
+        console.error('Error: --provider is required when selecting models.');
+        console.error('Use --provider=claude or --provider=openai');
+        process.exit(1);
+      }
+      checkRequiredEnvVars(providerName);
+      selectedModel = await selectModel(provider);
+    }
 
     // Handle add-server, remove-server, set-default (don't need API key)
     if (args.values['add-server'] || args.values['remove-server'] || args.values['set-default']) {
@@ -321,7 +450,7 @@ async function main() {
 
       const cli = new MCPClientCLI(serverConfigs, {
         provider,
-        model: args.values['model'],
+        model: selectedModel,
       });
       await cli.start();
       return;
@@ -344,7 +473,7 @@ async function main() {
 
       const cli = new MCPClientCLI(enabledServers, {
         provider,
-        model: args.values['model'],
+        model: selectedModel,
       });
       await cli.start();
       return;
@@ -384,7 +513,7 @@ async function main() {
       args: serverArgs,
     }, {
       provider,
-      model: args.values['model'],
+      model: selectedModel,
     });
 
     await cli.start();

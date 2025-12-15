@@ -8,6 +8,7 @@ import type {
   TokenUsage,
   SummarizationConfig,
   MessageStreamEvent,
+  ModelInfo,
 } from '../model-provider.js';
 
 // Tool Executor Type - function that executes tools on your system
@@ -43,12 +44,16 @@ export class OpenAITokenCounter implements TokenCounter {
   constructor(
     modelName: string = 'gpt-5',
     config: Partial<SummarizationConfig> = {},
+    contextWindow?: number,
   ) {
     this.modelName = modelName;
-    this.maxTokens =
-      OPENAI_MODEL_CONTEXT_WINDOWS[modelName] ||
-      OPENAI_MODEL_CONTEXT_WINDOWS['gpt-5'] ||
-      200000;
+    // Only use provided context window - no fallback
+    if (!contextWindow) {
+      throw new Error(
+        `Context window is required for model "${modelName}". Please ensure listAvailableModels() has been called first.`
+      );
+    }
+    this.maxTokens = contextWindow;
 
     const tiktokenModel = modelName.startsWith('gpt-5')
       ? 'gpt-4'
@@ -117,12 +122,15 @@ export class OpenAITokenCounter implements TokenCounter {
     return this.modelName;
   }
 
-  updateModel(modelName: string): void {
+  updateModel(modelName: string, contextWindow?: number): void {
     this.modelName = modelName;
-    this.maxTokens =
-      OPENAI_MODEL_CONTEXT_WINDOWS[modelName] ||
-      OPENAI_MODEL_CONTEXT_WINDOWS['gpt-5'] ||
-      200000;
+    // Only use provided context window - no fallback
+    if (!contextWindow) {
+      throw new Error(
+        `Context window is required for model "${modelName}". Please ensure listAvailableModels() has been called first.`
+      );
+    }
+    this.maxTokens = contextWindow;
   }
 
   getConfig(): SummarizationConfig {
@@ -137,6 +145,8 @@ export class OpenAITokenCounter implements TokenCounter {
 // OpenAI Provider Implementation
 export class OpenAIProvider implements ModelProvider {
   private openaiClient: OpenAI;
+  // Dynamic cache of context windows discovered from API only
+  private contextWindowCache: Map<string, number> = new Map();
 
   constructor() {
     this.openaiClient = new OpenAI({
@@ -153,10 +163,14 @@ export class OpenAIProvider implements ModelProvider {
   }
 
   getContextWindow(model: string): number {
-    return (
-      OPENAI_MODEL_CONTEXT_WINDOWS[model] ||
-      OPENAI_MODEL_CONTEXT_WINDOWS['gpt-5'] ||
-      200000
+    // Only use API-provided context windows from cache
+    if (this.contextWindowCache.has(model)) {
+      return this.contextWindowCache.get(model)!;
+    }
+    
+    // No fallback - context window must be fetched from API first
+    throw new Error(
+      `Context window for model "${model}" not available. Please call listAvailableModels() first to fetch model information from the API.`
     );
   }
 
@@ -164,11 +178,41 @@ export class OpenAIProvider implements ModelProvider {
     return undefined;
   }
 
-  createTokenCounter(
+  async createTokenCounter(
     model: string,
     config?: Partial<SummarizationConfig>,
-  ): TokenCounter {
-    return new OpenAITokenCounter(model, config);
+  ): Promise<TokenCounter> {
+    // Ensure we have context window - fetch from API if not cached
+    let contextWindow = this.contextWindowCache.get(model);
+    if (!contextWindow) {
+      // Try to fetch model info from API
+      await this.ensureModelInfo(model);
+      contextWindow = this.contextWindowCache.get(model);
+    }
+    
+    if (!contextWindow) {
+      throw new Error(
+        `Context window for model "${model}" not available from API. Please ensure the model exists and is accessible.`
+      );
+    }
+    
+    return new OpenAITokenCounter(model, config, contextWindow);
+  }
+
+  /**
+   * Ensure model information is fetched from API
+   */
+  private async ensureModelInfo(model: string): Promise<void> {
+    try {
+      // Fetch all models to populate cache
+      await this.listAvailableModels();
+    } catch (error) {
+      // If listAvailableModels fails, try to get model info directly
+      // This might not work if API doesn't provide context window
+      throw new Error(
+        `Failed to fetch model information from API: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
   }
 
   async *createMessageStream(
@@ -748,4 +792,105 @@ export class OpenAIProvider implements ModelProvider {
       output_tokens: response.usage?.completion_tokens ?? 0,
     };
   }
+
+  /**
+   * List available models from OpenAI API
+   * Fetches models dynamically from the API
+   */
+  async listAvailableModels(): Promise<ModelInfo[]> {
+    try {
+      const response = await this.openaiClient.models.list();
+      
+      // Filter to only chat completion models and map to ModelInfo
+      const chatModels = response.data
+        .filter((model) => {
+          // Only include models that support chat completions
+          // OpenAI models typically have 'gpt-' prefix or 'o1-' prefix
+          const id = model.id.toLowerCase();
+          return (
+            id.startsWith('gpt-') ||
+            id.startsWith('o1-') ||
+            id.includes('chat')
+          );
+        })
+        .map((model) => {
+          const modelId = model.id;
+          
+          // Check if OpenAI API response includes context window information
+          // Note: OpenAI's models.list() doesn't directly provide context window
+          // We would need to query model details or use a separate endpoint
+          // For now, we'll check if it's in the model object
+          let contextWindow: number | undefined = undefined;
+          
+          // Check if model object has context_window or similar field
+          if ('context_window' in model && typeof (model as any).context_window === 'number') {
+            contextWindow = (model as any).context_window;
+            this.contextWindowCache.set(modelId, contextWindow);
+          } else if ('max_context_length' in model && typeof (model as any).max_context_length === 'number') {
+            contextWindow = (model as any).max_context_length;
+            this.contextWindowCache.set(modelId, contextWindow);
+          }
+          // If API doesn't provide context window, we don't set it
+          // User will need to provide it or it will error when getContextWindow is called
+          
+          let description = '';
+          let capabilities: string[] = ['text', 'tools'];
+          
+          if (modelId.startsWith('gpt-4o')) {
+            description = 'Optimized GPT-4 model with vision support';
+            capabilities.push('vision');
+          } else if (modelId.startsWith('gpt-4')) {
+            description = 'GPT-4 model with advanced capabilities';
+            if (modelId.includes('turbo')) {
+              capabilities.push('vision');
+            }
+          } else if (modelId.startsWith('gpt-3.5')) {
+            description = 'Fast and efficient GPT-3.5 model';
+          } else if (modelId.startsWith('o1')) {
+            description = 'Reasoning model optimized for complex problem-solving';
+          } else if (modelId.startsWith('gpt-5')) {
+            description = 'Latest GPT-5 model with extended context';
+            capabilities.push('vision');
+          }
+
+          return {
+            id: modelId,
+            name: modelId,
+            description,
+            contextWindow,
+            capabilities,
+          };
+        })
+        .sort((a, b) => {
+          // Sort by model family and version (newer first)
+          // GPT-5 > GPT-4 > GPT-3.5, o1 > o1-mini
+          const aPriority = getModelPriority(a.id);
+          const bPriority = getModelPriority(b.id);
+          if (aPriority !== bPriority) {
+            return bPriority - aPriority;
+          }
+          return b.id.localeCompare(a.id);
+        });
+
+      return chatModels;
+    } catch (error) {
+      // No fallback - throw error if API call fails
+      throw new Error(
+        `Failed to fetch models from OpenAI API: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+}
+
+/**
+ * Helper function to get model priority for sorting
+ * Higher number = higher priority (shown first)
+ */
+function getModelPriority(modelId: string): number {
+  if (modelId.startsWith('gpt-5')) return 100;
+  if (modelId.startsWith('o1')) return 90;
+  if (modelId.startsWith('gpt-4o')) return 80;
+  if (modelId.startsWith('gpt-4')) return 70;
+  if (modelId.startsWith('gpt-3.5')) return 60;
+  return 50;
 }
