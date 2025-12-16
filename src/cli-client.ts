@@ -1768,7 +1768,11 @@ export class MCPClientCLI {
     
     if (moveToFolder === 'y' || moveToFolder === 'yes') {
       // Get existing folders
-      const existingFolders = historyManager.getExistingFolders();
+      const allFolders = historyManager.getExistingFolders();
+      
+      // Filter out folders with date names (YYYY-MM-DD format)
+      const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+      const existingFolders = allFolders.filter((folder: string) => !datePattern.test(folder));
       
       if (existingFolders.length > 0) {
         this.logger.log('\n📁 Existing folders:\n', { type: 'info' });
@@ -1798,7 +1802,7 @@ export class MCPClientCLI {
           folderName = folderChoice;
         }
       } else {
-        // No existing folders, just ask for new folder name
+        // No existing folders (excluding date folders), just ask for new folder name
         const folderInput = (await this.rl.question('Enter folder name (will be created if it doesn\'t exist): ')).trim();
         if (folderInput) {
           folderName = folderInput;
@@ -2070,7 +2074,7 @@ export class MCPClientCLI {
           { type: 'warning' },
         );
         this.logger.log(
-          `   Please use Claude provider (--provider=claude) for PDF support.\n`,
+          `   Please use Anthropic provider (--provider=anthropic) for PDF support.\n`,
           { type: 'info' },
         );
         

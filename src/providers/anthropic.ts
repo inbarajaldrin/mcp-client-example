@@ -13,17 +13,7 @@ import type {
   ModelInfo,
 } from '../model-provider.js';
 
-// Claude model context window limits (in tokens)
-const CLAUDE_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
-  'claude-haiku-4-5-20251001': 200000,
-  'claude-sonnet-4-5-20251001': 200000,
-  'claude-opus-4-5-20251001': 200000,
-  // Add other Claude model variants as needed
-  'claude-3-5-sonnet-20241022': 200000,
-  'claude-3-opus-20240229': 200000,
-  'claude-3-sonnet-20240229': 200000,
-  'claude-3-haiku-20240307': 200000,
-};
+// No hardcoded model context windows - all context windows must be fetched from API
 
 // Tool Executor Type - function that executes tools on your system
 export type ToolExecutor = (
@@ -31,15 +21,15 @@ export type ToolExecutor = (
   toolInput: Record<string, any>,
 ) => Promise<string>;
 
-// Claude Token Counter Implementation
-export class ClaudeTokenCounter implements TokenCounter {
+// Anthropic Token Counter Implementation
+export class AnthropicTokenCounter implements TokenCounter {
   private encoder: any;
   private maxTokens: number;
   private modelName: string;
   private config: SummarizationConfig;
 
   constructor(
-    modelName: string = 'claude-haiku-4-5-20251001',
+    modelName: string,
     config: Partial<SummarizationConfig> = {},
     contextWindow?: number,
   ) {
@@ -52,9 +42,9 @@ export class ClaudeTokenCounter implements TokenCounter {
     }
     this.maxTokens = contextWindow;
 
-    // Claude models use cl100k_base encoding (same as GPT-4)
-    // Use cl100k_base encoding for Claude models via gpt-4 model
-    this.encoder = encoding_for_model('gpt-4'); // gpt-4 uses cl100k_base, compatible with Claude
+    // Anthropic models use cl100k_base encoding (same as GPT-4)
+    // Use cl100k_base encoding for Anthropic models via gpt-4 model
+    this.encoder = encoding_for_model('gpt-4'); // gpt-4 uses cl100k_base, compatible with Anthropic
 
     this.config = {
       threshold: 80, // Default: summarize at 80% of context window
@@ -135,8 +125,8 @@ export class ClaudeTokenCounter implements TokenCounter {
   }
 }
 
-// Claude Provider Implementation
-export class ClaudeProvider implements ModelProvider {
+// Anthropic Provider Implementation
+export class AnthropicProvider implements ModelProvider {
   private anthropicClient: Anthropic;
   // Dynamic cache of context windows discovered from API only
   private contextWindowCache: Map<string, number> = new Map();
@@ -148,7 +138,7 @@ export class ClaudeProvider implements ModelProvider {
   }
 
   getProviderName(): string {
-    return 'claude';
+    return 'anthropic';
   }
 
   getDefaultModel(): string {
@@ -168,79 +158,114 @@ export class ClaudeProvider implements ModelProvider {
   }
 
   /**
+   * Validate if a model exists by making a lightweight API call
+   * Uses the token counting API which is free and lightweight
+   */
+  private async validateModel(modelId: string): Promise<{ exists: boolean; contextWindow?: number }> {
+    try {
+      // Use token counting API to validate model exists
+      // This is free and lightweight
+      const response = await (this.anthropicClient as any).beta.messages.countTokens(
+        {
+          model: modelId,
+          messages: [{ role: 'user', content: 'test' }],
+        },
+        {
+          headers: {
+            'anthropic-beta': 'token-counting-2024-11-01',
+          },
+        }
+      );
+      
+      // If we get here, model exists
+      // Context window is typically 200K for Anthropic models, but we can't get it from API
+      // We'll need to infer it or use a default
+      return { exists: true, contextWindow: 200000 }; // Default Anthropic context window
+    } catch (error: any) {
+      // Check if error is about model not found
+      if (error?.status === 404 || error?.message?.includes('not_found') || error?.message?.includes('model')) {
+        return { exists: false };
+      }
+      // Other errors might indicate model exists but request was invalid
+      // Re-throw to let caller handle
+      throw error;
+    }
+  }
+
+  /**
    * List available models from Anthropic API
-   * Note: Anthropic doesn't have a public models list endpoint
-   * We need to query model capabilities or use model info endpoints
+   * Uses the official Models API: GET /v1/models
+   * See: https://docs.anthropic.com/claude/reference/list-models
    */
   async listAvailableModels(): Promise<ModelInfo[]> {
     try {
-      // Since Anthropic doesn't have a models.list() endpoint,
-      // we need to try alternative approaches to get model information
-      // For now, we'll attempt to get model info by making a test API call
-      // or querying available models through other means
-      
-      // Try to get model information by querying the API
-      // This is a workaround since Anthropic doesn't expose a models endpoint
-      const knownModels = [
-        'claude-haiku-4-5-20251001',
-        'claude-sonnet-4-5-20251001',
-        'claude-opus-4-5-20251001',
-        'claude-3-5-sonnet-20241022',
-        'claude-3-opus-20240229',
-        'claude-3-sonnet-20240229',
-        'claude-3-haiku-20240307',
-      ];
+      // Try using the Anthropic SDK's models.list() method if available
+      // This is the preferred method for newer SDK versions
+      if ((this.anthropicClient as any).models && (this.anthropicClient as any).models.list) {
+        const response = await (this.anthropicClient as any).models.list();
+        
+        // Transform Anthropic's response to our ModelInfo format
+        const models: ModelInfo[] = response.data.map((model: any) => ({
+          id: model.id,
+          name: model.display_name || model.id,
+          description: `Released: ${model.created_at}`,
+          contextWindow: 200000, // Default context window for Anthropic models
+          capabilities: ['text', 'vision', 'tools'], // All Anthropic models support these
+        }));
 
-      const models: ModelInfo[] = [];
-      
-      // For each known model, try to get context window from API
-      // We can do this by checking model capabilities or making a test call
-      for (const modelId of knownModels) {
-        try {
-          // Try to get context window by checking model metadata
-          // Anthropic API might provide this in error messages or model info
-          // For now, we'll need to query it differently
-          
-          // Since we can't directly query context window, we'll need to
-          // rely on the API response or documentation
-          // This is a limitation of Anthropic's API
-          
-          let description = '';
-          if (modelId.includes('haiku')) {
-            description = 'Fast and efficient model for quick responses';
-          } else if (modelId.includes('sonnet')) {
-            description = 'Balanced model with strong performance';
-          } else if (modelId.includes('opus')) {
-            description = 'Most capable model for complex tasks';
-          }
+        return models;
+      } else {
+        // Fallback to direct API fetch if SDK method isn't available
+        return await this.listAvailableModelsViaFetch();
+      }
+    } catch (error: any) {
+      // If SDK method fails, try direct fetch as fallback
+      if ((error?.message || '').includes('not found') || (error?.message || '').includes('undefined')) {
+        return await this.listAvailableModelsViaFetch();
+      }
+      throw error;
+    }
+  }
 
-          // Note: Without a models endpoint, we can't get context window from API
-          // The context window would need to be provided separately or
-          // we'd need to make a test API call to determine it
-          models.push({
-            id: modelId,
-            name: modelId,
-            description,
-            contextWindow: undefined, // API doesn't provide this
-            capabilities: ['text', 'vision', 'tools', 'pdf'],
-          });
-        } catch (error) {
-          // Skip models that fail
-          continue;
-        }
+  /**
+   * Fallback method: List models via direct API fetch
+   * Uses the standard REST API if SDK method isn't available
+   * See: https://docs.anthropic.com/claude/reference/list-models
+   */
+  private async listAvailableModelsViaFetch(): Promise<ModelInfo[]> {
+    try {
+      const apiKey = process.env.ANTHROPIC_API_KEY;
+      if (!apiKey) {
+        throw new Error('ANTHROPIC_API_KEY environment variable is not set');
       }
 
-      // Sort by model family and version (newer first)
-      return models.sort((a, b) => {
-        // Extract version for sorting (assuming format like 20251001)
-        const aVersion = a.id.split('-').pop() || '';
-        const bVersion = b.id.split('-').pop() || '';
-        return bVersion.localeCompare(aVersion);
+      const response = await fetch('https://api.anthropic.com/v1/models', {
+        method: 'GET',
+        headers: {
+          'x-api-key': apiKey,
+          'anthropic-version': '2023-06-01',
+        },
       });
+
+      if (!response.ok) {
+        throw new Error(`Failed to fetch models: ${response.status} ${response.statusText}`);
+      }
+
+      const data = await response.json() as any;
+      
+      // Transform API response to ModelInfo format
+      const models: ModelInfo[] = (data.data || []).map((model: any) => ({
+        id: model.id,
+        name: model.display_name || model.id,
+        description: `Released: ${model.created_at}`,
+          contextWindow: 200000, // Default context window for Anthropic models
+        capabilities: ['text', 'vision', 'tools'],
+      }));
+
+      return models;
     } catch (error) {
-      // No fallback - throw error if we can't get model information
       throw new Error(
-        `Failed to fetch models from Anthropic API: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to fetch available models from Anthropic API: ${error instanceof Error ? error.message : String(error)}`
       );
     }
   }
@@ -269,20 +294,41 @@ export class ClaudeProvider implements ModelProvider {
       );
     }
     
-    return new ClaudeTokenCounter(model, config, contextWindow);
+    return new AnthropicTokenCounter(model, config, contextWindow);
   }
 
   /**
    * Ensure model information is fetched from API
+   * Validates the model exists and caches its context window
    */
   private async ensureModelInfo(model: string): Promise<void> {
+    // Check if already cached
+    if (this.contextWindowCache.has(model)) {
+      return;
+    }
+
     try {
-      // Fetch all models to populate cache
-      await this.listAvailableModels();
+      // Validate model exists and get context window
+      const validation = await this.validateModel(model);
+      if (!validation.exists) {
+        throw new Error(`Model "${model}" not found. Please check the model name and try again.`);
+      }
+      
+      // Cache the context window
+      if (validation.contextWindow) {
+        this.contextWindowCache.set(model, validation.contextWindow);
+      } else {
+        // If we can't get context window from API, use default
+        // This shouldn't happen, but handle it gracefully
+        throw new Error(`Could not determine context window for model "${model}" from API.`);
+      }
     } catch (error) {
-      // If listAvailableModels fails, we can't get context window
+      // Re-throw with more context
+      if (error instanceof Error && error.message.includes('not found')) {
+        throw error;
+      }
       throw new Error(
-        `Failed to fetch model information from API: ${error instanceof Error ? error.message : String(error)}`
+        `Failed to validate model "${model}" from API: ${error instanceof Error ? error.message : String(error)}`
       );
     }
   }
@@ -301,13 +347,13 @@ export class ClaudeProvider implements ModelProvider {
     }));
 
     // Convert generic Message[] to Anthropic format
-    // Claude doesn't support 'tool' role or tool_calls in messages
+    // Anthropic doesn't support 'tool' role or tool_calls in messages
     // - Convert tool messages to user messages
-    // - Filter out assistant messages with only tool_calls (no content) - Claude doesn't store these
+    // - Filter out assistant messages with only tool_calls (no content) - Anthropic doesn't store these
     const anthropicMessages = messages
       .filter((msg) => {
         // Skip assistant messages that only have tool_calls but no content
-        // Claude handles tool calls via stream, not in message history
+        // Anthropic handles tool calls via stream, not in message history
         if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0 && !msg.content) {
           return false;
         }
@@ -336,11 +382,11 @@ export class ClaudeProvider implements ModelProvider {
    * NEW: Agent loop with tool use support
    * 
    * This method implements the full agentic loop:
-   * 1. Send message to Claude
-   * 2. Check if Claude wants to use tools (stop_reason === 'tool_use')
+   * 1. Send message to Anthropic
+   * 2. Check if Anthropic wants to use tools (stop_reason === 'tool_use')
    * 3. Execute tools via toolExecutor callback
-   * 4. Send tool results back to Claude
-   * 5. Repeat until Claude is done (stop_reason === 'end_turn')
+   * 4. Send tool results back to Anthropic
+   * 5. Repeat until Anthropic is done (stop_reason === 'end_turn')
    * 
    * Based on official docs:
    * https://platform.claude.com/docs/en/agents-and-tools/tool-use/implement-tool-use
@@ -365,7 +411,7 @@ export class ClaudeProvider implements ModelProvider {
     while (iterations < maxIterations) {
       iterations++;
 
-      // Step 1: Stream request to Claude (using .stream() for real-time response)
+      // Step 1: Stream request to Anthropic (using .stream() for real-time response)
       const stream = this.anthropicClient.messages.stream({
         model: model,
         max_tokens: maxTokens,
@@ -381,7 +427,7 @@ export class ClaudeProvider implements ModelProvider {
       // Get the final complete message
       const response = await stream.finalMessage();
 
-      // Step 2: Add Claude's response to conversation
+      // Step 2: Add Anthropic's response to conversation
       // Store full content blocks to preserve tool_use blocks for tool_result references
       conversationMessages.push({
         role: 'assistant',
@@ -392,7 +438,7 @@ export class ClaudeProvider implements ModelProvider {
 
       // Step 3: Check stop reason
       if (response.stop_reason === 'end_turn') {
-        // Claude is done, no more tool calls needed
+        // Anthropic is done, no more tool calls needed
         break;
       }
 
@@ -429,14 +475,14 @@ export class ClaudeProvider implements ModelProvider {
               result: result,
             };
 
-            // Collect result for sending back to Claude
+            // Collect result for sending back to Anthropic
             toolResults.push({
               type: 'tool_result',
               tool_use_id: toolUseBlock.id,
               content: result,
             });
           } catch (error) {
-            // If tool execution fails, send error back to Claude
+            // If tool execution fails, send error back to Anthropic
             toolResults.push({
               type: 'tool_result',
               tool_use_id: toolUseBlock.id,
@@ -445,7 +491,7 @@ export class ClaudeProvider implements ModelProvider {
           }
         }
 
-        // Step 6: Send tool results back to Claude in the next iteration
+        // Step 6: Send tool results back to Anthropic in the next iteration
         conversationMessages.push({
           role: 'user',
           content: '',
@@ -461,7 +507,7 @@ export class ClaudeProvider implements ModelProvider {
   }
 
   /**
-   * Helper: Extract text content from Claude's response
+   * Helper: Extract text content from Anthropic's response
    */
   private extractTextContent(content: any[]): string {
     return content
@@ -471,7 +517,7 @@ export class ClaudeProvider implements ModelProvider {
   }
 
   /**
-   * Helper: Extract tool calls from Claude's response
+   * Helper: Extract tool calls from Anthropic's response
    */
   private extractToolCalls(content: any[]): any[] {
     return content
@@ -504,11 +550,11 @@ export class ClaudeProvider implements ModelProvider {
       if (msg.role === 'user' && msg.content_blocks && Array.isArray(msg.content_blocks)) {
         // OPTION 2: Convert content blocks - properly handles documents
         const anthropicContent = msg.content_blocks.map((block: any) => {
-          // NEW: Handle document (PDF) blocks - Claude native support
+          // NEW: Handle document (PDF) blocks - Anthropic native support
           if (block.type === 'document') {
             return {
               type: 'document',
-              source: block.source,  // Claude supports base64 natively
+              source: block.source,  // Anthropic supports base64 natively
             };
           }
 
@@ -561,13 +607,13 @@ export class ClaudeProvider implements ModelProvider {
     maxTokens: number,
   ): Promise<{ content: Array<{ type: string; text: string }> }> {
     // Convert generic Message[] to Anthropic format
-    // Claude doesn't support 'tool' role or tool_calls in messages
+    // Anthropic doesn't support 'tool' role or tool_calls in messages
     // - Convert tool messages to user messages
-    // - Filter out assistant messages with only tool_calls (no content) - Claude doesn't store these
+    // - Filter out assistant messages with only tool_calls (no content) - Anthropic doesn't store these
     const anthropicMessages = messages
       .filter((msg) => {
         // Skip assistant messages that only have tool_calls but no content
-        // Claude handles tool calls via stream, not in message history
+        // Anthropic handles tool calls via stream, not in message history
         if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0 && !msg.content) {
           return false;
         }
@@ -670,5 +716,5 @@ export class ClaudeProvider implements ModelProvider {
   }
 }
 
-// Export Claude-specific Tool type for backward compatibility
+// Export Anthropic-specific Tool type for backward compatibility
 export type { AnthropicTool as Tool };

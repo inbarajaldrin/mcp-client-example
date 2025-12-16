@@ -159,19 +159,26 @@ export class OpenAIProvider implements ModelProvider {
   }
 
   getDefaultModel(): string {
-    return 'gpt-5';
+    return 'gpt-5-mini';
   }
 
   getContextWindow(model: string): number {
-    // Only use API-provided context windows from cache
+    // First try API-provided context windows from cache
     if (this.contextWindowCache.has(model)) {
       return this.contextWindowCache.get(model)!;
     }
     
-    // No fallback - context window must be fetched from API first
-    throw new Error(
-      `Context window for model "${model}" not available. Please call listAvailableModels() first to fetch model information from the API.`
-    );
+    // Fallback to hardcoded values (same as before commit e4a8d3d)
+    // This is necessary because OpenAI's models.list() doesn't include context window info
+    // Use the same fallback logic as before: model -> gpt-5 -> 200000
+    const contextWindow = 
+      OPENAI_MODEL_CONTEXT_WINDOWS[model] ||
+      OPENAI_MODEL_CONTEXT_WINDOWS['gpt-5'] ||
+      200000;
+    
+    // Cache it for future use
+    this.contextWindowCache.set(model, contextWindow);
+    return contextWindow;
   }
 
   getToolType(): any {
@@ -190,10 +197,15 @@ export class OpenAIProvider implements ModelProvider {
       contextWindow = this.contextWindowCache.get(model);
     }
     
+    // If still not available, try to get from hardcoded fallback
     if (!contextWindow) {
-      throw new Error(
-        `Context window for model "${model}" not available from API. Please ensure the model exists and is accessible.`
-      );
+      try {
+        contextWindow = this.getContextWindow(model);
+      } catch {
+        throw new Error(
+          `Context window for model "${model}" not available from API or fallback. Please ensure the model exists and is accessible.`
+        );
+      }
     }
     
     return new OpenAITokenCounter(model, config, contextWindow);
@@ -664,7 +676,7 @@ export class OpenAIProvider implements ModelProvider {
             console.warn('Warning: OpenAI does not support PDF attachments. Converting to text representation.');
             return {
               type: 'text' as const,
-              text: `[PDF File: document.pdf]\n⚠️  PDF attachments are not supported by OpenAI. Please use Claude provider for PDF support, or convert the PDF to images/text before attaching.`,
+              text: `[PDF File: document.pdf]\n⚠️  PDF attachments are not supported by OpenAI. Please use Anthropic provider for PDF support, or convert the PDF to images/text before attaching.`,
             };
           }
 
@@ -825,13 +837,22 @@ export class OpenAIProvider implements ModelProvider {
           // Check if model object has context_window or similar field
           if ('context_window' in model && typeof (model as any).context_window === 'number') {
             contextWindow = (model as any).context_window;
-            this.contextWindowCache.set(modelId, contextWindow);
+            // Only cache when defined
+            if (contextWindow !== undefined) {
+              this.contextWindowCache.set(modelId, contextWindow);
+            }
           } else if ('max_context_length' in model && typeof (model as any).max_context_length === 'number') {
             contextWindow = (model as any).max_context_length;
+            // Only cache when defined
+            if (contextWindow !== undefined) {
+              this.contextWindowCache.set(modelId, contextWindow);
+            }
+          }
+          // If API doesn't provide context window, use fallback from hardcoded values
+          if (contextWindow === undefined && modelId in OPENAI_MODEL_CONTEXT_WINDOWS) {
+            contextWindow = OPENAI_MODEL_CONTEXT_WINDOWS[modelId];
             this.contextWindowCache.set(modelId, contextWindow);
           }
-          // If API doesn't provide context window, we don't set it
-          // User will need to provide it or it will error when getContextWindow is called
           
           let description = '';
           let capabilities: string[] = ['text', 'tools'];

@@ -7,7 +7,7 @@ import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import readline from 'readline';
-import { ClaudeProvider } from './providers/claude.js';
+import { AnthropicProvider } from './providers/anthropic.js';
 import { OpenAIProvider } from './providers/openai.js';
 import type { ModelProvider, ModelInfo } from './model-provider.js';
 
@@ -22,6 +22,7 @@ interface ServerConfig {
   command: string;
   args: string[];
   disabled?: boolean;
+  env?: Record<string, string>;
 }
 
 interface ClientConfig {
@@ -30,7 +31,7 @@ interface ClientConfig {
   toolStates?: Record<string, boolean>;
 }
 
-interface ClaudeDesktopConfig {
+interface AnthropicDesktopConfig {
   mcpServers: Record<
     string,
     {
@@ -39,6 +40,7 @@ interface ClaudeDesktopConfig {
       disabled?: boolean;
       timeout?: number;
       type?: string;
+      env?: Record<string, string>;
     }
   >;
 }
@@ -49,6 +51,43 @@ const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
 // Try to find local mcp_config.json in mcp-client directory
 const LOCAL_CONFIG_FILE = join(__dirname, '..', 'mcp_config.json');
 
+/**
+ * Merges custom environment variables with default safe environment variables.
+ * This ensures that when custom env vars are provided, essential variables like PATH, HOME, etc.
+ * are still available to the spawned process.
+ * Also adds MCP_CLIENT_OUTPUT_DIR pointing to .mcp-client-data/outputs
+ */
+function mergeEnvironment(customEnv?: Record<string, string>): Record<string, string> {
+  // Default safe environment variables (matching SDK's DEFAULT_INHERITED_ENV_VARS)
+  const defaultEnvVars = process.platform === 'win32'
+    ? ['APPDATA', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'PATH', 'PROCESSOR_ARCHITECTURE', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'USERNAME', 'USERPROFILE']
+    : ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'TERM', 'USER'];
+
+  // Start with default environment
+  const mergedEnv: Record<string, string> = {};
+  for (const key of defaultEnvVars) {
+    const value = process.env[key];
+    if (value !== undefined && !value.startsWith('()')) {
+      mergedEnv[key] = value;
+    }
+  }
+
+  // Add MCP_CLIENT_OUTPUT_DIR pointing to .mcp-client-data/outputs
+  const outputsDir = join(CONFIG_DIR, 'outputs');
+  // Ensure outputs directory exists
+  if (!existsSync(outputsDir)) {
+    mkdirSync(outputsDir, { recursive: true });
+  }
+  mergedEnv['MCP_CLIENT_OUTPUT_DIR'] = outputsDir;
+
+  // Override with custom environment variables
+  if (customEnv) {
+    Object.assign(mergedEnv, customEnv);
+  }
+
+  return mergedEnv;
+}
+
 function getDefaultConfig(): ClientConfig {
   return {
     servers: {},
@@ -56,16 +95,16 @@ function getDefaultConfig(): ClientConfig {
 }
 
 function loadConfig(): ClientConfig {
-  // First, try to load from local mcp_config.json (Claude Desktop format)
+  // First, try to load from local mcp_config.json (Anthropic Desktop format)
   if (existsSync(LOCAL_CONFIG_FILE)) {
     try {
       const content = readFileSync(LOCAL_CONFIG_FILE, 'utf-8');
-      const claudeConfig: ClaudeDesktopConfig = JSON.parse(content);
+      const anthropicConfig: AnthropicDesktopConfig = JSON.parse(content);
 
-      if (claudeConfig.mcpServers) {
-        // Convert Claude Desktop format to our format
+      if (anthropicConfig.mcpServers) {
+        // Convert Anthropic Desktop format to our format
         const servers: Record<string, ServerConfig> = {};
-        for (const [name, server] of Object.entries(claudeConfig.mcpServers)) {
+        for (const [name, server] of Object.entries(anthropicConfig.mcpServers)) {
           // Skip disabled servers
           if (server.disabled) {
             continue;
@@ -73,6 +112,7 @@ function loadConfig(): ClientConfig {
           servers[name] = {
             command: server.command,
             args: server.args || [],
+            env: mergeEnvironment(server.env),
           };
         }
 
@@ -94,17 +134,18 @@ function loadConfig(): ClientConfig {
       const content = readFileSync(CONFIG_FILE, 'utf-8');
       const config = JSON.parse(content);
 
-      // Check if it's Claude Desktop format
+      // Check if it's Anthropic Desktop format
       if (config.mcpServers) {
         const servers: Record<string, ServerConfig> = {};
-        const claudeConfig = config as ClaudeDesktopConfig;
-        for (const [name, server] of Object.entries(claudeConfig.mcpServers)) {
+        const anthropicConfig = config as AnthropicDesktopConfig;
+        for (const [name, server] of Object.entries(anthropicConfig.mcpServers)) {
           if (server.disabled) {
             continue;
           }
           servers[name] = {
             command: server.command,
             args: server.args || [],
+            env: mergeEnvironment(server.env),
           };
         }
         const enabledServers = Object.keys(servers);
@@ -155,7 +196,19 @@ function listServers(config: ClientConfig): void {
 async function listModels(provider: ModelProvider): Promise<void> {
   try {
     console.log(`\nFetching available models from ${provider.getProviderName()}...\n`);
-    const models = await provider.listAvailableModels();
+    let models: ModelInfo[];
+    try {
+      models = await provider.listAvailableModels();
+    } catch (error: any) {
+      // Handle case where model discovery isn't supported (e.g., Anthropic)
+      if (error.message && error.message.includes('does not provide')) {
+        console.error(`\n${error.message}\n`);
+        console.log('To use a specific model, provide it with --model=<model-id>');
+        console.log('Example: --model=claude-3-5-sonnet-20241022\n');
+        return;
+      }
+      throw error;
+    }
     
     if (models.length === 0) {
       console.log('No models found.');
@@ -163,8 +216,15 @@ async function listModels(provider: ModelProvider): Promise<void> {
     }
 
     console.log(`Available models (${models.length}):\n`);
+    let defaultModel: string | null = null;
+    try {
+      defaultModel = provider.getDefaultModel();
+    } catch {
+      // No default model available
+    }
+    
     models.forEach((model, index) => {
-      const isDefault = model.id === provider.getDefaultModel() ? ' (default)' : '';
+      const isDefault = defaultModel && model.id === defaultModel ? ' (default)' : '';
       console.log(`  ${index + 1}. ${model.id}${isDefault}`);
       if (model.description) {
         console.log(`     ${model.description}`);
@@ -202,7 +262,20 @@ async function selectModel(provider: ModelProvider): Promise<string> {
 
   try {
     console.log(`\nFetching available models from ${provider.getProviderName()}...\n`);
-    const models = await provider.listAvailableModels();
+    let models: ModelInfo[];
+    try {
+      models = await provider.listAvailableModels();
+    } catch (error: any) {
+      // Handle case where model discovery isn't supported (e.g., Anthropic)
+      if (error.message && error.message.includes('does not provide')) {
+        console.error(`\n${error.message}\n`);
+        console.log('To use a specific model, provide it with --model=<model-id>');
+        console.log('Example: --model=claude-3-5-sonnet-20241022\n');
+        rl.close();
+        process.exit(1);
+      }
+      throw error;
+    }
     
     if (models.length === 0) {
       console.log('No models found.');
@@ -210,9 +283,16 @@ async function selectModel(provider: ModelProvider): Promise<string> {
       process.exit(1);
     }
 
+    let defaultModel: string | null = null;
+    try {
+      defaultModel = provider.getDefaultModel();
+    } catch {
+      // No default model available
+    }
+    
     console.log(`Available models (${models.length}):\n`);
     models.forEach((model, index) => {
-      const isDefault = model.id === provider.getDefaultModel() ? ' (default)' : '';
+      const isDefault = defaultModel && model.id === defaultModel ? ' (default)' : '';
       console.log(`  ${index + 1}. ${model.id}${isDefault}`);
       if (model.description) {
         console.log(`     ${model.description}`);
@@ -228,13 +308,18 @@ async function selectModel(provider: ModelProvider): Promise<string> {
     });
 
     while (true) {
-      const answer = await question(`Select a model (1-${models.length}) or press Enter for default [${provider.getDefaultModel()}]: `);
+      const defaultModelText = defaultModel || 'none';
+      const answer = await question(`Select a model (1-${models.length})${defaultModelText !== 'none' ? ` or press Enter for default [${defaultModelText}]` : ''}: `);
       const trimmed = answer.trim();
       
       if (!trimmed) {
         // User pressed Enter, use default
+        if (defaultModelText === 'none' || !defaultModel) {
+          console.error('\nError: No default model available. Please select a model by number.');
+          continue;
+        }
         rl.close();
-        return provider.getDefaultModel();
+        return defaultModel;
       }
 
       const selection = parseInt(trimmed, 10);
@@ -256,7 +341,7 @@ async function selectModel(provider: ModelProvider): Promise<string> {
 
 // Check for required environment variables based on provider
 function checkRequiredEnvVars(provider?: string) {
-  const providerName = provider?.toLowerCase() || 'claude';
+  const providerName = provider?.toLowerCase() || 'anthropic';
   
   if (providerName === 'openai') {
     if (!process.env.OPENAI_API_KEY) {
@@ -267,17 +352,17 @@ function checkRequiredEnvVars(provider?: string) {
       console.error('  export OPENAI_API_KEY=your_key_here');
       process.exit(1);
     }
-  } else if (providerName === 'claude') {
+  } else if (providerName === 'anthropic') {
     if (!process.env.ANTHROPIC_API_KEY) {
       console.error(
-        '\x1b[31mError: ANTHROPIC_API_KEY environment variable is required for Claude provider\x1b[0m',
+        '\x1b[31mError: ANTHROPIC_API_KEY environment variable is required for Anthropic provider\x1b[0m',
       );
       console.error('Please set it before running the CLI:');
       console.error('  export ANTHROPIC_API_KEY=your_key_here');
       process.exit(1);
     }
   } else {
-    console.error(`Error: Unknown provider "${providerName}". Available: claude, openai`);
+    console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai`);
     process.exit(1);
   }
 }
@@ -285,17 +370,17 @@ function checkRequiredEnvVars(provider?: string) {
 // Create provider instance based on provider name
 function createProvider(providerName?: string): ModelProvider | undefined {
   if (!providerName) {
-    return undefined; // Will default to Claude
+    return undefined; // Will default to Anthropic
   }
   
   const name = providerName.toLowerCase();
   switch (name) {
-    case 'claude':
-      return new ClaudeProvider();
+    case 'anthropic':
+      return new AnthropicProvider();
     case 'openai':
       return new OpenAIProvider();
     default:
-      console.error(`Error: Unknown provider "${providerName}". Available: claude, openai`);
+      console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai`);
       process.exit(1);
   }
 }
@@ -337,7 +422,7 @@ async function main() {
     if (args.values['list-models']) {
       if (!provider) {
         console.error('Error: --provider is required when listing models.');
-        console.error('Use --provider=claude or --provider=openai');
+        console.error('Use --provider=anthropic or --provider=openai');
         process.exit(1);
       }
       checkRequiredEnvVars(providerName);
@@ -350,7 +435,7 @@ async function main() {
     if (args.values['select-model']) {
       if (!provider) {
         console.error('Error: --provider is required when selecting models.');
-        console.error('Use --provider=claude or --provider=openai');
+        console.error('Use --provider=anthropic or --provider=openai');
         process.exit(1);
       }
       checkRequiredEnvVars(providerName);
@@ -440,7 +525,14 @@ async function main() {
           console.error('Use --list-servers to see available servers.');
           process.exit(1);
         }
-        return [{ name, config: { command: server.command, args: server.args } }];
+        return [{
+          name,
+          config: {
+            command: server.command,
+            args: server.args,
+            env: mergeEnvironment(server.env),
+          }
+        }];
       });
 
       if (serverConfigs.length === 0) {
@@ -462,7 +554,11 @@ async function main() {
         .filter(([name, server]) => !server.disabled)
         .map(([name, server]) => ({
           name,
-          config: { command: server.command, args: server.args },
+          config: {
+            command: server.command,
+            args: server.args,
+            env: mergeEnvironment(server.env),
+          },
         }));
 
       if (enabledServers.length === 0) {
@@ -483,6 +579,8 @@ async function main() {
     let serverCommand: string | undefined;
     let serverArgs: string[] = [];
 
+    let serverEnv: Record<string, string> | undefined;
+    
     if (serverName) {
       // Use server from config
       const server = config.servers[serverName];
@@ -493,6 +591,7 @@ async function main() {
       }
       serverCommand = server.command;
       serverArgs = server.args;
+      serverEnv = server.env;
     } else {
       // Use command-line arguments (backward compatibility)
       serverCommand = args.values['server-command'];
@@ -511,6 +610,7 @@ async function main() {
     const cli = new MCPClientCLI({
       command: serverCommand,
       args: serverArgs,
+      env: mergeEnvironment(serverEnv),
     }, {
       provider,
       model: selectedModel,

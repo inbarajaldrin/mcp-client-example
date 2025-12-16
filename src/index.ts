@@ -26,7 +26,7 @@ import type {
   SummarizationConfig,
   MessageStreamEvent,
 } from './model-provider.js';
-import { ClaudeProvider, type ToolExecutor } from './providers/claude.js';
+import { AnthropicProvider, type ToolExecutor } from './providers/anthropic.js';
 
 type MCPClientOptions = StdioServerParameters & {
   loggerOptions?: LoggerOptions;
@@ -77,8 +77,8 @@ export class MCPClient {
       provider?: ModelProvider;
     },
   ) {
-    // Use provided provider or default to Claude
-    this.modelProvider = options?.provider || new ClaudeProvider();
+    // Use provided provider or default to Anthropic
+    this.modelProvider = options?.provider || new AnthropicProvider();
 
     // Support both single server (backward compatibility) and multiple servers
     const configs = Array.isArray(serverConfigs) ? serverConfigs : [serverConfigs];
@@ -89,8 +89,18 @@ export class MCPClient {
 
     this.logger = new Logger(options?.loggerOptions ?? { mode: 'verbose' });
     
-    // Initialize model (default to provider's default model)
-    this.model = options?.model || this.modelProvider.getDefaultModel();
+    // Initialize model - require explicit model specification
+    if (!options?.model) {
+      try {
+        this.model = this.modelProvider.getDefaultModel();
+      } catch (error) {
+        throw new Error(
+          'Model must be specified. Please provide a model using --model=<model-id> or --select-model.'
+        );
+      }
+    } else {
+      this.model = options.model;
+    }
     
     // Token counter will be initialized asynchronously in start() method
     // We can't initialize it here because createTokenCounter is now async
@@ -124,14 +134,24 @@ export class MCPClient {
     },
   ): MCPClient {
     const client = Object.create(MCPClient.prototype);
-    // Use provided provider or default to Claude
-    client.modelProvider = options?.provider || new ClaudeProvider();
+    // Use provided provider or default to Anthropic
+    client.modelProvider = options?.provider || new AnthropicProvider();
     client.messages = [];
     client.servers = new Map();
     client.tools = [];
     client.logger = new Logger(options?.loggerOptions ?? { mode: 'verbose' });
     client.serverConfigs = servers;
-    client.model = options?.model || client.modelProvider.getDefaultModel();
+    if (!options?.model) {
+      try {
+        client.model = client.modelProvider.getDefaultModel();
+      } catch (error) {
+        throw new Error(
+          'Model must be specified. Please provide a model using --model=<model-id> or --select-model.'
+        );
+      }
+    } else {
+      client.model = options.model;
+    }
     client.currentTokenCount = 0;
     // Token counter will be initialized asynchronously - set to null for now
     client.tokenCounter = null as any;
@@ -231,6 +251,11 @@ export class MCPClient {
     
     this.logger.log(
       `Chat session started: ${this.chatHistoryManager.getCurrentSessionId()}\n`,
+      { type: 'info' },
+    );
+    
+    this.logger.log(
+      `Using model: ${this.model}\n`,
       { type: 'info' },
     );
   }
@@ -414,7 +439,7 @@ export class MCPClient {
 
   /**
    * Execute a tool via MCP servers
-   * This is the callback that the provider calls when Claude wants to use a tool
+   * This is the callback that the provider calls when Anthropic wants to use a tool
    * 
    * Extracts server name, routes to correct MCP server, and returns result
    */
@@ -1053,7 +1078,7 @@ export class MCPClient {
         content: m.content,
       }));
 
-      // Call API to summarize (using ClaudeProvider's createMessage for non-streaming)
+      // Call API to summarize (using AnthropicProvider's createMessage for non-streaming)
       const summaryMessages: Message[] = [
         ...messagesToSummarize,
         {
@@ -1136,7 +1161,7 @@ export class MCPClient {
    * - Looping
    * 
    * We just need to display text and collect assistant messages
-   * Supports both Claude (complete response objects) and OpenAI (streaming events)
+   * Supports both Anthropic (complete response objects) and OpenAI (streaming events)
    */
   private async processToolUseStream(
     stream: AsyncIterable<any>,
@@ -1265,7 +1290,7 @@ export class MCPClient {
           this.messages.push(assistantMessage);
           
           // Use official token counting for accurate counts
-          if (this.modelProvider.getProviderName() === 'claude') {
+          if (this.modelProvider.getProviderName() === 'anthropic') {
             const provider = this.modelProvider as any;
             const exactCount = await provider.countTokensOfficial(
               this.messages,
@@ -1293,8 +1318,8 @@ export class MCPClient {
         continue;
       }
 
-      // Handle complete response objects from Claude API
-      // These come from Claude's createMessageStreamWithToolUse
+      // Handle complete response objects from Anthropic API
+      // These come from Anthropic's createMessageStreamWithToolUse
       if (chunk.content && Array.isArray(chunk.content)) {
         // Check if response has tool_use blocks (tools are about to be executed)
         const toolUseBlocks = chunk.content.filter((block: any) => block.type === 'tool_use');
@@ -1328,7 +1353,7 @@ export class MCPClient {
             this.messages.push(assistantMessage);
             
             // Use official token counting for accurate counts
-            if (this.modelProvider.getProviderName() === 'claude') {
+            if (this.modelProvider.getProviderName() === 'anthropic') {
               const provider = this.modelProvider as any;
               const exactCount = await provider.countTokensOfficial(
                 this.messages,
@@ -1346,7 +1371,7 @@ export class MCPClient {
           await this.autoSummarize();
         }
 
-        // If stop_reason is 'end_turn', Claude is done
+        // If stop_reason is 'end_turn', Anthropic is done
         if (chunk.stop_reason === 'end_turn') {
           break;
         }
@@ -1371,11 +1396,11 @@ export class MCPClient {
         // Create content blocks from attachments and query text
         const contentBlocks = this.attachmentManager.createContentBlocks(attachments, query);
         
-        // Create message with content_blocks for Claude API
+        // Create message with content_blocks for Anthropic API
         userMessage = {
           role: 'user',
           content: query, // Keep text content for compatibility
-          content_blocks: contentBlocks, // Add content blocks for Claude
+          content_blocks: contentBlocks, // Add content blocks for Anthropic
         };
       } else {
         // Standard text message
@@ -1384,7 +1409,7 @@ export class MCPClient {
       
       this.messages.push(userMessage);
       // Token counting for messages with attachments is approximate
-      // Claude API will provide accurate counts during streaming
+      // Anthropic API will provide accurate counts during streaming
       await this.ensureTokenCounter();
       this.currentTokenCount += this.tokenCounter!.countMessageTokens(userMessage);
 
@@ -1403,11 +1428,11 @@ export class MCPClient {
 
       // Use the provider's agentic loop instead of manual processing
       // This handles:
-      // - Sending messages to Claude
+      // - Sending messages to Anthropic
       // - Detecting tool use (stop_reason === 'tool_use')
       // - Executing tools via our callback
-      // - Sending results back to Claude
-      // - Repeating until Claude is done
+      // - Sending results back to Anthropic
+      // - Repeating until Anthropic is done
       const stream = (this.modelProvider as any).createMessageStreamWithToolUse(
         this.messages,
         this.model,
@@ -1421,7 +1446,7 @@ export class MCPClient {
 
       // Always update token count using official API after stream completes
       // This ensures accurate counts including images/attachments
-      if (this.modelProvider.getProviderName() === 'claude') {
+      if (this.modelProvider.getProviderName() === 'anthropic') {
         const provider = this.modelProvider as any;
         try {
           const exactCount = await provider.countTokensOfficial(
