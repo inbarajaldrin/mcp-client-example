@@ -1184,6 +1184,16 @@ export class MCPClient {
     for await (const chunk of stream) {
       // Don't break immediately - let current chunk finish processing
       // Cancellation will be checked in provider loops to stop further iterations
+      
+      // Handle max_iterations_reached event (from provider)
+      if (chunk.type === 'max_iterations_reached') {
+        this.logger.log(
+          `\n⚠️  Maximum iterations reached (${chunk.iterations}/${chunk.maxIterations}). Stopping agent loop.\n`,
+          { type: 'warning' },
+        );
+        continue;
+      }
+      
       // Handle tool_use_complete events (from provider)
       if (chunk.type === 'tool_use_complete') {
         // Tool was executed - provider already handled it
@@ -1586,7 +1596,7 @@ export class MCPClient {
         this.tools,
         8192,
         toolExecutor,
-        undefined, // maxIterations (use default)
+        100, // maxIterations
         cancellationCheck, // Pass cancellation check to provider
       );
 
@@ -1743,7 +1753,7 @@ export class MCPClient {
             this.tools,
             8192,
             toolExecutor,
-            undefined, // maxIterations (use default)
+            100, // maxIterations
             cancellationCheck, // Pass cancellation check to provider
           );
           const pendingToolResults = await this.processToolUseStream(continueStream, cancellationCheck);

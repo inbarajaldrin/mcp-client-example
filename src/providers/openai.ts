@@ -414,7 +414,8 @@ export class OpenAIProvider implements ModelProvider {
     let iterations = 0;
     let hasPendingToolResults = false; // Track if we have tool results that need to be sent
 
-    while (iterations < maxIterations) {
+    // while (iterations < maxIterations) { // Max iterations check disabled - run indefinitely
+    while (true) {
       // Check for cancellation at start of each iteration (after previous one completed)
       // If we have pending tool results, do ONE MORE iteration to send them to the agent
       if (cancellationCheck && cancellationCheck()) {
@@ -681,6 +682,15 @@ export class OpenAIProvider implements ModelProvider {
       // - The model will see the tool outputs and provide the final response
       // - This response will be yielded in the next iteration (Step 1)
     }
+
+    // Check if we exited due to max iterations
+    // if (iterations >= maxIterations) {
+    //   yield {
+    //     type: 'max_iterations_reached',
+    //     iterations: iterations,
+    //     maxIterations: maxIterations,
+    //   } as any;
+    // }
   }
 
   /**
