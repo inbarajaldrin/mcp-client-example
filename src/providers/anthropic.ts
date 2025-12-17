@@ -398,6 +398,7 @@ export class AnthropicProvider implements ModelProvider {
     maxTokens: number,
     toolExecutor: ToolExecutor,
     maxIterations: number = 10,
+    cancellationCheck?: () => boolean,
   ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; result: string }> {
     const anthropicTools: AnthropicTool[] = tools.map((tool) => ({
       name: tool.name,
@@ -407,8 +408,20 @@ export class AnthropicProvider implements ModelProvider {
 
     let conversationMessages = [...messages];
     let iterations = 0;
+    let hasPendingToolResults = false; // Track if we have tool results that need to be sent
 
     while (iterations < maxIterations) {
+      // Check for cancellation at start of each iteration (after previous one completed)
+      // If we have pending tool results, do ONE MORE iteration to send them to the agent
+      if (cancellationCheck && cancellationCheck()) {
+        if (!hasPendingToolResults) {
+          // No pending results, safe to break immediately
+          break;
+        }
+        // We have pending tool results - continue this iteration to send them
+        // After this iteration completes, we'll break regardless
+      }
+
       iterations++;
 
       // Step 1: Stream request to Anthropic (using .stream() for real-time response)
@@ -435,6 +448,16 @@ export class AnthropicProvider implements ModelProvider {
         tool_calls: this.extractToolCalls(response.content),
         content_blocks: response.content, // Preserve full content array with tool_use blocks
       });
+
+      // If we just sent pending tool results and are cancelled, break now
+      if (hasPendingToolResults && cancellationCheck && cancellationCheck()) {
+        // We've sent the tool results to the agent and got a response
+        // Now we can safely break
+        break;
+      }
+
+      // Reset the flag - if there were pending results, they've now been sent
+      hasPendingToolResults = false;
 
       // Step 3: Check stop reason
       if (response.stop_reason === 'end_turn') {
@@ -472,6 +495,7 @@ export class AnthropicProvider implements ModelProvider {
             yield {
               type: 'tool_use_complete',
               toolName: toolUseBlock.name,
+              toolUseId: toolUseBlock.id,
               result: result,
             };
 
@@ -497,6 +521,10 @@ export class AnthropicProvider implements ModelProvider {
           content: '',
           tool_results: toolResults,
         });
+
+        // Mark that we have pending tool results to send
+        // Even if cancelled, we need one more iteration to send these to the agent
+        hasPendingToolResults = true;
 
         // Loop continues - go back to step 1 with tool results in context
       } else {

@@ -398,6 +398,7 @@ export class OpenAIProvider implements ModelProvider {
     maxTokens: number,
     toolExecutor: ToolExecutor,
     maxIterations: number = 10,
+    cancellationCheck?: () => boolean,
   ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; result: string }> {
     // Convert generic Tool[] to OpenAI function format
     const openaiTools = tools.map((tool) => ({
@@ -411,8 +412,20 @@ export class OpenAIProvider implements ModelProvider {
 
     let conversationMessages = [...messages];
     let iterations = 0;
+    let hasPendingToolResults = false; // Track if we have tool results that need to be sent
 
     while (iterations < maxIterations) {
+      // Check for cancellation at start of each iteration (after previous one completed)
+      // If we have pending tool results, do ONE MORE iteration to send them to the agent
+      if (cancellationCheck && cancellationCheck()) {
+        if (!hasPendingToolResults) {
+          // No pending results, safe to break immediately
+          break;
+        }
+        // We have pending tool results - continue this iteration to send them
+        // After this iteration completes, we'll break regardless
+      }
+
       iterations++;
 
       // Step 1: Stream request to OpenAI
@@ -561,6 +574,19 @@ export class OpenAIProvider implements ModelProvider {
           : undefined,
       });
 
+      // If we just sent pending tool results and are cancelled, break now
+      if (hasPendingToolResults && cancellationCheck && cancellationCheck()) {
+        // We've sent the tool results to the agent and got a response
+        // Yield message_stop before breaking
+        yield {
+          type: 'message_stop',
+        } as MessageStreamEvent;
+        break;
+      }
+
+      // Reset the flag - if there were pending results, they've now been sent
+      hasPendingToolResults = false;
+
       // Yield token usage from response (OpenAI provides exact counts in final chunk when stream_options.include_usage is true)
       // Always yield if we have usage data - use finalUsage from stream or fallback to response.usage
       const usageToYield = finalUsage || response.usage;
@@ -610,6 +636,7 @@ export class OpenAIProvider implements ModelProvider {
           yield {
             type: 'tool_use_complete',
             toolName: functionCall.name,
+            toolCallId: toolCall.id,
             result: result,
           };
 
@@ -644,6 +671,10 @@ export class OpenAIProvider implements ModelProvider {
           content: toolResult.content,
         });
       }
+
+      // Mark that we have pending tool results to send
+      // Even if cancelled, we need one more iteration to send these to the agent
+      hasPendingToolResults = true;
 
       // Step 6: Loop continues - the next iteration will:
       // - Make another API call with tool results in conversationMessages

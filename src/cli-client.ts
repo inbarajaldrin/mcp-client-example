@@ -1,6 +1,7 @@
 import { StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import readline from 'readline/promises';
+import chalk from 'chalk';
 import { MCPClient } from './index.js';
 import { consoleStyles, Logger } from './logger.js';
 import type { ModelProvider } from './model-provider.js';
@@ -15,6 +16,9 @@ export class MCPClientCLI {
   private isShuttingDown = false;
   private attachmentManager: AttachmentManager;
   private pendingAttachments: AttachmentInfo[] = [];
+  private abortCurrentQuery = false;
+  private keyboardMonitor: (() => Promise<void>) | null = null;
+  private isMonitoring = false;
 
   constructor(
     serverConfig: StdioServerParameters | Array<{ name: string; config: StdioServerParameters }>,
@@ -97,6 +101,10 @@ export class MCPClientCLI {
         type: 'info',
       });
       this.logger.log(
+        `💡 Tip: Press 'a' during agent execution to abort the current query without exiting\n`,
+        { type: 'info' },
+      );
+      this.logger.log(
         `\nTesting commands:\n` +
         `  /token-status or /tokens - Show current token usage\n` +
         `  /summarize or /summarize-now - Manually trigger summarization\n` +
@@ -156,6 +164,9 @@ export class MCPClientCLI {
     this.isShuttingDown = true;
 
     try {
+      // Stop keyboard monitoring if active
+      this.stopKeyboardMonitoring();
+      
       if (this.rl) {
         this.rl.close();
         this.rl = null;
@@ -165,6 +176,92 @@ export class MCPClientCLI {
     } catch (error) {
       // Ignore errors during cleanup
     }
+  }
+
+  /**
+   * Start monitoring keyboard input for 'a' key to abort current query
+   */
+  private async startKeyboardMonitoring(): Promise<void> {
+    if (this.isMonitoring || !process.stdin.isTTY) {
+      return;
+    }
+
+    this.isMonitoring = true;
+    this.abortCurrentQuery = false;
+
+    // Pause readline to allow raw mode
+    if (this.rl) {
+      this.rl.pause();
+    }
+
+    const stdin = process.stdin;
+    
+    // Enable raw mode to read individual key presses
+    if (stdin.setRawMode) {
+      stdin.setRawMode(true);
+    }
+    stdin.resume();
+    stdin.setEncoding('utf8');
+
+    // Listen for key presses
+    const keyHandler = (key: string) => {
+      if (!this.isMonitoring) {
+        return;
+      }
+      
+      // Handle single character 'a'
+      const keyLower = key.toLowerCase();
+      if (keyLower === 'a') {
+        this.logger.log('\n' + chalk.bold.red('🛑 Abort requested - will finish current response then stop...') + '\n', { type: 'error' });
+        this.abortCurrentQuery = true;
+      }
+    };
+
+    stdin.on('data', keyHandler);
+
+    // Store cleanup function
+    this.keyboardMonitor = async () => {
+      if (!this.isMonitoring) {
+        return;
+      }
+
+      this.isMonitoring = false;
+      stdin.removeListener('data', keyHandler);
+
+      // Restore normal mode
+      if (stdin.setRawMode) {
+        stdin.setRawMode(false);
+      }
+
+      // Flush any buffered input to prevent key presses from leaking into next input
+      if (stdin.readable) {
+        let chunk;
+        while ((chunk = stdin.read()) !== null) {
+          // Discard the chunk
+        }
+      }
+
+      // Close and recreate readline interface to ensure clean terminal state
+      // This prevents double-echo issues after restoring from raw mode
+      if (this.rl) {
+        this.rl.close();
+        this.rl = readline.createInterface({
+          input: process.stdin,
+          output: process.stdout,
+        });
+      }
+    };
+  }
+
+  /**
+   * Stop keyboard monitoring and restore terminal settings
+   */
+  private stopKeyboardMonitoring(): void {
+    if (this.keyboardMonitor) {
+      this.keyboardMonitor();
+      this.keyboardMonitor = null;
+    }
+    this.isMonitoring = false;
   }
 
   /**
@@ -309,13 +406,35 @@ export class MCPClientCLI {
           break;
         }
         
-        const query = (await this.rl.question(consoleStyles.prompt)).trim();
+        // Reset abort flag before reading next query to ensure clean state
+        this.abortCurrentQuery = false;
+        
+        let query = (await this.rl.question(consoleStyles.prompt)).trim();
         
         if (this.isShuttingDown) {
           break;
         }
         
-        if (query.toLowerCase() === EXIT_COMMAND) {
+        // Safety check: Remove leading 'a' if it leaked from keyboard monitoring
+        // This can happen if 'a' was pressed during monitoring and got buffered into next input
+        // Only remove if query starts with 'a' followed immediately by other chars (not 'a ' or standalone 'a')
+        if (query.length > 1 && query.toLowerCase().startsWith('a') && query[1] !== ' ') {
+          const withoutA = query.substring(1).trim();
+          // Only use the cleaned version if it's not empty and looks like a valid command
+          if (withoutA && withoutA.length > 0) {
+            query = withoutA;
+          }
+        }
+        
+        // Skip empty queries
+        if (!query) {
+          continue;
+        }
+        
+        // Check for exit command (trim and lowercase to handle any edge cases)
+        // Do this check BEFORE any other processing to ensure exit always works
+        const trimmedQuery = query.trim().toLowerCase();
+        if (trimmedQuery === EXIT_COMMAND) {
           this.logger.log('\nGoodbye! 👋\n', { type: 'warning' });
           // End chat session before exiting
           this.client.getChatHistoryManager().endSession('Chat session ended by user');
@@ -679,34 +798,73 @@ export class MCPClientCLI {
         const systemPrompt = await (this.client as any).prepareAndLogSystemPrompt();
         const finalQuery = systemPrompt ? `${systemPrompt}\n\nUser: ${query}` : query;
 
-        // Log user message to history (including attachment metadata)
-        const attachmentMetadata = this.pendingAttachments.length > 0
-          ? this.pendingAttachments.map(att => ({
-              fileName: att.fileName,
-              ext: att.ext,
-              mediaType: att.mediaType,
-            }))
-          : undefined;
-        this.client.getChatHistoryManager().addUserMessage(query, attachmentMetadata);
-
-        // Get message count before processing to find the new assistant message
-        const messagesBefore = (this.client as any).messages.length;
+        // Reset abort flag and start keyboard monitoring
+        this.abortCurrentQuery = false;
+        await this.startKeyboardMonitoring();
         
-        // Process query with attachments if any are pending (use finalQuery which includes system prompt if needed)
-        await this.client.processQuery(finalQuery, false, this.pendingAttachments.length > 0 ? this.pendingAttachments : undefined);
+        // Save pending attachments before processing (they may be cleared on abort)
+        const attachmentsForHistory = [...this.pendingAttachments];
+        
+        try {
+          // Process query with attachments if any are pending (use finalQuery which includes system prompt if needed)
+          // Pass cancellation check function
+          await this.client.processQuery(
+            finalQuery, 
+            false, 
+            this.pendingAttachments.length > 0 ? this.pendingAttachments : undefined,
+            () => this.abortCurrentQuery
+          );
+        } catch (error: any) {
+          // If aborted, log message but continue to save history
+          if (this.abortCurrentQuery) {
+            this.logger.log('\n' + chalk.yellow('Query stopped after current response.') + '\n', { type: 'warning' });
+            // Stop monitoring
+            this.stopKeyboardMonitoring();
+            // Wait a bit longer to ensure readline state is fully restored
+            // This helps prevent duplicate echo after abort
+            await new Promise(resolve => setTimeout(resolve, 100));
+            // Continue to save history even when aborted
+          } else {
+            throw error;
+          }
+        } finally {
+          // Stop keyboard monitoring
+          this.stopKeyboardMonitoring();
+        }
+        
+        // If query was aborted, log message
+        if (this.abortCurrentQuery) {
+          this.logger.log('\n' + chalk.yellow('Query stopped after current response.') + '\n', { type: 'warning' });
+          // Wait a bit longer to ensure readline state is fully restored
+          // This helps prevent duplicate echo after abort
+          await new Promise(resolve => setTimeout(resolve, 100));
+        }
+        
+        // Always save to history (even if aborted)
+        {
+          // Log user message to history (including attachment metadata)
+          const attachmentMetadata = attachmentsForHistory.length > 0
+            ? attachmentsForHistory.map(att => ({
+                fileName: att.fileName,
+                ext: att.ext,
+                mediaType: att.mediaType,
+              }))
+            : undefined;
+          this.client.getChatHistoryManager().addUserMessage(query, attachmentMetadata);
+          
+          // Extract assistant response from messages array
+          const messages = (this.client as any).messages;
+          const assistantMessages = messages.filter((msg: any) => msg.role === 'assistant');
+          if (assistantMessages.length > 0) {
+            const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
+            if (lastAssistantMessage.content) {
+              this.client.getChatHistoryManager().addAssistantMessage(lastAssistantMessage.content);
+            }
+          }
+        }
         
         // Clear pending attachments after they've been used
         this.pendingAttachments = [];
-        
-        // Extract assistant response from messages array
-        const messages = (this.client as any).messages;
-        const assistantMessages = messages.filter((msg: any) => msg.role === 'assistant');
-        if (assistantMessages.length > 0) {
-          const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
-          if (lastAssistantMessage.content) {
-            this.client.getChatHistoryManager().addAssistantMessage(lastAssistantMessage.content);
-          }
-        }
         
         this.logger.log('\n' + consoleStyles.separator + '\n');
       } catch (error: any) {
@@ -721,7 +879,6 @@ export class MCPClientCLI {
         
         // Handle Ctrl+C (AbortError) - save session before exiting
         if (error?.name === 'AbortError' || error?.message?.includes('Aborted')) {
-          this.logger.log('\n\nSaving chat session...\n', { type: 'info' });
           this.client.getChatHistoryManager().endSession('Chat session ended by Ctrl+C');
           break;
         }
