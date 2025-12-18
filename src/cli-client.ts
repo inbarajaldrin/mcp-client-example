@@ -130,7 +130,7 @@ export class MCPClientCLI {
         `  /chat-search <keyword> - Search chats by keyword\n` +
         `  /chat-restore - Restore a past chat as context\n` +
         `  /chat-export - Export a chat to file\n` +
-        `  /chat-rename - Rename a chat session file\n` +
+        `  /chat-rename - Move a chat session to a folder (named folder will be created)\n` +
         `  /chat-clear - Delete a chat session\n`,
         { type: 'info' },
       );
@@ -1785,85 +1785,125 @@ export class MCPClientCLI {
     );
   }
 
+  /**
+   * Shared function to handle parent folder selection UI
+   * Returns the selected parent folder name, or undefined if none selected
+   */
+  private async selectParentFolder(historyManager: any): Promise<string | undefined> {
+    if (!this.rl) {
+      throw new Error('Readline interface not initialized');
+    }
+
+    const moveToFolder = (await this.rl.question('\nMove to a parent folder? (y/n, default: n): ')).trim().toLowerCase();
+    
+    if (moveToFolder !== 'y' && moveToFolder !== 'yes') {
+      return undefined;
+    }
+
+    // Get existing folders
+    const allFolders = historyManager.getExistingFolders();
+    
+    // Filter out folders with date names (YYYY-MM-DD format)
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    const existingFolders = allFolders.filter((folder: string) => !datePattern.test(folder));
+    
+    if (existingFolders.length > 0) {
+      this.logger.log('\n📁 Existing parent folders:\n', { type: 'info' });
+      existingFolders.forEach((folder: string, i: number) => {
+        this.logger.log(`  ${i + 1}. ${folder}`, { type: 'info' });
+      });
+      this.logger.log(`  ${existingFolders.length + 1}. Create new parent folder\n`, { type: 'info' });
+      
+      const folderChoice = (await this.rl.question('Select folder number (or enter new folder name): ')).trim();
+      
+      // Check if it's a number
+      const folderIndex = parseInt(folderChoice) - 1;
+      if (!isNaN(folderIndex) && folderIndex >= 0 && folderIndex < existingFolders.length) {
+        // Selected existing folder
+        const selectedFolder = existingFolders[folderIndex];
+        this.logger.log(`\nSelected parent folder: ${selectedFolder}\n`, { type: 'info' });
+        return selectedFolder;
+      } else if (!isNaN(folderIndex) && folderIndex === existingFolders.length) {
+        // User wants to create new folder
+        const newFolderName = (await this.rl.question('Enter new parent folder name: ')).trim();
+        if (newFolderName) {
+          return newFolderName;
+        } else {
+          this.logger.log('\nFolder name cannot be empty. Will be in root chats directory.\n', { type: 'warning' });
+          return undefined;
+        }
+      } else {
+        // User entered a folder name directly
+        return folderChoice;
+      }
+    } else {
+      // No existing folders (excluding date folders), just ask for folder name
+      const folderInput = (await this.rl.question('Enter parent folder name (will be created if it doesn\'t exist): ')).trim();
+      if (folderInput) {
+        return folderInput;
+      } else {
+        this.logger.log('\nFolder name cannot be empty. Will be in root chats directory.\n', { type: 'warning' });
+        return undefined;
+      }
+    }
+  }
+
   private async exportChat(): Promise<void> {
     if (!this.rl) {
       throw new Error('Readline interface not initialized');
     }
     
     const historyManager = this.client.getChatHistoryManager();
-    const chats = historyManager.getAllChats();
+    const currentSessionId = historyManager.getCurrentSessionId();
     
-    if (chats.length === 0) {
-      this.logger.log('\nNo chat sessions available to export.\n', { type: 'warning' });
+    if (!currentSessionId) {
+      this.logger.log('\nNo active chat session to export.\n', { type: 'warning' });
       return;
     }
     
-    this.logger.log('\n💾 Select a chat to export:\n', { type: 'info' });
-    
-    for (let i = 0; i < Math.min(chats.length, 20); i++) {
-      const chat = chats[i];
-      const date = new Date(chat.startTime).toLocaleString();
-      const summary = chat.summary ? ` - ${chat.summary}` : '';
-      this.logger.log(
-        `  ${i + 1}. ${chat.sessionId} | ${date} | ${chat.messageCount} messages${summary}\n`,
-        { type: 'info' }
-      );
-    }
-    
-    const selection = await this.rl.question('\nEnter number (or "q" to cancel): ');
-    
-    if (selection.toLowerCase() === 'q' || selection.toLowerCase() === 'quit') {
-      this.logger.log('\nCancelled.\n', { type: 'info' });
-      return;
-    }
-    
-    const index = parseInt(selection) - 1;
-    if (isNaN(index) || index < 0 || index >= Math.min(chats.length, 20)) {
-      this.logger.log('\nInvalid selection.\n', { type: 'error' });
-      return;
-    }
-    
-    const selectedChat = chats[index];
-    
-    const formatSelection = (await this.rl.question('\nExport format (json/md) [md]: ')).trim().toLowerCase();
-    const format = formatSelection === 'json' ? 'json' : 'md';
-    
-    const pathSelection = (await this.rl.question('\nEnter file path (or press Enter for default): ')).trim();
-    
-    let exportPath: string;
-    if (pathSelection) {
-      exportPath = pathSelection;
-    } else {
-      const fs = await import('fs');
+    // Get current session metadata to show info
+    const currentChat = historyManager.getAllChats().find(chat => chat.sessionId === currentSessionId);
+    if (currentChat) {
       const path = await import('path');
-      const { fileURLToPath } = await import('url');
-      const { dirname } = await import('path');
-      const __filename = fileURLToPath(import.meta.url);
-      const __dirname = dirname(__filename);
-      const defaultDir = path.join(__dirname, '..', '.mcp-client-data', 'exports');
-      if (!fs.existsSync(defaultDir)) {
-        fs.mkdirSync(defaultDir, { recursive: true });
-      }
-      const ext = format === 'json' ? 'json' : 'md';
-      exportPath = path.join(defaultDir, `chat-${selectedChat.sessionId}.${ext}`);
+      const currentFileName = path.basename(currentChat.filePath);
+      const currentDir = path.basename(path.dirname(currentChat.filePath)) || 'root';
+      this.logger.log(`\nCurrent filename: ${currentFileName}`, { type: 'info' });
+      this.logger.log(`Current folder: ${currentDir}\n`, { type: 'info' });
     }
     
-    let content: string | null;
-    if (format === 'json') {
-      content = historyManager.exportChatAsJson(selectedChat.sessionId);
-    } else {
-      content = historyManager.exportChatAsMarkdown(selectedChat.sessionId);
-    }
+    const folderName = (await this.rl.question('\nEnter name for the export folder (will create a folder with this name): ')).trim();
     
-    if (!content) {
-      this.logger.log('\nFailed to export chat.\n', { type: 'error' });
+    if (!folderName) {
+      this.logger.log('\nName cannot be empty.\n', { type: 'error' });
       return;
     }
     
-    const fs = await import('fs');
-    fs.writeFileSync(exportPath, content, 'utf-8');
+    // Ask if user wants to move to a parent folder (using shared function)
+    const parentFolderName = await this.selectParentFolder(historyManager);
     
-    this.logger.log(`\n✓ Chat exported to: ${exportPath}\n`, { type: 'success' });
+    // Ask user about attachments
+    const attachmentsAction = (await this.rl.question('\nAttachments: Copy or Move? (c/m, default: c): ')).trim().toLowerCase();
+    const copyAttachments = attachmentsAction !== 'm' && attachmentsAction !== 'move';
+    
+    // Ask user about outputs
+    const outputsAction = (await this.rl.question('Outputs: Copy or Move? (c/m, default: m): ')).trim().toLowerCase();
+    const copyOutputs = outputsAction === 'c' || outputsAction === 'copy';
+    
+    const success = historyManager.exportChat(
+      currentSessionId,
+      folderName,
+      parentFolderName,
+      copyAttachments,
+      copyOutputs
+    );
+    
+    if (success) {
+      const sanitizedName = folderName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+      const locationMsg = parentFolderName ? ` in "${parentFolderName}/${sanitizedName}/"` : ` in "${sanitizedName}/"`;
+      this.logger.log(`\n✓ Chat exported to folder${locationMsg}\n`, { type: 'success' });
+    } else {
+      this.logger.log(`\n✗ Failed to export chat to folder.\n`, { type: 'error' });
+    }
   }
 
   private async renameChat(): Promise<void> {
@@ -1881,11 +1921,13 @@ export class MCPClientCLI {
     
     this.logger.log('\n📝 Select a chat to rename:\n', { type: 'info' });
     
+    const path = await import('path');
+    
     for (let i = 0; i < Math.min(chats.length, 20); i++) {
       const chat = chats[i];
       const date = new Date(chat.startTime).toLocaleString();
-      // Extract current filename from path
-      const currentFileName = chat.filePath.split('/').pop() || chat.filePath;
+      // Extract current filename from path (cross-platform)
+      const currentFileName = path.basename(chat.filePath);
       this.logger.log(
         `  ${i + 1}. ${chat.sessionId} | ${date} | ${chat.messageCount} messages | ${currentFileName}\n`,
         { type: 'info' }
@@ -1906,77 +1948,36 @@ export class MCPClientCLI {
     }
     
     const selectedChat = chats[index];
-    const currentFileName = selectedChat.filePath.split('/').pop() || selectedChat.filePath;
-    const currentDir = selectedChat.filePath.split('/').slice(-2, -1)[0] || 'root';
+    const currentFileName = path.basename(selectedChat.filePath);
+    const currentDir = path.basename(path.dirname(selectedChat.filePath)) || 'root';
     
     this.logger.log(`\nCurrent filename: ${currentFileName}`, { type: 'info' });
     this.logger.log(`Current folder: ${currentDir}\n`, { type: 'info' });
     
-    const newName = (await this.rl.question('\nEnter new name for the file: ')).trim();
+    const newName = (await this.rl.question('\nEnter name for the chat (will create a folder with this name): ')).trim();
     
     if (!newName) {
       this.logger.log('\nName cannot be empty.\n', { type: 'error' });
       return;
     }
     
-    // Ask if user wants to move to a folder
-    const moveToFolder = (await this.rl.question('\nMove to a folder? (y/n, default: n): ')).trim().toLowerCase();
-    let folderName: string | undefined;
+    // Ask if user wants to move to a parent folder (using shared function)
+    const folderName = await this.selectParentFolder(historyManager);
     
-    if (moveToFolder === 'y' || moveToFolder === 'yes') {
-      // Get existing folders
-      const allFolders = historyManager.getExistingFolders();
-      
-      // Filter out folders with date names (YYYY-MM-DD format)
-      const datePattern = /^\d{4}-\d{2}-\d{2}$/;
-      const existingFolders = allFolders.filter((folder: string) => !datePattern.test(folder));
-      
-      if (existingFolders.length > 0) {
-        this.logger.log('\n📁 Existing folders:\n', { type: 'info' });
-        existingFolders.forEach((folder: string, i: number) => {
-          this.logger.log(`  ${i + 1}. ${folder}`, { type: 'info' });
-        });
-        this.logger.log(`  ${existingFolders.length + 1}. Create new folder\n`, { type: 'info' });
-        
-        const folderChoice = (await this.rl.question('Select folder number (or enter new folder name): ')).trim();
-        
-        // Check if it's a number
-        const folderIndex = parseInt(folderChoice) - 1;
-        if (!isNaN(folderIndex) && folderIndex >= 0 && folderIndex < existingFolders.length) {
-          // Selected existing folder
-          folderName = existingFolders[folderIndex];
-          this.logger.log(`\nSelected folder: ${folderName}\n`, { type: 'info' });
-        } else if (!isNaN(folderIndex) && folderIndex === existingFolders.length) {
-          // User wants to create new folder
-          const newFolderName = (await this.rl.question('Enter new folder name: ')).trim();
-          if (newFolderName) {
-            folderName = newFolderName;
-          } else {
-            this.logger.log('\nFolder name cannot be empty. Keeping chat in current folder.\n', { type: 'warning' });
-          }
-        } else {
-          // User entered a folder name directly
-          folderName = folderChoice;
-        }
-      } else {
-        // No existing folders (excluding date folders), just ask for new folder name
-        const folderInput = (await this.rl.question('Enter folder name (will be created if it doesn\'t exist): ')).trim();
-        if (folderInput) {
-          folderName = folderInput;
-        } else {
-          this.logger.log('\nFolder name cannot be empty. Keeping chat in current folder.\n', { type: 'warning' });
-        }
-      }
-    }
+    // Ask user about attachments
+    const attachmentsAction = (await this.rl.question('\nAttachments: Copy or Move? (c/m, default: c): ')).trim().toLowerCase();
+    const copyAttachments = attachmentsAction !== 'm' && attachmentsAction !== 'move';
     
-    const updated = historyManager.renameChat(selectedChat.sessionId, newName, folderName);
+    // Ask user about outputs
+    const outputsAction = (await this.rl.question('Outputs: Copy or Move? (c/m, default: m): ')).trim().toLowerCase();
+    const copyOutputs = outputsAction === 'c' || outputsAction === 'copy';
+    
+    const updated = historyManager.renameChat(selectedChat.sessionId, newName, folderName, copyAttachments, copyOutputs);
     
     if (updated) {
       const sanitizedName = newName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-      const sessionIdParts = selectedChat.sessionId.split('-');
-      const sessionIdShort = sessionIdParts[sessionIdParts.length - 1];
-      const locationMsg = folderName ? ` in folder "${folderName}"` : '';
-      this.logger.log(`\n✓ Chat ${selectedChat.sessionId} renamed to: chat-${sessionIdShort}-${sanitizedName}.json${locationMsg}\n`, { type: 'success' });
+      const locationMsg = folderName ? ` in "${folderName}/${sanitizedName}/"` : ` in "${sanitizedName}/"`;
+      this.logger.log(`\n✓ Chat ${selectedChat.sessionId} moved to folder${locationMsg}\n`, { type: 'success' });
     } else {
       this.logger.log(`\n✗ Failed to rename chat ${selectedChat.sessionId}.\n`, { type: 'error' });
     }

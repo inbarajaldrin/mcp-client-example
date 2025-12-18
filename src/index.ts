@@ -242,7 +242,9 @@ export class MCPClient {
     
     // Start chat session after servers are connected
     const serverNames = Array.from(this.servers.keys());
-    this.chatHistoryManager.startSession(this.model, serverNames);
+    // Get enabled tools for the session
+    const enabledTools = this.tools.map(tool => ({ name: tool.name, description: tool.description }));
+    this.chatHistoryManager.startSession(this.model, serverNames, enabledTools);
     
     this.logger.log(
       `Connected to ${this.servers.size} server(s): ${Array.from(this.servers.keys()).join(', ')}\n`,

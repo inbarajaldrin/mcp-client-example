@@ -1,5 +1,5 @@
-import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, renameSync, readdirSync, statSync } from 'fs';
-import { join, dirname } from 'path';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, renameSync, readdirSync, statSync, copyFileSync, rmdirSync } from 'fs';
+import { join, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { Logger } from './logger.js';
 import type { Message } from './model-provider.js';
@@ -16,6 +16,8 @@ const __dirname = dirname(__filename);
 
 const CHATS_DIR = join(__dirname, '..', '.mcp-client-data', 'chats');
 const INDEX_FILE = join(CHATS_DIR, 'index.json');
+const ATTACHMENTS_DIR = join(__dirname, '..', '.mcp-client-data', 'attachments');
+const OUTPUTS_DIR = join(__dirname, '..', '.mcp-client-data', 'outputs');
 
 export interface ChatMetadata {
   sessionId: string;
@@ -38,6 +40,10 @@ export interface ChatSession {
   endTime?: string;
   model: string;
   servers: string[];
+  tools?: Array<{
+    name: string;
+    description: string;
+  }>;
   messages: Array<{
     timestamp: string;
     role: 'user' | 'assistant' | 'tool' | 'client';
@@ -222,7 +228,7 @@ export class ChatHistoryManager {
   /**
    * Start a new chat session
    */
-  startSession(model: string, servers: string[]): string {
+  startSession(model: string, servers: string[], tools?: Array<{ name: string; description: string }>): string {
     const sessionId = this.generateSessionId();
     const now = new Date();
 
@@ -231,6 +237,7 @@ export class ChatHistoryManager {
       startTime: now.toISOString(),
       model,
       servers,
+      tools: tools?.map(tool => ({ name: tool.name, description: tool.description })),
       messages: [],
       metadata: {
         messageCount: 0,
@@ -437,24 +444,30 @@ export class ChatHistoryManager {
   }
 
   /**
-   * End current session and save to disk
+   * Save current session to disk without ending it
+   * Used when exporting or renaming an active session
    */
-  endSession(summary?: string): ChatMetadata | null {
+  private saveCurrentSession(summary?: string): ChatMetadata | null {
     if (!this.currentSession || !this.sessionStartTime) {
       return null;
     }
 
     // Don't save if no messages were sent (empty session)
     if (this.currentSession.messages.length === 0) {
-      this.currentSession = null;
-      this.sessionStartTime = null;
       return null;
+    }
+
+    // Check if already saved (exists in index)
+    if (this.index.has(this.currentSession.sessionId)) {
+      return this.index.get(this.currentSession.sessionId)!;
     }
 
     const endTime = new Date();
     const duration = endTime.getTime() - this.sessionStartTime.getTime();
 
-    this.currentSession.endTime = endTime.toISOString();
+    // Create a copy of the session for saving (don't modify the current one)
+    const sessionToSave = { ...this.currentSession };
+    sessionToSave.endTime = endTime.toISOString();
 
     // Create directory for today's date
     const today = endTime.toISOString().split('T')[0]; // YYYY-MM-DD
@@ -467,43 +480,35 @@ export class ChatHistoryManager {
 
       // Generate file paths
       const timestamp = endTime.toISOString().split('T')[1].split('.')[0].replace(/:/g, '');
-      const baseName = `chat-${timestamp}-${this.currentSession.sessionId}`;
+      const baseName = `chat-${timestamp}-${sessionToSave.sessionId}`;
       const jsonPath = join(dateDir, `${baseName}.json`);
       const mdPath = join(dateDir, `${baseName}.md`);
 
       // Save JSON format (machine-readable, for analysis/replay)
-      writeFileSync(jsonPath, JSON.stringify(this.currentSession, null, 2));
+      writeFileSync(jsonPath, JSON.stringify(sessionToSave, null, 2));
 
       // Save Markdown format (human-readable)
-      const mdContent = this.generateMarkdownChat(this.currentSession, summary);
+      const mdContent = this.generateMarkdownChat(sessionToSave, summary);
       writeFileSync(mdPath, mdContent);
 
       // Create metadata
       const metadata: ChatMetadata = {
-        sessionId: this.currentSession.sessionId,
-        startTime: this.currentSession.startTime,
-        endTime: this.currentSession.endTime,
+        sessionId: sessionToSave.sessionId,
+        startTime: sessionToSave.startTime,
+        endTime: sessionToSave.endTime,
         duration,
-        messageCount: this.currentSession.metadata.messageCount,
-        toolUseCount: this.currentSession.metadata.toolUseCount,
-        model: this.currentSession.model,
-        servers: this.currentSession.servers,
+        messageCount: sessionToSave.metadata.messageCount,
+        toolUseCount: sessionToSave.metadata.toolUseCount,
+        model: sessionToSave.model,
+        servers: sessionToSave.servers,
         summary,
         filePath: jsonPath,
         mdFilePath: mdPath,
       };
 
       // Update index
-      this.index.set(this.currentSession.sessionId, metadata);
+      this.index.set(sessionToSave.sessionId, metadata);
       this.saveIndex();
-
-      this.logger.log(
-        `Chat saved\n`,
-        { type: 'success' },
-      );
-
-      this.currentSession = null;
-      this.sessionStartTime = null;
 
       return metadata;
     } catch (error) {
@@ -513,6 +518,26 @@ export class ChatHistoryManager {
       );
       return null;
     }
+  }
+
+  /**
+   * End current session and save to disk
+   */
+  endSession(summary?: string): ChatMetadata | null {
+    const metadata = this.saveCurrentSession(summary);
+    
+    if (metadata) {
+      this.logger.log(
+        `Chat saved\n`,
+        { type: 'success' },
+      );
+    }
+
+    // Clear session after saving
+    this.currentSession = null;
+    this.sessionStartTime = null;
+
+    return metadata;
   }
 
   /**
@@ -535,11 +560,39 @@ export class ChatHistoryManager {
       md += `**Estimated Cost:** $${session.metadata.totalCost.toFixed(6)}\n`;
     }
 
-    if (summary) {
-      md += `\n**Summary:** ${summary}\n`;
-    }
-
     md += '\n---\n\n';
+    
+    // Display available tools list
+    if (session.tools && session.tools.length > 0) {
+      md += '## Available Tools\n\n';
+      // Group tools by server (tools have format: server__toolname)
+      const toolsByServer = new Map<string, string[]>();
+      for (const tool of session.tools) {
+        const parts = tool.name.split('__');
+        if (parts.length === 2) {
+          const [server, toolName] = parts;
+          if (!toolsByServer.has(server)) {
+            toolsByServer.set(server, []);
+          }
+          toolsByServer.get(server)!.push(toolName);
+        } else {
+          // Tool without server prefix
+          if (!toolsByServer.has('default')) {
+            toolsByServer.set('default', []);
+          }
+          toolsByServer.get('default')!.push(tool.name);
+        }
+      }
+      
+      for (const [server, toolNames] of Array.from(toolsByServer.entries()).sort()) {
+        md += `### ${server}\n\n`;
+        for (const toolName of toolNames.sort()) {
+          md += `- \`${toolName}\`\n`;
+        }
+        md += '\n';
+      }
+      md += '---\n\n';
+    }
 
     // Messages
     md += '## Conversation\n\n';
@@ -593,7 +646,24 @@ export class ChatHistoryManager {
       } else if (msg.role === 'tool') {
         md += `### Tool: ${msg.toolName} (${time})\n\n`;
         md += `**Input:**\n\`\`\`json\n${JSON.stringify(msg.toolInput, null, 2)}\n\`\`\`\n\n`;
-        md += `**Output:**\n\`\`\`\n${msg.toolOutput}\n\`\`\`\n\n`;
+        
+        // Try to parse output as JSON for consistent formatting
+        const toolOutput = msg.toolOutput || '';
+        let outputFormatted = toolOutput;
+        let outputLang = '';
+        try {
+          // Strip ANSI color codes before parsing
+          const cleanOutput = toolOutput.replace(/\u001b\[[0-9;]*m/g, '');
+          const parsed = JSON.parse(cleanOutput);
+          outputFormatted = JSON.stringify(parsed, null, 2);
+          outputLang = 'json';
+        } catch {
+          // Not JSON, use as-is
+          outputFormatted = toolOutput;
+          outputLang = '';
+        }
+        
+        md += `**Output:**\n\`\`\`${outputLang ? ' ' + outputLang : ''}\n${outputFormatted}\n\`\`\`\n\n`;
       }
     }
 
@@ -735,6 +805,51 @@ export class ChatHistoryManager {
   }
 
   /**
+   * Export chat to a folder with attachments and outputs
+   * Works exactly like renameChat - moves the existing JSON and MD files to the folder
+   * If the session is the current active session and hasn't been saved yet, saves it first
+   * @param sessionId - The session ID to export
+   * @param folderName - The name for the export folder
+   * @param parentFolderName - Optional parent folder name
+   * @param copyAttachments - If true, copy attachments; if false, move them (default: true)
+   * @param copyOutputs - If true, copy outputs; if false, move them (default: false)
+   * @returns true if successful, false otherwise
+   */
+  exportChat(
+    sessionId: string,
+    folderName: string,
+    parentFolderName?: string,
+    copyAttachments: boolean = true,
+    copyOutputs: boolean = false
+  ): boolean {
+    // Check if session exists in index
+    let metadata = this.index.get(sessionId);
+    
+    // If session not found, check if it's the current active session
+    if (!metadata) {
+      if (this.currentSession && this.currentSession.sessionId === sessionId) {
+        // Save the current session first before exporting (without ending it)
+        const savedMetadata = this.saveCurrentSession('Chat exported');
+        if (!savedMetadata) {
+          this.logger.log('Failed to save current session before export\n', { type: 'error' });
+          return false;
+        }
+        metadata = savedMetadata;
+        // Now the session is in the index, proceed with rename
+      } else {
+        // Session not found and not the current session
+        this.logger.log(`Chat session not found: ${sessionId}\n`, {
+          type: 'warning',
+        });
+        return false;
+      }
+    }
+    
+    // Export works exactly like rename - just move the files to a folder
+    return this.renameChat(sessionId, folderName, parentFolderName, copyAttachments, copyOutputs);
+  }
+
+  /**
    * Delete a chat session
    */
   deleteChat(sessionId: string): boolean {
@@ -846,12 +961,380 @@ export class ChatHistoryManager {
   }
 
   /**
+   * Extract attachment file names from a chat session
+   * @param chatFilePath - Path to the chat JSON file
+   * @returns Array of unique attachment file names
+   */
+  private getAttachmentsFromChat(chatFilePath: string): string[] {
+    if (!existsSync(chatFilePath)) {
+      return [];
+    }
+
+    try {
+      const chatContent = readFileSync(chatFilePath, 'utf-8');
+      const chatSession: ChatSession = JSON.parse(chatContent);
+      
+      const attachmentFileNames = new Set<string>();
+      
+      // Extract attachment fileNames from all messages
+      for (const message of chatSession.messages) {
+        if (message.attachments && message.attachments.length > 0) {
+          for (const attachment of message.attachments) {
+            if (attachment.fileName) {
+              attachmentFileNames.add(attachment.fileName);
+            }
+          }
+        }
+      }
+      
+      return Array.from(attachmentFileNames);
+    } catch (error) {
+      this.logger.log(`Failed to extract attachments from chat: ${error}\n`, {
+        type: 'warning',
+      });
+      return [];
+    }
+  }
+
+  /**
+   * Move or copy attachments referenced in a chat to the chat's folder
+   * @param chatFilePath - Path to the chat JSON file
+   * @param targetDir - The target directory for the chat
+   * @param copy - If true, copy attachments; if false, move them
+   */
+  private moveAttachmentsToChatFolder(chatFilePath: string, targetDir: string, copy: boolean = true): void {
+    const attachmentFileNames = this.getAttachmentsFromChat(chatFilePath);
+    
+    if (attachmentFileNames.length === 0) {
+      return; // No attachments to move
+    }
+
+    // Create attachments subdirectory in the target folder
+    const attachmentsSubdir = join(targetDir, 'attachments');
+    if (!existsSync(attachmentsSubdir)) {
+      mkdirSync(attachmentsSubdir, { recursive: true });
+    }
+
+    let movedCount = 0;
+    for (const fileName of attachmentFileNames) {
+      const sourcePath = join(ATTACHMENTS_DIR, fileName);
+      const destPath = join(attachmentsSubdir, fileName);
+      
+      if (existsSync(sourcePath)) {
+        try {
+          // Check if destination already exists (might have been moved already)
+          if (!existsSync(destPath)) {
+            if (copy) {
+              copyFileSync(sourcePath, destPath);
+            } else {
+              renameSync(sourcePath, destPath);
+            }
+            movedCount++;
+          }
+        } catch (error) {
+          const action = copy ? 'copy' : 'move';
+          this.logger.log(`Failed to ${action} attachment ${fileName}: ${error}\n`, {
+            type: 'warning',
+          });
+        }
+      }
+    }
+
+    if (movedCount > 0) {
+      const action = copy ? 'Copied' : 'Moved';
+      this.logger.log(`${action} ${movedCount} attachment(s) to chat folder\n`, {
+        type: 'info',
+      });
+    }
+  }
+
+  /**
+   * Check if a directory contains any files (recursively)
+   * @param dirPath - Directory path to check
+   * @returns true if directory contains at least one file, false otherwise
+   */
+  private directoryHasFiles(dirPath: string): boolean {
+    try {
+      const items = readdirSync(dirPath);
+      
+      for (const item of items) {
+        const itemPath = join(dirPath, item);
+        try {
+          const stats = statSync(itemPath);
+          
+          if (stats.isFile()) {
+            return true; // Found at least one file
+          } else if (stats.isDirectory()) {
+            // Recursively check subdirectory
+            if (this.directoryHasFiles(itemPath)) {
+              return true;
+            }
+          }
+        } catch (error) {
+          // Skip items that can't be accessed
+          continue;
+        }
+      }
+      
+      return false; // No files found
+    } catch (error) {
+      return false;
+    }
+  }
+
+  /**
+   * Move or copy outputs to the chat's folder
+   * @param targetDir - The target directory for the chat
+   * @param copy - If true, copy outputs; if false, move them
+   */
+  private moveOutputsToChatFolder(targetDir: string, copy: boolean = false): void {
+    if (!existsSync(OUTPUTS_DIR)) {
+      return; // No outputs directory
+    }
+
+    try {
+      const outputItems = readdirSync(OUTPUTS_DIR);
+      
+      if (outputItems.length === 0) {
+        return; // No outputs to move
+      }
+
+      // First, collect items that need to be moved (files or directories with files)
+      const itemsToMove: Array<{ sourcePath: string; destPath: string; isFile: boolean }> = [];
+      
+      for (const item of outputItems) {
+        const sourcePath = join(OUTPUTS_DIR, item);
+        
+        try {
+          const stats = statSync(sourcePath);
+          
+          if (stats.isFile()) {
+            // File - always move
+            itemsToMove.push({
+              sourcePath,
+              destPath: join(targetDir, 'outputs', item),
+              isFile: true
+            });
+          } else if (stats.isDirectory()) {
+            // Only include directory if it contains files
+            if (this.directoryHasFiles(sourcePath)) {
+              itemsToMove.push({
+                sourcePath,
+                destPath: join(targetDir, 'outputs', item),
+                isFile: false
+              });
+            }
+            // Skip empty directories
+          }
+        } catch (error) {
+          // Skip items that can't be accessed
+          continue;
+        }
+      }
+
+      // Only create outputs subdirectory if there are items to move
+      if (itemsToMove.length === 0) {
+        return; // Nothing to move, don't create empty directory
+      }
+
+      // Create outputs subdirectory in the target folder
+      const outputsSubdir = join(targetDir, 'outputs');
+      if (!existsSync(outputsSubdir)) {
+        mkdirSync(outputsSubdir, { recursive: true });
+      }
+
+      let movedCount = 0;
+      for (const item of itemsToMove) {
+        try {
+          if (item.isFile) {
+            // Move or copy file
+            if (!existsSync(item.destPath)) {
+              if (copy) {
+                copyFileSync(item.sourcePath, item.destPath);
+              } else {
+                renameSync(item.sourcePath, item.destPath);
+              }
+              movedCount++;
+            }
+          } else {
+            // Move or copy directory recursively
+            if (!existsSync(item.destPath)) {
+              if (copy) {
+                this.copyDirectoryRecursive(item.sourcePath, item.destPath);
+              } else {
+                this.moveDirectoryRecursive(item.sourcePath, item.destPath);
+              }
+              movedCount++;
+            }
+          }
+        } catch (error) {
+          const action = copy ? 'copy' : 'move';
+          this.logger.log(`Failed to ${action} output ${basename(item.sourcePath)}: ${error}\n`, {
+            type: 'warning',
+          });
+        }
+      }
+
+      if (movedCount > 0) {
+        const action = copy ? 'Copied' : 'Moved';
+        this.logger.log(`${action} ${movedCount} output item(s) to chat folder\n`, {
+          type: 'info',
+        });
+      }
+    } catch (error) {
+      this.logger.log(`Failed to move outputs: ${error}\n`, {
+        type: 'warning',
+      });
+    }
+  }
+
+  /**
+   * Recursively copy a directory
+   * @param sourceDir - Source directory path
+   * @param destDir - Destination directory path
+   */
+  private copyDirectoryRecursive(sourceDir: string, destDir: string): void {
+    if (!existsSync(destDir)) {
+      mkdirSync(destDir, { recursive: true });
+    }
+
+    const items = readdirSync(sourceDir);
+    
+    for (const item of items) {
+      const sourcePath = join(sourceDir, item);
+      const destPath = join(destDir, item);
+      
+      try {
+        const stats = statSync(sourcePath);
+        
+        if (stats.isFile()) {
+          copyFileSync(sourcePath, destPath);
+        } else if (stats.isDirectory()) {
+          // Only copy directory if it contains files
+          if (this.directoryHasFiles(sourcePath)) {
+            this.copyDirectoryRecursive(sourcePath, destPath);
+          }
+        }
+      } catch (error) {
+        // Skip items that can't be copied
+        continue;
+      }
+    }
+  }
+
+  /**
+   * Recursively move a directory (files are moved, not copied)
+   * @param sourceDir - Source directory path
+   * @param destDir - Destination directory path
+   */
+  private moveDirectoryRecursive(sourceDir: string, destDir: string): void {
+    if (!existsSync(destDir)) {
+      mkdirSync(destDir, { recursive: true });
+    }
+
+    const items = readdirSync(sourceDir);
+    
+    for (const item of items) {
+      const sourcePath = join(sourceDir, item);
+      const destPath = join(destDir, item);
+      
+      try {
+        const stats = statSync(sourcePath);
+        
+        if (stats.isFile()) {
+          // Move file (remove from source)
+          renameSync(sourcePath, destPath);
+        } else if (stats.isDirectory()) {
+          // Only move directory if it contains files
+          if (this.directoryHasFiles(sourcePath)) {
+            this.moveDirectoryRecursive(sourcePath, destPath);
+            // Remove empty source directory after moving contents
+            try {
+              const remainingItems = readdirSync(sourcePath);
+              if (remainingItems.length === 0) {
+                rmdirSync(sourcePath);
+              }
+            } catch (error) {
+              // Ignore errors when removing directory
+            }
+          }
+        }
+      } catch (error) {
+        // Skip items that can't be moved
+        continue;
+      }
+    }
+    
+    // Try to remove source directory if it's now empty
+    try {
+      const remainingItems = readdirSync(sourceDir);
+      if (remainingItems.length === 0) {
+        rmdirSync(sourceDir);
+      }
+    } catch (error) {
+      // Ignore errors when removing directory
+    }
+  }
+
+  /**
+   * Sanitize a folder name (remove special chars, replace spaces with hyphens)
+   */
+  private sanitizeFolderName(name: string): string {
+    return name
+      .toLowerCase()
+      .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
+      .replace(/\s+/g, '-') // Replace spaces with hyphens
+      .replace(/-+/g, '-') // Replace multiple hyphens with single
+      .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
+  }
+
+  /**
+   * Calculate and create target directory for chat operations
+   * @param folderName - The folder name
+   * @param parentFolderName - Optional parent folder name
+   * @returns The target directory path, or null if invalid
+   */
+  private getTargetDirectory(folderName: string, parentFolderName?: string): string | null {
+    const sanitizedName = this.sanitizeFolderName(folderName);
+    
+    if (!sanitizedName) {
+      this.logger.log('Invalid folder name provided\n', { type: 'error' });
+      return null;
+    }
+
+    let targetDir: string;
+    if (parentFolderName) {
+      const sanitizedParentName = this.sanitizeFolderName(parentFolderName);
+      
+      if (!sanitizedParentName) {
+        this.logger.log('Invalid parent folder name provided\n', { type: 'error' });
+        return null;
+      }
+      
+      // Create folder path: chats/{parentFolder}/{sanitizedName}/
+      targetDir = join(CHATS_DIR, sanitizedParentName, sanitizedName);
+    } else {
+      // Create folder path: chats/{sanitizedName}/
+      targetDir = join(CHATS_DIR, sanitizedName);
+    }
+    
+    // Create folder if it doesn't exist
+    if (!existsSync(targetDir)) {
+      mkdirSync(targetDir, { recursive: true });
+    }
+
+    return targetDir;
+  }
+
+  /**
    * Rename chat session files
    * @param sessionId - The session ID to rename
-   * @param newName - The new name for the chat
-   * @param folderName - Optional folder name to move the chat to (within chats directory)
+   * @param newName - The new name for the chat (will be used as folder name)
+   * @param folderName - Optional parent folder name to move the chat to (within chats directory)
+   * @param copyAttachments - If true, copy attachments; if false, move them (default: true)
+   * @param copyOutputs - If true, copy outputs; if false, move them (default: false)
    */
-  renameChat(sessionId: string, newName: string, folderName?: string): boolean {
+  renameChat(sessionId: string, newName: string, folderName?: string, copyAttachments: boolean = true, copyOutputs: boolean = false): boolean {
     const metadata = this.index.get(sessionId);
     if (!metadata) {
       this.logger.log(`Chat session not found: ${sessionId}\n`, {
@@ -861,60 +1344,30 @@ export class ChatHistoryManager {
     }
 
     try {
-      // Sanitize name for filename (remove special chars, replace spaces with hyphens)
-      const sanitizedName = newName
-        .toLowerCase()
-        .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
-        .replace(/\s+/g, '-') // Replace spaces with hyphens
-        .replace(/-+/g, '-') // Replace multiple hyphens with single
-        .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
-
-      if (!sanitizedName) {
-        this.logger.log('Invalid name provided\n', { type: 'error' });
+      // Get target directory using shared helper
+      const targetDir = this.getTargetDirectory(newName, folderName);
+      if (!targetDir) {
         return false;
       }
 
-      // Determine target directory
-      let targetDir: string;
-      if (folderName) {
-        // Sanitize folder name
-        const sanitizedFolderName = folderName
-          .toLowerCase()
-          .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
-          .replace(/\s+/g, '-') // Replace spaces with hyphens
-          .replace(/-+/g, '-') // Replace multiple hyphens with single
-          .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
-        
-        if (!sanitizedFolderName) {
-          this.logger.log('Invalid folder name provided\n', { type: 'error' });
-          return false;
-        }
-        
-        // Create folder path within chats directory
-        targetDir = join(CHATS_DIR, sanitizedFolderName);
-        
-        // Create folder if it doesn't exist
-        if (!existsSync(targetDir)) {
-          mkdirSync(targetDir, { recursive: true });
-        }
-      } else {
-        // Use existing directory
-        targetDir = dirname(metadata.filePath);
-      }
-
-      // Generate new filenames using last part of sessionId and name
+      // Get original filenames (keep them as-is, just move to new folder)
       const oldJsonPath = metadata.filePath;
       const oldMdPath = metadata.mdFilePath;
       
-      // Extract last part of sessionId (e.g., "s46w4z" from "20251212-214813-s46w4z")
-      const sessionIdParts = sessionId.split('-');
-      const sessionIdShort = sessionIdParts[sessionIdParts.length - 1];
+      // Extract just the filename from the original path
+      const jsonFileName = basename(oldJsonPath);
+      const mdFileName = basename(oldMdPath);
       
-      // Use short sessionId and name as filename: chat-{shortSessionId}-{name}.json
-      const newJsonPath = join(targetDir, `chat-${sessionIdShort}-${sanitizedName}.json`);
-      const newMdPath = join(targetDir, `chat-${sessionIdShort}-${sanitizedName}.md`);
+      // New paths: move files to the new folder, keeping original filenames
+      const newJsonPath = join(targetDir, jsonFileName);
+      const newMdPath = join(targetDir, mdFileName);
 
-      // Move/rename files if they exist and paths are different
+      // Move attachments and outputs to the new folder (before moving chat files)
+      // Use oldJsonPath since we haven't moved the file yet
+      this.moveAttachmentsToChatFolder(oldJsonPath, targetDir, copyAttachments);
+      this.moveOutputsToChatFolder(targetDir, copyOutputs);
+
+      // Move files if they exist and paths are different
       if (existsSync(oldJsonPath) && oldJsonPath !== newJsonPath) {
         renameSync(oldJsonPath, newJsonPath);
       }

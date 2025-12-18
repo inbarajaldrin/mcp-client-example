@@ -433,7 +433,7 @@ export class AnthropicProvider implements ModelProvider {
     toolExecutor: ToolExecutor,
     maxIterations: number = 10,
     cancellationCheck?: () => boolean,
-  ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; result: string }> {
+  ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
     const anthropicTools: AnthropicTool[] = tools.map((tool) => ({
       name: tool.name,
       description: tool.description,
@@ -562,6 +562,7 @@ export class AnthropicProvider implements ModelProvider {
               type: 'tool_use_complete',
               toolName: toolUseBlock.name,
               toolUseId: toolUseBlock.id,
+              toolInput: toolInput,
               result: result,
             };
 

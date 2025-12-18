@@ -410,7 +410,7 @@ export class OpenAIProvider implements ModelProvider {
     toolExecutor: ToolExecutor,
     maxIterations: number = 10,
     cancellationCheck?: () => boolean,
-  ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; result: string }> {
+  ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
     // Convert generic Tool[] to OpenAI function format
     const openaiTools = tools.map((tool) => ({
       type: 'function' as const,
@@ -665,6 +665,7 @@ export class OpenAIProvider implements ModelProvider {
             type: 'tool_use_complete',
             toolName: functionCall.name,
             toolCallId: toolCall.id,
+            toolInput: toolInput,
             result: result,
           };
 
