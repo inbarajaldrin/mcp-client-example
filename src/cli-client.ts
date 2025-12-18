@@ -801,16 +801,26 @@ export class MCPClientCLI {
         // Reset abort flag and start keyboard monitoring
         this.abortCurrentQuery = false;
         await this.startKeyboardMonitoring();
-        
+
         // Save pending attachments before processing (they may be cleared on abort)
         const attachmentsForHistory = [...this.pendingAttachments];
-        
+
+        // Log user message to history BEFORE processing (to maintain correct chronological order)
+        const attachmentMetadata = attachmentsForHistory.length > 0
+          ? attachmentsForHistory.map(att => ({
+              fileName: att.fileName,
+              ext: att.ext,
+              mediaType: att.mediaType,
+            }))
+          : undefined;
+        this.client.getChatHistoryManager().addUserMessage(query, attachmentMetadata);
+
         try {
           // Process query with attachments if any are pending (use finalQuery which includes system prompt if needed)
           // Pass cancellation check function
           await this.client.processQuery(
-            finalQuery, 
-            false, 
+            finalQuery,
+            false,
             this.pendingAttachments.length > 0 ? this.pendingAttachments : undefined,
             () => this.abortCurrentQuery
           );
@@ -840,18 +850,8 @@ export class MCPClientCLI {
           await new Promise(resolve => setTimeout(resolve, 100));
         }
         
-        // Always save to history (even if aborted)
+        // Log assistant response to history (even if aborted)
         {
-          // Log user message to history (including attachment metadata)
-          const attachmentMetadata = attachmentsForHistory.length > 0
-            ? attachmentsForHistory.map(att => ({
-                fileName: att.fileName,
-                ext: att.ext,
-                mediaType: att.mediaType,
-              }))
-            : undefined;
-          this.client.getChatHistoryManager().addUserMessage(query, attachmentMetadata);
-          
           // Extract assistant response from messages array
           const messages = (this.client as any).messages;
           const assistantMessages = messages.filter((msg: any) => msg.role === 'assistant');

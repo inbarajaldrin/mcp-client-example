@@ -51,12 +51,104 @@ export interface ChatSession {
     toolInput?: Record<string, any>;
     toolOutput?: string;
   }>;
+  tokenUsagePerCallback?: Array<{
+    timestamp: string;
+    inputTokens: number; // Total input tokens (regular + cache creation + cache read)
+    outputTokens: number;
+    totalTokens: number;
+    regularInputTokens?: number; // Regular input tokens only (full price)
+    cacheCreationTokens?: number; // Cache creation input tokens (full price)
+    cacheReadTokens?: number; // Cache read tokens (90% discount)
+    estimatedCost?: number; // Estimated cost in USD for this callback
+  }>;
   metadata: {
     totalTokens?: number;
     messageCount: number;
     toolUseCount: number;
+    totalCost?: number; // Total estimated cost in USD for the session
   };
 }
+
+// Model pricing (per million tokens in USD)
+// Model pricing per million tokens (USD)
+// Sources: 
+// - Anthropic: https://www.anthropic.com/pricing (updated December 2025)
+// - OpenAI: https://platform.openai.com/docs/models (updated December 2025)
+// Note: Pricing may vary by context window size (e.g., >200K tokens for Sonnet 4.5)
+// Cache pricing: Anthropic uses 10% of input price (90% discount), OpenAI varies by model
+const MODEL_PRICING: Record<string, { input: number; output: number; inputLongContext?: number; outputLongContext?: number; cachedInput?: number }> = {
+  // ========== Anthropic Claude Models ==========
+  // Claude 4.5 Opus
+  'claude-opus-4-5-20251101': { input: 5.00, output: 25.00, cachedInput: 0.50 }, // 10% discount
+  'claude-4-5-opus': { input: 5.00, output: 25.00, cachedInput: 0.50 },
+  
+  // Claude Sonnet 4.5 (standard: 0-200K tokens, long context: >200K tokens)
+  'claude-sonnet-4-5-20251101': { input: 3.00, output: 15.00, inputLongContext: 6.00, outputLongContext: 22.50, cachedInput: 0.30 },
+  'claude-3-7-sonnet-latest': { input: 3.00, output: 15.00, inputLongContext: 6.00, outputLongContext: 22.50, cachedInput: 0.30 },
+  'claude-3-7-sonnet-20250219': { input: 3.00, output: 15.00, inputLongContext: 6.00, outputLongContext: 22.50, cachedInput: 0.30 },
+  
+  // Claude 3.5 Sonnet
+  'claude-3-5-sonnet-20241022': { input: 3.00, output: 15.00, cachedInput: 0.30 },
+  'claude-3-5-sonnet-20240620': { input: 3.00, output: 15.00, cachedInput: 0.30 },
+  'claude-3-5-sonnet-latest': { input: 3.00, output: 15.00, cachedInput: 0.30 },
+  
+  // Claude 3.5 Haiku
+  'claude-haiku-4-5-20251001': { input: 0.80, output: 4.00, cachedInput: 0.08 },
+  'claude-3-5-haiku-20241022': { input: 0.80, output: 4.00, cachedInput: 0.08 },
+  'claude-3-5-haiku-latest': { input: 0.80, output: 4.00, cachedInput: 0.08 },
+  
+  // Claude 3 Opus (legacy)
+  'claude-3-opus-20240229': { input: 15.00, output: 75.00, cachedInput: 1.50 },
+  
+  // Claude 3 Sonnet (legacy)
+  'claude-3-sonnet-20240229': { input: 3.00, output: 15.00, cachedInput: 0.30 },
+  
+  // Claude 3 Haiku (legacy)
+  'claude-3-haiku-20240307': { input: 0.25, output: 1.25, cachedInput: 0.025 },
+  
+  // ========== OpenAI Models ==========
+  // GPT-5 and GPT-5-Codex
+  'gpt-5': { input: 1.25, output: 10.00, cachedInput: 0.125 }, // 10% discount
+  'gpt-5-chat-latest': { input: 1.25, output: 10.00, cachedInput: 0.125 },
+  'gpt-5-codex': { input: 1.25, output: 10.00, cachedInput: 0.125 },
+  
+  // GPT-5 Mini
+  'gpt-5-mini': { input: 0.25, output: 2.00, cachedInput: 0.025 }, // 10% discount
+  'gpt-5-mini-latest': { input: 0.25, output: 2.00, cachedInput: 0.025 },
+  
+  // ChatGPT-4o
+  'chatgpt-4o-latest': { input: 5.00, output: 15.00 },
+  
+  // GPT-4o
+  'gpt-4o': { input: 2.50, output: 10.00 },
+  'gpt-4o-2024-08-06': { input: 2.50, output: 10.00 },
+  'gpt-4o-2024-05-13': { input: 2.50, output: 10.00 },
+  
+  // GPT-4o mini
+  'gpt-4o-mini': { input: 0.15, output: 0.60 },
+  'gpt-4o-mini-2024-07-18': { input: 0.15, output: 0.60 },
+  
+  // GPT-4o mini Realtime
+  'gpt-4o-mini-realtime-preview': { input: 0.60, output: 2.40, cachedInput: 0.30 }, // 50% discount
+  
+  // GPT-4 Turbo
+  'gpt-4-turbo': { input: 10.00, output: 30.00 },
+  'gpt-4-turbo-2024-04-09': { input: 10.00, output: 30.00 },
+  
+  // GPT-4 (legacy)
+  'gpt-4': { input: 30.00, output: 60.00 },
+  'gpt-4-32k': { input: 60.00, output: 120.00 },
+  
+  // o1 series (reasoning models)
+  'o1-preview': { input: 15.00, output: 60.00, cachedInput: 7.50 }, // 50% discount
+  'o1-mini': { input: 3.00, output: 12.00, cachedInput: 1.50 }, // 50% discount
+  'o1-pro': { input: 15.00, output: 60.00, cachedInput: 7.50 },
+  'o3': { input: 15.00, output: 60.00, cachedInput: 7.50 },
+  
+  // GPT-3.5 Turbo
+  'gpt-3.5-turbo': { input: 0.50, output: 1.50 },
+  'gpt-3.5-turbo-16k': { input: 0.50, output: 1.50 },
+};
 
 export class ChatHistoryManager {
   private currentSession: ChatSession | null = null;
@@ -252,6 +344,99 @@ export class ChatHistoryManager {
   }
 
   /**
+   * Calculate estimated cost for a callback
+   * Uses Context7-sourced pricing data (updated December 2025)
+   * Supports long context pricing for models like Sonnet 4.5 (>200K tokens)
+   */
+  private calculateCost(
+    model: string,
+    regularInputTokens: number,
+    cacheCreationTokens: number,
+    cacheReadTokens: number,
+    outputTokens: number,
+    totalInputTokens?: number // Total input tokens to determine if long context pricing applies
+  ): number {
+    const pricing = MODEL_PRICING[model];
+    if (!pricing) {
+      // Unknown model, return 0
+      return 0;
+    }
+
+    // Determine if long context pricing applies (>200K tokens for Sonnet 4.5)
+    const useLongContextPricing = totalInputTokens && totalInputTokens > 200_000 && 
+                                   pricing.inputLongContext && pricing.outputLongContext;
+    
+    const inputPrice = useLongContextPricing ? pricing.inputLongContext! : pricing.input;
+    const outputPrice = useLongContextPricing ? pricing.outputLongContext! : pricing.output;
+
+    // Cost calculation:
+    // - Regular input: full price (or long context price if applicable)
+    // - Cache creation: full price (same as regular input)
+    // - Cache read: uses cachedInput price if available, otherwise falls back to 10% of input price
+    //   - Anthropic: 10% of input price (90% discount)
+    //   - OpenAI: varies by model (o1 series: 50%, GPT-5: 10%, GPT-4o mini Realtime: 50%)
+    // - Output: full output price (or long context price if applicable)
+    const inputCost = (regularInputTokens / 1_000_000) * inputPrice;
+    const cacheCreationCost = (cacheCreationTokens / 1_000_000) * inputPrice;
+    const cachedInputPrice = pricing.cachedInput || pricing.input * 0.1; // Default to 10% if not specified
+    const cacheReadCost = (cacheReadTokens / 1_000_000) * cachedInputPrice;
+    const outputCost = (outputTokens / 1_000_000) * outputPrice;
+
+    return inputCost + cacheCreationCost + cacheReadCost + outputCost;
+  }
+
+  /**
+   * Log token usage per callback from agent
+   */
+  addTokenUsagePerCallback(
+    inputTokens: number,
+    outputTokens: number,
+    totalTokens: number,
+    regularInputTokens?: number,
+    cacheCreationTokens?: number,
+    cacheReadTokens?: number
+  ): void {
+    if (!this.currentSession) return;
+
+    if (!this.currentSession.tokenUsagePerCallback) {
+      this.currentSession.tokenUsagePerCallback = [];
+    }
+
+    // Calculate estimated cost for this callback
+    let estimatedCost: number | undefined;
+    if (regularInputTokens !== undefined || cacheCreationTokens !== undefined || cacheReadTokens !== undefined) {
+      // Calculate total input tokens for long context pricing detection
+      const totalInputTokens = (regularInputTokens || 0) + (cacheCreationTokens || 0) + (cacheReadTokens || 0);
+      
+      estimatedCost = this.calculateCost(
+        this.currentSession.model,
+        regularInputTokens || 0,
+        cacheCreationTokens || 0,
+        cacheReadTokens || 0,
+        outputTokens,
+        totalInputTokens > 0 ? totalInputTokens : inputTokens // Use totalInputTokens if available, otherwise fall back to inputTokens
+      );
+
+      // Update total cost
+      if (!this.currentSession.metadata.totalCost) {
+        this.currentSession.metadata.totalCost = 0;
+      }
+      this.currentSession.metadata.totalCost += estimatedCost;
+    }
+
+    this.currentSession.tokenUsagePerCallback.push({
+      timestamp: new Date().toISOString(),
+      inputTokens,
+      outputTokens,
+      totalTokens,
+      regularInputTokens,
+      cacheCreationTokens,
+      cacheReadTokens,
+      estimatedCost,
+    });
+  }
+
+  /**
    * End current session and save to disk
    */
   endSession(summary?: string): ChatMetadata | null {
@@ -345,8 +530,9 @@ export class ChatHistoryManager {
     md += `**Messages:** ${session.metadata.messageCount}\n`;
     md += `**Tool Calls:** ${session.metadata.toolUseCount}\n`;
 
-    if (session.metadata.totalTokens) {
-      md += `**Tokens Used:** ${session.metadata.totalTokens}\n`;
+    // Display total estimated cost
+    if (session.metadata.totalCost !== undefined && session.metadata.totalCost > 0) {
+      md += `**Estimated Cost:** $${session.metadata.totalCost.toFixed(6)}\n`;
     }
 
     if (summary) {
@@ -357,6 +543,9 @@ export class ChatHistoryManager {
 
     // Messages
     md += '## Conversation\n\n';
+
+    // Track token usage index to display after each assistant message
+    let tokenUsageIndex = 0;
 
     for (const msg of session.messages) {
       const time = new Date(msg.timestamp).toLocaleTimeString();
@@ -375,10 +564,65 @@ export class ChatHistoryManager {
         md += `### Client (${time})\n\n${msg.content}\n\n`;
       } else if (msg.role === 'assistant') {
         md += `### Assistant (${time})\n\n${msg.content}\n\n`;
+
+        // Display token usage for this callback if available
+        if (session.tokenUsagePerCallback && tokenUsageIndex < session.tokenUsagePerCallback.length) {
+          const tokenUsage = session.tokenUsagePerCallback[tokenUsageIndex];
+          const tokenTime = new Date(tokenUsage.timestamp).toLocaleTimeString();
+          md += `**Token Usage (Callback ${tokenUsageIndex + 1}, ${tokenTime}):** `;
+          md += `Input: ${tokenUsage.inputTokens.toLocaleString()}, Output: ${tokenUsage.outputTokens.toLocaleString()}`;
+
+          // Add cache breakdown if available
+          if (tokenUsage.regularInputTokens !== undefined || tokenUsage.cacheCreationTokens !== undefined || tokenUsage.cacheReadTokens !== undefined) {
+            const regular = tokenUsage.regularInputTokens || 0;
+            const cacheCreation = tokenUsage.cacheCreationTokens || 0;
+            const cacheRead = tokenUsage.cacheReadTokens || 0;
+            if (regular > 0 || cacheCreation > 0 || cacheRead > 0) {
+              md += `, Breakdown: ${regular.toLocaleString()} regular + ${cacheCreation.toLocaleString()} cache-write + ${cacheRead.toLocaleString()} cache-read`;
+            }
+          }
+
+          // Add estimated cost if available
+          if (tokenUsage.estimatedCost !== undefined && tokenUsage.estimatedCost > 0) {
+            md += `, Cost: $${tokenUsage.estimatedCost.toFixed(6)}`;
+          }
+
+          md += `\n\n`;
+          tokenUsageIndex++;
+        }
       } else if (msg.role === 'tool') {
         md += `### Tool: ${msg.toolName} (${time})\n\n`;
         md += `**Input:**\n\`\`\`json\n${JSON.stringify(msg.toolInput, null, 2)}\n\`\`\`\n\n`;
         md += `**Output:**\n\`\`\`\n${msg.toolOutput}\n\`\`\`\n\n`;
+      }
+    }
+
+    // Display any remaining token usage entries that weren't displayed after assistant messages
+    // This happens when the final token usage is logged after all messages are complete
+    if (session.tokenUsagePerCallback && tokenUsageIndex < session.tokenUsagePerCallback.length) {
+      while (tokenUsageIndex < session.tokenUsagePerCallback.length) {
+        const tokenUsage = session.tokenUsagePerCallback[tokenUsageIndex];
+        const tokenTime = new Date(tokenUsage.timestamp).toLocaleTimeString();
+        md += `**Token Usage (Callback ${tokenUsageIndex + 1}, ${tokenTime}):** `;
+        md += `Input: ${tokenUsage.inputTokens.toLocaleString()}, Output: ${tokenUsage.outputTokens.toLocaleString()}`;
+
+        // Add cache breakdown if available
+        if (tokenUsage.regularInputTokens !== undefined || tokenUsage.cacheCreationTokens !== undefined || tokenUsage.cacheReadTokens !== undefined) {
+          const regular = tokenUsage.regularInputTokens || 0;
+          const cacheCreation = tokenUsage.cacheCreationTokens || 0;
+          const cacheRead = tokenUsage.cacheReadTokens || 0;
+          if (regular > 0 || cacheCreation > 0 || cacheRead > 0) {
+            md += `, Breakdown: ${regular.toLocaleString()} regular + ${cacheCreation.toLocaleString()} cache-write + ${cacheRead.toLocaleString()} cache-read`;
+          }
+        }
+
+        // Add estimated cost if available
+        if (tokenUsage.estimatedCost !== undefined && tokenUsage.estimatedCost > 0) {
+          md += `, Cost: $${tokenUsage.estimatedCost.toFixed(6)}`;
+        }
+
+        md += `\n\n`;
+        tokenUsageIndex++;
       }
     }
 

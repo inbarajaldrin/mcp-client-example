@@ -1166,13 +1166,23 @@ export class MCPClient {
   private async processToolUseStream(
     stream: AsyncIterable<any>,
     cancellationCheck?: () => boolean,
-  ): Promise<Array<{ toolUseId?: string; toolCallId?: string; content: string }>> {
+    initialTokenCount?: number,
+  ): Promise<{
+    pendingToolResults: Array<{ toolUseId?: string; toolCallId?: string; content: string }>;
+    lastTokenUsage: {
+      inputTokens: number;
+      outputTokens: number;
+      regularInputTokens?: number;
+      cacheCreationTokens?: number;
+      cacheReadTokens?: number;
+    } | null;
+  }> {
     this.logger.log(consoleStyles.assistant);
-    
+
     let currentMessage = '';
     let messageStarted = false;
     let hasOutputContent = false; // Track if we've output any content after "Assistant:"
-    
+
     // Track tool results to add to messages
     const pendingToolResults: Array<{
       toolUseId?: string;
@@ -1180,6 +1190,16 @@ export class MCPClient {
       content: string;
     }> = [];
     const isAnthropic = this.modelProvider.getProviderName() === 'anthropic';
+
+    // Track token usage per callback
+    let tokenCountBeforeCallback = initialTokenCount !== undefined ? initialTokenCount : this.currentTokenCount;
+    let lastTokenUsage: {
+      inputTokens: number;
+      outputTokens: number;
+      regularInputTokens?: number;
+      cacheCreationTokens?: number;
+      cacheReadTokens?: number;
+    } | null = null;
     
     for await (const chunk of stream) {
       // Don't break immediately - let current chunk finish processing
@@ -1300,8 +1320,25 @@ export class MCPClient {
         continue;
       }
 
-      // Handle token usage from OpenAI (exact counts from API)
+      // Handle token usage from both OpenAI and Anthropic (exact counts from API)
       if (chunk.type === 'token_usage' && chunk.input_tokens !== undefined) {
+        // Store token usage for this callback
+        lastTokenUsage = {
+          inputTokens: chunk.input_tokens,
+          outputTokens: chunk.output_tokens,
+        };
+
+        // Extract cache token breakdown if available (from Anthropic)
+        if ((chunk as any).input_tokens_breakdown) {
+          const breakdown = (chunk as any).input_tokens_breakdown;
+          lastTokenUsage.regularInputTokens = breakdown.input_tokens || 0;
+          lastTokenUsage.cacheCreationTokens = breakdown.cache_creation_input_tokens || 0;
+          lastTokenUsage.cacheReadTokens = breakdown.cache_read_input_tokens || 0;
+        }
+
+        // Update cumulative token count by REPLACING (not adding)
+        // For Anthropic, input_tokens already includes the full conversation history
+        // input_tokens = all messages sent to API, output_tokens = tokens generated in this response
         this.currentTokenCount = chunk.input_tokens + chunk.output_tokens;
         continue;
       }
@@ -1348,6 +1385,35 @@ export class MCPClient {
             this.currentTokenCount = exactCount;
           }
           // OpenAI: token counts come from token_usage events (already handled above)
+          
+          // Log token usage per callback to chat history (not terminal)
+          if (this.modelProvider.getProviderName() === 'openai' && lastTokenUsage) {
+            // OpenAI: use exact counts from API
+            const totalTokens = lastTokenUsage.inputTokens + lastTokenUsage.outputTokens;
+            this.chatHistoryManager.addTokenUsagePerCallback(
+              lastTokenUsage.inputTokens,
+              lastTokenUsage.outputTokens,
+              totalTokens,
+              lastTokenUsage.regularInputTokens,
+              lastTokenUsage.cacheCreationTokens,
+              lastTokenUsage.cacheReadTokens
+            );
+            lastTokenUsage = null; // Reset after logging
+            tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
+          } else if (this.modelProvider.getProviderName() === 'anthropic' && lastTokenUsage) {
+            // Anthropic: use exact counts from API (provided via token_usage events)
+            const totalTokens = lastTokenUsage.inputTokens + lastTokenUsage.outputTokens;
+            this.chatHistoryManager.addTokenUsagePerCallback(
+              lastTokenUsage.inputTokens,
+              lastTokenUsage.outputTokens,
+              totalTokens,
+              lastTokenUsage.regularInputTokens,
+              lastTokenUsage.cacheCreationTokens,
+              lastTokenUsage.cacheReadTokens
+            );
+            lastTokenUsage = null; // Reset after logging
+            tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
+          }
           
           // Add newline after assistant message to ensure tool execution logs appear on new line
           if (currentMessage && !currentMessage.endsWith('\n')) {
@@ -1467,6 +1533,35 @@ export class MCPClient {
         }
         // OpenAI: token counts come from token_usage events (already handled above)
 
+        // Log token usage per callback to chat history (not terminal)
+        if (this.modelProvider.getProviderName() === 'openai' && lastTokenUsage) {
+          // OpenAI: use exact counts from API
+          const totalTokens = lastTokenUsage.inputTokens + lastTokenUsage.outputTokens;
+          this.chatHistoryManager.addTokenUsagePerCallback(
+            lastTokenUsage.inputTokens,
+            lastTokenUsage.outputTokens,
+            totalTokens,
+            lastTokenUsage.regularInputTokens,
+            lastTokenUsage.cacheCreationTokens,
+            lastTokenUsage.cacheReadTokens
+          );
+          lastTokenUsage = null; // Reset after logging
+          tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
+        } else if (this.modelProvider.getProviderName() === 'anthropic' && lastTokenUsage) {
+          // Anthropic: use exact counts from API (provided via token_usage events)
+          const totalTokens = lastTokenUsage.inputTokens + lastTokenUsage.outputTokens;
+          this.chatHistoryManager.addTokenUsagePerCallback(
+            lastTokenUsage.inputTokens,
+            lastTokenUsage.outputTokens,
+            totalTokens,
+            lastTokenUsage.regularInputTokens,
+            lastTokenUsage.cacheCreationTokens,
+            lastTokenUsage.cacheReadTokens
+          );
+          lastTokenUsage = null; // Reset after logging
+          tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
+        }
+
         // Check if we need to summarize after this response
         if (this.shouldSummarize()) {
           await this.autoSummarize();
@@ -1527,15 +1622,22 @@ export class MCPClient {
         }
       }
     }
-    
-    // Return any remaining pending tool results so they can be flushed by caller
-    return pendingToolResults;
+
+    // Return any remaining pending tool results and last token usage so they can be flushed/logged by caller
+    return { pendingToolResults, lastTokenUsage };
   }
 
   async processQuery(query: string, isSystemPrompt: boolean = false, attachments?: Array<{ path: string; fileName: string; ext: string; mediaType: string }>, cancellationCheck?: () => boolean) {
     // Track message count before adding new message (for cleanup on abort)
     const messagesBeforeQuery = this.messages.length;
     const tokenCountBeforeQuery = this.currentTokenCount;
+    
+    // Reset token tracking for this query
+    // This ensures we track tokens per callback correctly
+    if (this.modelProvider.getProviderName() === 'anthropic') {
+      // For Anthropic, we'll track from the current count
+      // The processToolUseStream will handle per-callback tracking
+    }
     
     try {
       // Check if we need to summarize before adding new message
@@ -1590,6 +1692,10 @@ export class MCPClient {
       // - Executing tools via our callback
       // - Sending results back to Anthropic
       // - Repeating until Anthropic is done
+      
+      // Track token count before starting the stream (for per-callback tracking)
+      const tokenCountBeforeStream = this.currentTokenCount;
+      
       const stream = (this.modelProvider as any).createMessageStreamWithToolUse(
         this.messages,
         this.model,
@@ -1602,8 +1708,9 @@ export class MCPClient {
 
       // Process the stream and collect final assistant message
       // Don't break immediately on cancellation - let current chunk finish
-      const pendingToolResults = await this.processToolUseStream(stream, cancellationCheck);
-      
+      // Pass initial token count for tracking
+      const { pendingToolResults, lastTokenUsage } = await this.processToolUseStream(stream, cancellationCheck, tokenCountBeforeStream);
+
       // Flush any remaining pending tool results (in case we aborted before they were added)
       if (pendingToolResults && pendingToolResults.length > 0) {
         const isAnthropic = this.modelProvider.getProviderName() === 'anthropic';
@@ -1696,12 +1803,21 @@ export class MCPClient {
         }
       }
 
-      // Log token usage after agent response
-      const usage = this.tokenCounter!.getUsage(this.currentTokenCount);
-      this.logger.log(
-        `\n[Token usage: ${usage.current}/${usage.limit} (${usage.percentage}%)]\n`,
-        { type: 'info' },
-      );
+      // Log final token usage if there's one remaining from the stream
+      // This happens because token_usage events come AFTER message_stop events in the Anthropic stream
+      // So the last iteration's token usage doesn't get logged during the stream
+      if (lastTokenUsage) {
+        const totalTokens = lastTokenUsage.inputTokens + lastTokenUsage.outputTokens;
+
+        this.chatHistoryManager.addTokenUsagePerCallback(
+          lastTokenUsage.inputTokens,
+          lastTokenUsage.outputTokens,
+          totalTokens,
+          lastTokenUsage.regularInputTokens,
+          lastTokenUsage.cacheCreationTokens,
+          lastTokenUsage.cacheReadTokens
+        );
+      }
 
       // Check todo status if todo mode is enabled and agent is trying to exit
       // Loop until all todos are completed or skipped
@@ -1747,6 +1863,7 @@ export class MCPClient {
           const messagesBeforeReminder = this.messages.length;
           
           // Continue conversation so agent can complete/skip todos
+          const continueTokenCountBeforeStream = this.currentTokenCount;
           const continueStream = (this.modelProvider as any).createMessageStreamWithToolUse(
             this.messages,
             this.model,
@@ -1756,10 +1873,10 @@ export class MCPClient {
             100, // maxIterations
             cancellationCheck, // Pass cancellation check to provider
           );
-          const pendingToolResults = await this.processToolUseStream(continueStream, cancellationCheck);
-          
+          const { pendingToolResults: continuePendingToolResults, lastTokenUsage: continueLastTokenUsage } = await this.processToolUseStream(continueStream, cancellationCheck, continueTokenCountBeforeStream);
+
           // Flush any remaining pending tool results
-          if (pendingToolResults && pendingToolResults.length > 0) {
+          if (continuePendingToolResults && continuePendingToolResults.length > 0) {
             const isAnthropic = this.modelProvider.getProviderName() === 'anthropic';
             if (isAnthropic) {
               // Find the last assistant message with tool_use blocks
@@ -1772,7 +1889,7 @@ export class MCPClient {
                   if (toolUseBlocks.length > 0) {
                     // Verify that all pending tool results have matching tool_use_ids
                     const toolUseIds = new Set(toolUseBlocks.map((block: any) => block.id));
-                    const validToolResults = pendingToolResults.filter(tr => 
+                    const validToolResults = continuePendingToolResults.filter(tr =>
                       tr.toolUseId && toolUseIds.has(tr.toolUseId)
                     );
                     
@@ -1810,7 +1927,7 @@ export class MCPClient {
                 lastAssistantIndex--;
               }
             } else {
-              for (const tr of pendingToolResults) {
+              for (const tr of continuePendingToolResults) {
                 if (tr.toolCallId) {
                   const toolMessage: Message = {
                     role: 'tool',
@@ -1822,12 +1939,12 @@ export class MCPClient {
               }
             }
           }
-          
+
           // Check if query was cancelled
           if (cancellationCheck && cancellationCheck()) {
             break;
           }
-          
+
           // Extract and log assistant response to reminder message
           const messagesAfterReminder = this.messages;
           const assistantMessagesAfterReminder = messagesAfterReminder
@@ -1839,13 +1956,20 @@ export class MCPClient {
               this.chatHistoryManager.addAssistantMessage(lastAssistantMessage.content);
             }
           }
-          
-          // Log token usage after continue stream response
-          const continueUsage = this.tokenCounter!.getUsage(this.currentTokenCount);
-          this.logger.log(
-            `\n[Token usage: ${continueUsage.current}/${continueUsage.limit} (${continueUsage.percentage}%)]\n`,
-            { type: 'info' },
-          );
+
+          // Log final token usage if there's one remaining from the stream
+          if (continueLastTokenUsage) {
+            const totalTokens = continueLastTokenUsage.inputTokens + continueLastTokenUsage.outputTokens;
+
+            this.chatHistoryManager.addTokenUsagePerCallback(
+              continueLastTokenUsage.inputTokens,
+              continueLastTokenUsage.outputTokens,
+              totalTokens,
+              continueLastTokenUsage.regularInputTokens,
+              continueLastTokenUsage.cacheCreationTokens,
+              continueLastTokenUsage.cacheReadTokens
+            );
+          }
         }
       }
 

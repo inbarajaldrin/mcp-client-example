@@ -364,10 +364,21 @@ export class OpenAIProvider implements ModelProvider {
 
         // Yield token usage at the end of stream
         if (chunk.usage) {
+          const promptTokens = chunk.usage.prompt_tokens || 0;
+          const completionTokens = chunk.usage.completion_tokens || 0;
+          const cachedTokens = (chunk.usage as any).input_tokens_details?.cached_tokens || 0;
+          const regularInputTokens = promptTokens - cachedTokens; // Regular input = total - cached
+          
           yield {
             type: 'token_usage',
-            input_tokens: chunk.usage.prompt_tokens,
-            output_tokens: chunk.usage.completion_tokens,
+            input_tokens: promptTokens,
+            output_tokens: completionTokens,
+            // Include breakdown for detailed tracking (similar to Anthropic)
+            input_tokens_breakdown: {
+              input_tokens: regularInputTokens,
+              cache_creation_input_tokens: 0, // OpenAI doesn't track cache creation separately
+              cache_read_input_tokens: cachedTokens,
+            },
           } as MessageStreamEvent;
         }
 
@@ -443,7 +454,11 @@ export class OpenAIProvider implements ModelProvider {
       const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
       let messageStarted = false;
       let assistantContent = '';
-      let finalUsage: { prompt_tokens: number; completion_tokens: number } | null = null;
+      let finalUsage: { 
+        prompt_tokens: number; 
+        completion_tokens: number;
+        input_tokens_details?: { cached_tokens?: number };
+      } | null = null;
 
       // Stream events to user while collecting response
       for await (const chunk of stream) {
@@ -452,6 +467,7 @@ export class OpenAIProvider implements ModelProvider {
           finalUsage = {
             prompt_tokens: chunk.usage.prompt_tokens || 0,
             completion_tokens: chunk.usage.completion_tokens || 0,
+            input_tokens_details: (chunk.usage as any).input_tokens_details || undefined,
           };
         }
 
@@ -592,10 +608,21 @@ export class OpenAIProvider implements ModelProvider {
       // Always yield if we have usage data - use finalUsage from stream or fallback to response.usage
       const usageToYield = finalUsage || response.usage;
       if (usageToYield) {
+        const promptTokens = usageToYield.prompt_tokens || 0;
+        const completionTokens = usageToYield.completion_tokens || 0;
+        const cachedTokens = (usageToYield as any).input_tokens_details?.cached_tokens || 0;
+        const regularInputTokens = promptTokens - cachedTokens; // Regular input = total - cached
+        
         yield {
           type: 'token_usage',
-          input_tokens: usageToYield.prompt_tokens || 0,
-          output_tokens: usageToYield.completion_tokens || 0,
+          input_tokens: promptTokens,
+          output_tokens: completionTokens,
+          // Include breakdown for detailed tracking (similar to Anthropic)
+          input_tokens_breakdown: {
+            input_tokens: regularInputTokens,
+            cache_creation_input_tokens: 0, // OpenAI doesn't track cache creation separately
+            cache_read_input_tokens: cachedTokens,
+          },
         } as MessageStreamEvent;
       }
 
