@@ -511,7 +511,7 @@ export class MCPClient {
 
       // Format and return result
       const formattedResult = this.formatJSON(
-        JSON.stringify(toolResult.content.flatMap((c) => c.text)),
+        JSON.stringify(toolResult.content.flatMap((c) => c.type === 'text' ? c.text : '')),
       );
 
       return formattedResult;

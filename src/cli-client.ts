@@ -1366,7 +1366,10 @@ export class MCPClientCLI {
               contentText = msg.content.text;
             } else if (msg.content.type === 'resource') {
               // Handle resource content
-              contentText = `[Resource: ${msg.content.resource.uri}]\n${msg.content.resource.text}`;
+              const resourceText = 'text' in msg.content.resource 
+                ? msg.content.resource.text 
+                : '[Binary resource]';
+              contentText = `[Resource: ${msg.content.resource.uri}]\n${resourceText}`;
             } else {
               // Fallback for other content types
               contentText = JSON.stringify(msg.content);
