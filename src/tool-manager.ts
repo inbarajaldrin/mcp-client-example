@@ -8,7 +8,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const CONFIG_DIR = join(__dirname, '..', '.mcp-client-data');
-const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
+const CONFIG_FILE = join(CONFIG_DIR, 'preferences.json');
 
 interface ClientConfig {
   servers?: Record<string, { command: string; args: string[]; disabled?: boolean }>;

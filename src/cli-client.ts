@@ -6,8 +6,7 @@ import { MCPClient } from './index.js';
 import { consoleStyles, Logger } from './logger.js';
 import type { ModelProvider } from './model-provider.js';
 import { AttachmentManager, type AttachmentInfo, type ContentBlock } from './attachment-manager.js';
-
-const EXIT_COMMAND = 'exit';
+import { PreferencesManager } from './preferences-manager.js';
 
 export class MCPClientCLI {
   private rl: readline.Interface | null = null;
@@ -15,6 +14,7 @@ export class MCPClientCLI {
   private logger: Logger;
   private isShuttingDown = false;
   private attachmentManager: AttachmentManager;
+  private preferencesManager: PreferencesManager;
   private pendingAttachments: AttachmentInfo[] = [];
   private abortCurrentQuery = false;
   private keyboardMonitor: (() => Promise<void>) | null = null;
@@ -39,6 +39,7 @@ export class MCPClientCLI {
     }
     this.logger = new Logger({ mode: 'verbose' });
     this.attachmentManager = new AttachmentManager(this.logger);
+    this.preferencesManager = new PreferencesManager(this.logger);
     
     // Set up signal handlers for graceful shutdown
     this.setupSignalHandlers();
@@ -97,7 +98,7 @@ export class MCPClientCLI {
     try {
       this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
       this.logger.log('🤖 Interactive CLI\n', { type: 'info' });
-      this.logger.log(`Type your queries or "${EXIT_COMMAND}" to exit\n`, {
+      this.logger.log(`Type your queries, "/exit" or "exit" to exit\n`, {
         type: 'info',
       });
       this.logger.log(
@@ -105,35 +106,10 @@ export class MCPClientCLI {
         { type: 'info' },
       );
       this.logger.log(
-        `\nTesting commands:\n` +
-        `  /token-status or /tokens - Show current token usage\n` +
-        `  /summarize or /summarize-now - Manually trigger summarization\n` +
-        `  /test-mode [threshold] - Enable test mode (default: 5% threshold)\n` +
-        `  /test-mode off - Disable test mode\n` +
-        `  /todo-on - Enable todo mode (agent will track tasks)\n` +
-        `  /todo-off - Disable todo mode\n` +
-        `  /tools or /tools-list - List currently enabled tools\n` +
-        `  /tools-manager or /tools-select - Interactive tool enable/disable selection\n` +
-        `  /tools-enable-all - Enable all tools from all servers\n` +
-        `  /tools-disable-all - Disable all tools from all servers\n` +
-        `  /tools-enable-server <server-name> - Enable all tools from a server\n` +
-        `  /tools-disable-server <server-name> - Disable all tools from a server\n` +
-        `  /add-prompt - Add enabled prompts to conversation context\n` +
-        `  /prompts or /prompts-list - List currently enabled prompts\n` +
-        `  /prompts-manager or /prompts-select - Interactive prompt enable/disable selection\n` +
-        `  /attachment-upload - Upload files by drag-and-drop\n` +
-        `  /attachment-list - List available attachments\n` +
-        `  /attachment-insert - Select attachments to send to agent\n` +
-        `  /attachment-rename - Rename an attachment\n` +
-        `  /attachment-clear - Delete one or more attachments\n` +
-        `  /chat-list - List recent chat sessions\n` +
-        `  /chat-search <keyword> - Search chats by keyword\n` +
-        `  /chat-restore - Restore a past chat as context\n` +
-        `  /chat-export - Export a chat to file\n` +
-        `  /chat-rename - Move a chat session to a folder (named folder will be created)\n` +
-        `  /chat-clear - Delete a chat session\n`,
+        `\nTesting commands:\n`,
         { type: 'info' },
       );
+      this.displayHelp();
       this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
       
       // Wait for MCP client to fully connect before creating readline
@@ -395,6 +371,71 @@ export class MCPClientCLI {
     }
   }
 
+  private async displaySettings(): Promise<void> {
+    const timeout = this.preferencesManager.getMCPTimeout();
+    const maxIterations = this.preferencesManager.getMaxIterations();
+
+    const timeoutDisplay = timeout === -1 ? 'unlimited' : `${timeout} seconds`;
+    const maxIterationsDisplay = maxIterations === -1 ? 'unlimited' : maxIterations.toString();
+
+    this.logger.log('\n⚙️  Client Settings:\n', { type: 'info' });
+    this.logger.log(
+      `  MCP Tool Timeout: ${timeoutDisplay}\n` +
+      `  Max Iterations: ${maxIterationsDisplay}\n`,
+      { type: 'info' },
+    );
+    this.logger.log(
+      `\nCommands:\n` +
+      `  /set-timeout <seconds> - Change MCP tool timeout (1-3600, or "infinity"/"unlimited")\n` +
+      `  /set-max-iterations <number> - Change max iterations (1-10000, or "infinity"/"unlimited")\n`,
+      { type: 'info' },
+    );
+  }
+
+  private displayHelp(): void {
+    this.logger.log(
+      `\nAvailable commands:\n` +
+      `  /help - Show this help message\n` +
+      `  /exit or exit - Exit the application\n` +
+      `\n` +
+      `System & Status:\n` +
+      `  /token-status or /tokens - Show current token usage\n` +
+      `  /summarize or /summarize-now - Manually trigger summarization\n` +
+      `  /settings - View and modify client preferences\n` +
+      `  /set-timeout <seconds> - Set MCP tool timeout (1-3600, or "infinity"/"unlimited")\n` +
+      `  /set-max-iterations <number> - Set max iterations between agent calls (1-10000, or "infinity"/"unlimited")\n` +
+      `\n` +
+      `Todo Management:\n` +
+      `  /todo-on - Enable todo mode (agent will track tasks)\n` +
+      `  /todo-off - Disable todo mode\n` +
+      `\n` +
+      `Tool Management:\n` +
+      `  /tools or /tools-list - List currently enabled tools\n` +
+      `  /tools-manager or /tools-select - Interactive tool enable/disable selection\n` +
+      `\n` +
+      `Prompt Management:\n` +
+      `  /prompts or /prompts-list - List currently enabled prompts\n` +
+      `  /prompts-manager or /prompts-select - Interactive prompt enable/disable selection\n` +
+      `  /add-prompt - Add enabled prompts to conversation context\n` +
+      `\n` +
+      `Attachments:\n` +
+      `  /attachment-upload - Upload files by drag-and-drop\n` +
+      `  /attachment-list - List available attachments\n` +
+      `  /attachment-insert - Select attachments to send to agent\n` +
+      `  /attachment-rename - Rename an attachment\n` +
+      `  /attachment-clear - Delete one or more attachments\n` +
+      `\n` +
+      `Chat History:\n` +
+      `  /chat-list - List recent chat sessions\n` +
+      `  /chat-search <keyword> - Search chats by keyword\n` +
+      `  /chat-restore - Restore a past chat as context\n` +
+      `  /chat-export - Export a chat to file\n` +
+      `  /chat-rename - Move a chat session to a folder (named folder will be created)\n` +
+      `  /chat-clear - Delete a chat session\n`,
+      { type: 'info' },
+    );
+  }
+
   private async chat_loop() {
     if (!this.rl) {
       throw new Error('Readline interface not initialized');
@@ -433,12 +474,19 @@ export class MCPClientCLI {
         
         // Check for exit command (trim and lowercase to handle any edge cases)
         // Do this check BEFORE any other processing to ensure exit always works
+        // Support both "/exit" and "exit"
         const trimmedQuery = query.trim().toLowerCase();
-        if (trimmedQuery === EXIT_COMMAND) {
+        if (trimmedQuery === 'exit' || trimmedQuery === '/exit') {
           this.logger.log('\nGoodbye! 👋\n', { type: 'warning' });
           // End chat session before exiting
           this.client.getChatHistoryManager().endSession('Chat session ended by user');
           break;
+        }
+
+        // Handle help command
+        if (query.toLowerCase() === '/help') {
+          this.displayHelp();
+          continue;
         }
 
         // Handle special commands for testing
@@ -469,13 +517,68 @@ export class MCPClientCLI {
           continue;
         }
 
-        if (query.toLowerCase().startsWith('/test-mode')) {
-          const parts = query.split(' ');
-          if (parts.length > 1 && parts[1] === 'off') {
-            this.client.setTestMode(false);
-          } else {
-            const threshold = parts.length > 1 ? parseFloat(parts[1]) : 5;
-            this.client.setTestMode(true, threshold);
+        if (query.toLowerCase() === '/settings') {
+          try {
+            await this.displaySettings();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to display settings: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase().startsWith('/set-timeout')) {
+          try {
+            const parts = query.split(' ');
+            if (parts.length < 2) {
+              this.logger.log(
+                '\nUsage: /set-timeout <seconds> or /set-timeout infinity\n',
+                { type: 'error' },
+              );
+              continue;
+            }
+            const timeoutValue = parts.slice(1).join(' '); // Join in case user types "infinity" or "unlimited"
+            this.preferencesManager.setMCPTimeout(timeoutValue);
+            const newTimeout = this.preferencesManager.getMCPTimeout();
+            const timeoutDisplay = newTimeout === -1 ? 'unlimited' : `${newTimeout} seconds`;
+            this.logger.log(
+              `\n✓ MCP tool timeout set to ${timeoutDisplay}\n`,
+              { type: 'success' },
+            );
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to set timeout: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase().startsWith('/set-max-iterations')) {
+          try {
+            const parts = query.split(' ');
+            if (parts.length < 2) {
+              this.logger.log(
+                '\nUsage: /set-max-iterations <number> or /set-max-iterations infinity\n',
+                { type: 'error' },
+              );
+              continue;
+            }
+            const maxIterationsValue = parts.slice(1).join(' '); // Join in case user types "infinity" or "unlimited"
+            this.preferencesManager.setMaxIterations(maxIterationsValue);
+            const newMaxIterations = this.preferencesManager.getMaxIterations();
+            const maxIterationsDisplay = newMaxIterations === -1 ? 'unlimited' : newMaxIterations.toString();
+            this.logger.log(
+              `\n✓ Max iterations set to ${maxIterationsDisplay}\n`,
+              { type: 'success' },
+            );
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to set max iterations: ${error}\n`,
+              { type: 'error' },
+            );
           }
           continue;
         }
@@ -517,79 +620,12 @@ export class MCPClientCLI {
           continue;
         }
 
-        // Handle tool management commands
-        if (query.toLowerCase() === '/tools-enable-all') {
-          try {
-            await this.client.enableAllTools();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to enable all tools: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/tools-disable-all') {
-          try {
-            await this.client.disableAllTools();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to disable all tools: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
         if (query.toLowerCase() === '/tools-list') {
           try {
             await this.displayToolsList();
           } catch (error) {
             this.logger.log(
               `\nFailed to list tools: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase().startsWith('/tools-enable-server')) {
-          try {
-            const parts = query.split(' ');
-            if (parts.length < 2) {
-              this.logger.log(
-                '\nUsage: /tools-enable-server <server-name>\n',
-                { type: 'error' },
-              );
-              continue;
-            }
-            const serverName = parts.slice(1).join(' ');
-            await this.client.enableServerTools(serverName);
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to enable server tools: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase().startsWith('/tools-disable-server')) {
-          try {
-            const parts = query.split(' ');
-            if (parts.length < 2) {
-              this.logger.log(
-                '\nUsage: /tools-disable-server <server-name>\n',
-                { type: 'error' },
-              );
-              continue;
-            }
-            const serverName = parts.slice(1).join(' ');
-            await this.client.disableServerTools(serverName);
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to disable server tools: ${error}\n`,
               { type: 'error' },
             );
           }

@@ -18,6 +18,7 @@ import { ToolManager } from './tool-manager.js';
 import { PromptManager } from './prompt-manager.js';
 import { ChatHistoryManager } from './chat-history-manager.js';
 import { AttachmentManager } from './attachment-manager.js';
+import { PreferencesManager } from './preferences-manager.js';
 import type {
   ModelProvider,
   TokenCounter,
@@ -67,6 +68,7 @@ export class MCPClient {
   private promptManager: PromptManager;
   private chatHistoryManager: ChatHistoryManager;
   private attachmentManager: AttachmentManager;
+  private preferencesManager: PreferencesManager;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -111,6 +113,7 @@ export class MCPClient {
     this.todoManager = new TodoManager(this.logger);
     
     // Initialize tool manager
+    this.preferencesManager = new PreferencesManager(this.logger);
     this.toolManager = new ToolManager(this.logger);
     
     // Initialize prompt manager
@@ -156,6 +159,7 @@ export class MCPClient {
     // Token counter will be initialized asynchronously - set to null for now
     client.tokenCounter = null as any;
     client.todoManager = new TodoManager(client.logger);
+    client.preferencesManager = new PreferencesManager(client.logger);
     client.toolManager = new ToolManager(client.logger);
     client.promptManager = new PromptManager(client.logger);
     client.chatHistoryManager = new ChatHistoryManager(client.logger);
@@ -476,8 +480,12 @@ export class MCPClient {
           },
           CallToolResultSchema,
           {
-            // Increase timeout to 5 minutes for long-running tools
-            timeout: 300000, // 300 seconds = 5 minutes
+            // Use preference timeout (convert seconds to milliseconds)
+            // -1 means unlimited, use undefined to let SDK handle it
+            timeout: (() => {
+              const timeoutSeconds = this.preferencesManager?.getMCPTimeout() ?? 60;
+              return timeoutSeconds === -1 ? undefined : timeoutSeconds * 1000;
+            })(),
           },
         );
       } else {
@@ -502,8 +510,12 @@ export class MCPClient {
               },
               CallToolResultSchema,
               {
-                // Increase timeout to 5 minutes for long-running tools
-                timeout: 300000, // 300 seconds = 5 minutes
+                // Use preference timeout (convert seconds to milliseconds)
+                // -1 means unlimited, use undefined to let SDK handle it
+                timeout: (() => {
+                  const timeoutSeconds = this.preferencesManager?.getMCPTimeout() ?? 60;
+                  return timeoutSeconds === -1 ? undefined : timeoutSeconds * 1000;
+                })(),
               },
             );
             found = true;
@@ -715,6 +727,10 @@ export class MCPClient {
    */
   getPromptManager(): PromptManager {
     return this.promptManager;
+  }
+
+  getPreferencesManager(): PreferencesManager {
+    return this.preferencesManager;
   }
 
   getChatHistoryManager(): ChatHistoryManager {
@@ -1708,7 +1724,11 @@ export class MCPClient {
         this.tools,
         8192,
         toolExecutor,
-        100, // maxIterations
+        (() => {
+          const maxIter = this.preferencesManager.getMaxIterations();
+          // -1 means unlimited, use a very large number
+          return maxIter === -1 ? 999999 : maxIter;
+        })(), // maxIterations
         cancellationCheck, // Pass cancellation check to provider
       );
 
@@ -1876,7 +1896,11 @@ export class MCPClient {
             this.tools,
             8192,
             toolExecutor,
-            100, // maxIterations
+            (() => {
+          const maxIter = this.preferencesManager.getMaxIterations();
+          // -1 means unlimited, use a very large number
+          return maxIter === -1 ? 999999 : maxIter;
+        })(), // maxIterations
             cancellationCheck, // Pass cancellation check to provider
           );
           const { pendingToolResults: continuePendingToolResults, lastTokenUsage: continueLastTokenUsage } = await this.processToolUseStream(continueStream, cancellationCheck, continueTokenCountBeforeStream);

@@ -1,142 +1,184 @@
-<picture>
-  <source media="(prefers-color-scheme: dark)" srcset="https://neon.com/brand/neon-logo-dark-color.svg">
-  <source media="(prefers-color-scheme: light)" srcset="https://neon.com/brand/neon-logo-light-color.svg">
-  <img width="250px" alt="Neon Logo fallback" src="https://neon.com/brand/neon-logo-dark-color.svg">
-</picture>
-
 ## MCP Client CLI
 
 > **Note:** This project is based on the MCP client from [neondatabase/mcp-server-neon](https://github.com/neondatabase/mcp-server-neon). Original work by Neon, Inc.
 
-This is a CLI client that can be used to interact with any MCP server and its tools. For more, see [Building a CLI Client For Model Context Protocol Servers](https://neon.tech/blog/building-a-cli-client-for-model-context-protocol-servers).
+This is a CLI client that can be used to interact with any MCP server and its tools.
 
 ## Requirements
 
-- **ANTHROPIC_API_KEY** - Get one from [Anthropic](https://console.anthropic.com/) (required for Claude provider)
+- **Node.js >= v18.0.0** - Required to run the CLI client
+- **Python 3.x** - Required for Python-based MCP servers (most common)
+- **ANTHROPIC_API_KEY** - Get one from [Anthropic](https://console.anthropic.com/) (required for Anthropic provider)
 - **OPENAI_API_KEY** - Get one from [OpenAI](https://platform.openai.com/api-keys) (required for OpenAI provider)
-- Node.js >= v18.0.0
 
-> **Note:** You do NOT need a Neon API key to use this client. The client works with any MCP server. Neon API keys are only required if you specifically want to use the Neon MCP server.
+> **Note:** The client works with any MCP server (Python, Node.js, or other). You only need API keys for the AI model provider you choose to use (Anthropic or OpenAI).
 
 ## How to use
 
-### Provider Selection
+### Command-Line Flags
 
-The client supports multiple AI model providers. You can select which provider to use via the `--provider` flag:
+**Server Selection:**
+- `--server <name>` or `-s <name>` - Use a specific server by name
+- `--servers <name1> <name2> ...` - Use multiple specific servers
+- `--all` - Use all enabled servers from `mcp_config.json`
+- `--list-servers` - List all configured servers
 
-- `claude` (default) - Uses Anthropic's Claude models
-- `openai` - Uses OpenAI models (GPT-4, GPT-5, etc.)
+**Model Selection:**
+- `--provider <name>` - Select AI provider (`anthropic` or `openai`, default: `anthropic`)
+- `--model <model-id>` - Specify a specific model (e.g., `gpt-4o`, `claude-sonnet-4-20250514`)
+- `--select-model` - Interactive model selection
+- `--list-models` - List available models for a provider
 
+**Examples:**
 ```bash
-# Use Claude (default)
-npx @neondatabase/mcp-client-cli --server="my-server"
+# List configured servers
+npx mcp-client --list-servers
 
-# Use OpenAI
-npx @neondatabase/mcp-client-cli --server="my-server" --provider=openai
+# Use Anthropic (default) with all servers
+npx mcp-client --all
 
-# Specify a custom model
-npx @neondatabase/mcp-client-cli --server="my-server" --provider=openai --model="gpt-4o"
+# Use OpenAI with a specific server
+npx mcp-client --server="my-server" --provider=openai
+
+# Use a specific model
+npx mcp-client --server="my-server" --provider=openai --model="gpt-4o"
+
+# Use multiple servers
+npx mcp-client --servers server1 server2 --provider=anthropic
 ```
 
-### Quick Start (Single Server)
+### Configuration File
 
-Use the client with any MCP server:
+The client uses a `mcp_config.json` file in your project root to configure MCP servers. This file defines all available servers and their connection settings.
 
+#### Configuration File Format
+
+Create a `mcp_config.json` file in your project root:
+
+```json
+{
+  "mcpServers": {
+    "server-name": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/path/to/python",
+      "args": [
+        "/path/to/server.py"
+      ]
+    }
+  }
+}
+```
+
+#### Python Server Examples
+
+Here are common Python server configurations:
+
+**Simple Python Server:**
+```json
+{
+  "mcpServers": {
+    "my-server": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "python3",
+      "args": [
+        "/path/to/my-server/server.py"
+      ]
+    }
+  }
+}
+```
+
+**Python Server with Virtual Environment:**
+```json
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/path/to/venv/bin/python",
+      "args": [
+        "/path/to/isaac-sim-mcp/isaac_mcp/server.py"
+      ]
+    }
+  }
+}
+```
+
+**Python Server with Environment Setup (ROS example):**
+```json
+{
+  "mcpServers": {
+    "ros-mcp-server": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "-c",
+        "source /opt/ros/humble/setup.bash && /path/to/venv/bin/python /path/to/ros-mcp-server/server.py"
+      ]
+    }
+  }
+}
+```
+
+### Quick Start
+
+1. **Set up your API keys:**
 ```bash
-# For Claude provider
+# For Anthropic provider
 export ANTHROPIC_API_KEY=your_anthropic_key_here
 
 # For OpenAI provider
 export OPENAI_API_KEY=your_openai_key_here
-
-# Use any MCP server directly
-npx @neondatabase/mcp-client-cli \
-  --server-command="npx" \
-  --server-args="-y @yourorg/mcp-server start"
-
-# Or use a local server with a specific provider
-npx @neondatabase/mcp-client-cli \
-  --server-command="node" \
-  --server-args="/path/to/your-server.js start" \
-  --provider=openai
 ```
 
-### Managing Multiple Servers
+2. **Create `mcp_config.json`** with your server configurations (see examples above)
 
-The client supports managing multiple MCP servers through a configuration file. This allows you to easily switch between different servers without specifying the command and arguments each time.
+3. **Run the client:**
 
-#### Add a Server
-
-Add your custom servers to the configuration:
-
+For local development (after `npm run build`):
 ```bash
-# Add your first custom server
-npx @neondatabase/mcp-client-cli \
-  --add-server="my-server" \
-  --server-command="npx" \
-  --server-args="-y @yourorg/mcp-server start"
+# Using npm script (recommended for local development)
+npm start -- --all
 
-# Add another custom server
-npx @neondatabase/mcp-client-cli \
-  --add-server="another-server" \
-  --server-command="node" \
-  --server-args="/path/to/server.js start"
+# Or run directly
+node ./dist/bin.js --all
 
-# Add a local development server
-npx @neondatabase/mcp-client-cli \
-  --add-server="local-dev" \
-  --server-command="node" \
-  --server-args="./dist/index.js start"
+# Run a specific server
+npm start -- --server="my-server"
+
+# Run specific servers
+npm start -- --servers server1 server2
+
+# Use OpenAI provider
+npm start -- --all --provider=openai
+
+# Use a specific model
+npm start -- --server="my-server" --provider=openai --model="gpt-4o"
 ```
 
-> **Note:** If you want to use the Neon MCP server (optional), you would add it like this:
-> ```bash
-> npx @neondatabase/mcp-client-cli \
->   --add-server="neon" \
->   --server-command="npx" \
->   --server-args="-y @neondatabase/mcp-server-neon start <neon-api-key>"
-> ```
-
-#### List Configured Servers
-
+For published package (when installed via npm):
 ```bash
-npx @neondatabase/mcp-client-cli --list-servers
-```
+# Run all enabled servers (with Anthropic, default)
+npx mcp-client --all
 
-#### Use a Specific Server
+# Run a specific server
+npx mcp-client --server="my-server"
 
-```bash
-# Use a configured server by name (with Claude, default)
-npx @neondatabase/mcp-client-cli --server="my-server"
+# Run specific servers
+npx mcp-client --servers server1 server2
 
-# Use a server with OpenAI provider
-npx @neondatabase/mcp-client-cli --server="my-server" --provider=openai
+# Use OpenAI provider
+npx mcp-client --all --provider=openai
 
-# Use a server with a specific model
-npx @neondatabase/mcp-client-cli --server="my-server" --provider=openai --model="gpt-5"
-
-# Or use the short form
-npx @neondatabase/mcp-client-cli -s "another-server"
-```
-
-#### Set Default Server
-
-Set a default server so you don't need to specify `--server` each time:
-
-```bash
-npx @neondatabase/mcp-client-cli --set-default="my-server"
-```
-
-After setting a default, you can simply run:
-
-```bash
-npx @neondatabase/mcp-client-cli
-```
-
-#### Remove a Server
-
-```bash
-npx @neondatabase/mcp-client-cli --remove-server="my-server"
+# Use a specific model
+npx mcp-client --server="my-server" --provider=openai --model="gpt-4o"
 ```
 
 #### Run Multiple Servers Simultaneously
@@ -144,17 +186,17 @@ npx @neondatabase/mcp-client-cli --remove-server="my-server"
 The client supports running multiple MCP servers at the same time, allowing you to use tools from all connected servers in a single session:
 
 ```bash
-# Run all enabled servers from your configuration (with Claude, default)
-npx @neondatabase/mcp-client-cli --all
+# Run all enabled servers from your configuration (with Anthropic, default)
+npx mcp-client --all
 
 # Run all servers with OpenAI provider
-npx @neondatabase/mcp-client-cli --all --provider=openai
+npx mcp-client --all --provider=openai
 
 # Run specific servers by name
-npx @neondatabase/mcp-client-cli --servers server1 server2 server3
+npx mcp-client --servers server1 server2 server3
 
 # Run specific servers with a provider and model
-npx @neondatabase/mcp-client-cli --servers server1 server2 --provider=openai --model="gpt-4o"
+npx mcp-client --servers server1 server2 --provider=openai --model="gpt-4o"
 ```
 
 **How it works:**
@@ -163,29 +205,43 @@ npx @neondatabase/mcp-client-cli --servers server1 server2 --provider=openai --m
 - If some servers fail to connect, the client continues with the ones that succeed
 - Tool calls are automatically routed to the correct server based on the tool name prefix
 
-#### Configuration File Location
+#### Server Configuration Options
 
-The configuration file is stored at: `~/.mcp-client/config.json`
+- **`disabled`**: Set to `true` to exclude a server from `--all` mode (server can still be used with `--server` or `/todo-on`)
+- **`timeout`**: Connection timeout in seconds (default: 60)
+- **`type`**: Connection type, typically `"stdio"` for standard input/output
+- **`command`**: The command to run (e.g., `python3`, `/path/to/venv/bin/python`, `bash`)
+- **`args`**: Array of arguments to pass to the command
 
-You can also edit this file directly if you prefer:
-
+**Example with multiple servers:**
 ```json
 {
-  "servers": {
-    "my-server": {
-      "command": "npx",
-      "args": ["-y", "@yourorg/mcp-server", "start"]
+  "mcpServers": {
+    "isaac-sim": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/path/to/isaac-sim-mcp/venv/bin/python",
+      "args": ["/path/to/isaac-sim-mcp/isaac_mcp/server.py"]
     },
-    "local-dev": {
-      "command": "node",
-      "args": ["./dist/index.js", "start"]
+    "ros-mcp-server": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "-c",
+        "source /opt/ros/humble/setup.bash && /path/to/venv/bin/python /path/to/ros-mcp-server/server.py"
+      ]
     },
-    "another-server": {
-      "command": "node",
-      "args": ["/path/to/server.js", "start"]
+    "todo": {
+      "disabled": true,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "python3",
+      "args": ["/path/to/todo-list-mcp/server.py"]
     }
-  },
-  "defaultServer": "my-server"
+  }
 }
 ```
 
@@ -201,20 +257,21 @@ The client automatically manages conversation context to prevent hitting token l
 **Features:**
 - Real-time token tracking using `tiktoken`
 - Model-specific context windows:
-  - Claude models: 200k tokens (default)
+  - Anthropic models: 200k tokens (default)
   - OpenAI models: Varies by model (e.g., GPT-5: 200k tokens, GPT-4o: 128k tokens)
 - Configurable summarization threshold (default: 80%)
 - Automatic token counting for all messages (user, assistant, tool results)
 - Provider-specific token counting algorithms
 
-**Testing Commands:**
+**System Commands:**
 
-While in the interactive CLI, you can use these special commands to test and debug the summarization feature:
+While in the interactive CLI, you can use these special commands:
 
 - `/token-status` or `/tokens` - Show current token usage statistics
 - `/summarize` or `/summarize-now` - Manually trigger summarization (useful for testing)
-- `/test-mode [percentage]` - Enable test mode with lower threshold (e.g., `/test-mode 5` triggers at 5% = 10,000 tokens)
-- `/test-mode off` - Disable test mode and reset to default 80% threshold
+- `/settings` - View and modify client preferences (timeout, max iterations)
+- `/set-timeout <seconds>` - Set MCP tool timeout (1-3600, or "infinity"/"unlimited", default: 60)
+- `/set-max-iterations <number>` - Set max iterations between agent calls (1-10000, or "infinity"/"unlimited", default: 100)
 
 **Example:**
 ```bash
@@ -225,9 +282,6 @@ Token Usage Status:
   Usage: 11.65%
   Status: continue
   Messages: 15
-
-You: /test-mode 5
-Test mode enabled: Summarization will trigger at 5% (10000 tokens)
 
 You: /summarize
 Manually triggering summarization...
@@ -272,13 +326,9 @@ Selectively enable or disable tools from all connected servers with persistent s
 **Commands:**
 - `/tools` or `/tools-list` - List currently enabled tools
 - `/tools-manager` or `/tools-select` - Interactive tool enable/disable selection
-- `/tools-enable-all` - Enable all tools from all servers
-- `/tools-disable-all` - Disable all tools from all servers
-- `/tools-enable-server <server-name>` - Enable all tools from a specific server
-- `/tools-disable-server <server-name>` - Disable all tools from a specific server
 
 **Features:**
-- **Persistent state**: Tool selections are saved to `~/.mcp-client/config.json` and persist across sessions
+- **Persistent state**: Tool selections are saved to `.mcp-client-data/preferences.json` and persist across sessions
 - **Works with all launch modes**: Tool states are applied whether using `--all`, `--servers`, or single server mode
 - **New tools default to enabled**: When a new server is added, all its tools are enabled by default
 - **Interactive selection**: Visual interface to toggle individual tools or entire servers
@@ -321,18 +371,6 @@ Commands:
 # List all tools and their status
 You: /tools or /tools-list
 
-# Enable all tools
-You: /tools-enable-all
-
-# Disable all tools
-You: /tools-disable-all
-
-# Enable all tools from a specific server
-You: /tools-enable-server isaac-sim
-
-# Disable all tools from a specific server
-You: /tools-disable-server ros-mcp-server
-
 # Interactive selection mode
 You: /tools-manager
 > 1,3,5-8        # Toggle tools 1, 3, and 5 through 8
@@ -345,16 +383,10 @@ You: /tools-manager
 
 **Configuration:**
 
-Tool states are stored in `~/.mcp-client/config.json`:
+Tool states are stored in `.mcp-client-data/preferences.json`:
 
 ```json
 {
-  "servers": {
-    "isaac-sim": {
-      "command": "python",
-      "args": ["/path/to/server.py"]
-    }
-  },
   "toolStates": {
     "isaac-sim__tool1": true,
     "isaac-sim__tool2": false,
@@ -375,7 +407,7 @@ Selectively enable or disable prompts from all connected servers and add enabled
 - `/prompts-manager` or `/prompts-select` - Interactive prompt enable/disable selection
 
 **Features:**
-- Persistent state saved to `~/.mcp-client/config.json`
+- Persistent state saved to `.mcp-client-data/preferences.json`
 - `/add-prompt` only shows enabled prompts
 - Interactive argument collection for prompts with arguments
 - Selected prompts are added to conversation context (not sent automatically)
@@ -400,13 +432,44 @@ You: /prompts-manager
 
 **Note:** Prompt states persist across all launch modes, similar to tool states.
 
+### Client Preferences
+
+The client stores user preferences in `.mcp-client-data/preferences.json`. This includes tool states, prompt states, and client settings.
+
+**Preferences stored:**
+- `toolStates` - Which tools are enabled/disabled
+- `promptStates` - Which prompts are enabled/disabled
+- `mcpTimeout` - MCP tool call timeout in seconds (default: 60)
+- `maxIterations` - Maximum iterations between agent calls (default: 100)
+
+**CLI Commands:**
+- `/settings` - View current preferences
+- `/set-timeout <seconds>` - Set MCP tool timeout (1-3600 seconds, or "infinity"/"unlimited")
+- `/set-max-iterations <number>` - Set max iterations (1-10000)
+
+**Example:**
+```bash
+You: /settings
+⚙️  Client Settings:
+  MCP Tool Timeout: 60 seconds
+  Max Iterations: 100
+
+You: /set-timeout 120
+✓ MCP tool timeout set to 120 seconds
+
+You: /set-max-iterations 200
+✓ Max iterations set to 200
+```
+
+**Note:** Preferences are saved automatically and persist across sessions. Edit `mcp_config.json` directly to add/remove servers.
+
 ### Model Providers
 
 The client supports multiple AI model providers, each with their own characteristics:
 
-#### Claude Provider (Default)
+#### Anthropic Provider (Default)
 
-- **Provider name:** `claude`
+- **Provider name:** `anthropic`
 - **Default model:** `claude-haiku-4-5-20251001`
 - **Context window:** 200,000 tokens
 - **Tool format:** Uses Anthropic's native tool format
@@ -432,14 +495,14 @@ export OPENAI_API_KEY=your_openai_key_here
 
 **Usage:**
 ```bash
-# Use OpenAI with default model (gpt-5)
-npx @neondatabase/mcp-client-cli --server="my-server" --provider=openai
+# Use OpenAI with default model (gpt-5) - all enabled servers
+npx mcp-client --all --provider=openai
 
-# Use OpenAI with a specific model
-npx @neondatabase/mcp-client-cli --server="my-server" --provider=openai --model="gpt-4o"
+# Use OpenAI with a specific model - single server
+npx mcp-client --server="my-server" --provider=openai --model="gpt-4o"
 
-# Use Claude with a specific model
-npx @neondatabase/mcp-client-cli --server="my-server" --provider=claude --model="claude-sonnet-4-20250514"
+# Use Anthropic with a specific model
+npx mcp-client --server="my-server" --provider=anthropic --model="claude-sonnet-4-20250514"
 ```
 
 **Note:** The provider abstraction layer automatically handles differences in API formats, tool calling conventions, and message structures between providers.
@@ -447,6 +510,21 @@ npx @neondatabase/mcp-client-cli --server="my-server" --provider=claude --model=
 ## How to develop
 
 1. Clone the repository
-2. Setup a `.env` file based on the `.env.example` file
+2. Copy `.env.example` to `.env` and fill in your API keys:
+   ```bash
+   cp .env.example .env
+   # Edit .env and add your ANTHROPIC_API_KEY and/or OPENAI_API_KEY
+   ```
 3. Run `npm install`
-4. Run `npm run start:mcp-server-neon`
+4. Run `npm run build` to build the project
+5. Create `mcp_config.json` with your MCP server configurations (see Configuration File section above)
+6. Run the client:
+   ```bash
+   # Using npm script (recommended)
+   npm start -- --all
+   
+   # Or run directly
+   node ./dist/bin.js --all
+   ```
+
+**Note:** For local development, use `npm start` or `node ./dist/bin.js` instead of `npx mcp-client`. The `npx` command only works when the package is installed globally or published to npm.

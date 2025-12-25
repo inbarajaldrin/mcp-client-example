@@ -46,7 +46,7 @@ interface AnthropicDesktopConfig {
 }
 
 const CONFIG_DIR = join(__dirname, '..', '.mcp-client-data');
-const CONFIG_FILE = join(CONFIG_DIR, 'config.json');
+const CONFIG_FILE = join(CONFIG_DIR, 'preferences.json');
 
 // Try to find local mcp_config.json in mcp-client directory
 const LOCAL_CONFIG_FILE = join(__dirname, '..', 'mcp_config.json');
@@ -176,7 +176,7 @@ function listServers(config: ClientConfig): void {
   const servers = Object.keys(config.servers);
   if (servers.length === 0) {
     console.log('No enabled servers found.');
-    console.log('Check your mcp_config.json file or use --add-server to add one.');
+    console.log('Check your mcp_config.json file.');
     return;
   }
 
@@ -389,16 +389,11 @@ async function main() {
   try {
     const args = parseArgs({
       options: {
-        'server-command': { type: 'string' },
-        'server-args': { type: 'string' },
         'server': { type: 'string', short: 's' },
         'servers': { type: 'string', multiple: true },
         'all': { type: 'boolean' },
         'list-servers': { type: 'boolean' },
         'list-models': { type: 'boolean' },
-        'add-server': { type: 'string' },
-        'remove-server': { type: 'string' },
-        'set-default': { type: 'string' },
         'provider': { type: 'string' },
         'model': { type: 'string' },
         'select-model': { type: 'boolean' },
@@ -442,73 +437,8 @@ async function main() {
       selectedModel = await selectModel(provider);
     }
 
-    // Handle add-server, remove-server, set-default (don't need API key)
-    if (args.values['add-server'] || args.values['remove-server'] || args.values['set-default']) {
-      // These commands don't need API key, continue below
-    } else {
-      // For actual client usage, require API key
-      checkRequiredEnvVars(providerName);
-    }
-
-    // Handle add-server command
-    if (args.values['add-server']) {
-      const serverName = args.values['add-server'];
-      const serverCommand = args.values['server-command'];
-      const serverArgs = args.values['server-args']?.split(' ') || [];
-
-      if (!serverCommand) {
-        console.error(
-          'Error: --server-command is required when adding a server',
-        );
-        process.exit(1);
-      }
-
-      config.servers[serverName] = {
-        command: serverCommand,
-        args: serverArgs,
-      };
-
-      // Set as default if it's the first server
-      if (!config.defaultServer) {
-        config.defaultServer = serverName;
-      }
-
-      saveConfig(config);
-      console.log(`Server "${serverName}" added successfully.`);
-      return;
-    }
-
-    // Handle remove-server command
-    if (args.values['remove-server']) {
-      const serverName = args.values['remove-server'];
-      if (!config.servers[serverName]) {
-        console.error(`Error: Server "${serverName}" not found.`);
-        process.exit(1);
-      }
-
-      delete config.servers[serverName];
-      if (config.defaultServer === serverName) {
-        config.defaultServer = undefined;
-      }
-
-      saveConfig(config);
-      console.log(`Server "${serverName}" removed successfully.`);
-      return;
-    }
-
-    // Handle set-default command
-    if (args.values['set-default']) {
-      const serverName = args.values['set-default'];
-      if (!config.servers[serverName]) {
-        console.error(`Error: Server "${serverName}" not found.`);
-        process.exit(1);
-      }
-
-      config.defaultServer = serverName;
-      saveConfig(config);
-      console.log(`Default server set to "${serverName}".`);
-      return;
-    }
+    // For actual client usage, require API key
+    checkRequiredEnvVars(providerName);
 
     // Determine which server(s) to use
     const serversArg = args.values['servers'];
@@ -575,37 +505,27 @@ async function main() {
       return;
     }
 
-    // Single server mode (backward compatibility)
-    let serverCommand: string | undefined;
-    let serverArgs: string[] = [];
-
-    let serverEnv: Record<string, string> | undefined;
-    
-    if (serverName) {
-      // Use server from config
-      const server = config.servers[serverName];
-      if (!server) {
-        console.error(`Error: Server "${serverName}" not found.`);
-        console.error('Use --list-servers to see available servers.');
-        process.exit(1);
-      }
-      serverCommand = server.command;
-      serverArgs = server.args;
-      serverEnv = server.env;
-    } else {
-      // Use command-line arguments (backward compatibility)
-      serverCommand = args.values['server-command'];
-      serverArgs = args.values['server-args']?.split(' ') || [];
-    }
-
-    if (!serverCommand) {
+    // Single server mode
+    if (!serverName) {
       console.error('Error: No server specified.');
       console.error(
-        'Use --server <name> to use a configured server, --servers <name1> <name2> ... to use multiple servers, --all to use all enabled servers, or --server-command to specify a server directly.',
+        'Use --server <name> to use a configured server, --servers <name1> <name2> ... to use multiple servers, or --all to use all enabled servers.',
       );
       console.error('Use --list-servers to see available servers.');
       process.exit(1);
     }
+
+    // Use server from config
+    const server = config.servers[serverName];
+    if (!server) {
+      console.error(`Error: Server "${serverName}" not found.`);
+      console.error('Use --list-servers to see available servers.');
+      process.exit(1);
+    }
+
+    const serverCommand = server.command;
+    const serverArgs = server.args;
+    const serverEnv = server.env;
 
     const cli = new MCPClientCLI({
       command: serverCommand,
