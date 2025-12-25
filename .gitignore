@@ -9,3 +9,6 @@ dist/
 
 # MCP client data (chat history, tool states, config)
 .mcp-client-data/
+
+# MCP configuration (contains user-specific paths)
+mcp_config.json

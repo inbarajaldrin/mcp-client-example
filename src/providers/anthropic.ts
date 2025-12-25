@@ -501,7 +501,7 @@ export class AnthropicProvider implements ModelProvider {
         const cacheReadTokens = usage.cache_read_input_tokens || 0;
         const totalInputTokens = inputTokens + cacheCreationTokens + cacheReadTokens;
         const outputTokens = usage.output_tokens || 0;
-        
+
         yield {
           type: 'token_usage',
           input_tokens: totalInputTokens, // Total input tokens including cache
@@ -528,6 +528,8 @@ export class AnthropicProvider implements ModelProvider {
       // Step 3: Check stop reason
       if (response.stop_reason === 'end_turn') {
         // Anthropic is done, no more tool calls needed
+        // Yield the complete response so client can save to conversation history
+        yield response as any;
         break;
       }
 
@@ -574,10 +576,21 @@ export class AnthropicProvider implements ModelProvider {
             });
           } catch (error) {
             // If tool execution fails, send error back to Anthropic
+            const errorMessage = `Error executing tool: ${error instanceof Error ? error.message : String(error)}`;
+
+            // Yield the error result so client can track it
+            yield {
+              type: 'tool_use_complete',
+              toolName: toolUseBlock.name,
+              toolUseId: toolUseBlock.id,
+              toolInput: toolUseBlock.input as Record<string, any>,
+              result: errorMessage,
+            };
+
             toolResults.push({
               type: 'tool_result',
               tool_use_id: toolUseBlock.id,
-              content: `Error executing tool: ${error instanceof Error ? error.message : String(error)}`,
+              content: errorMessage,
             });
           }
         }
@@ -588,6 +601,15 @@ export class AnthropicProvider implements ModelProvider {
           content: '',
           tool_results: toolResults,
         });
+
+        // Yield a complete response object with tool_use blocks so the client can save
+        // both the assistant message and tool results to conversation history
+        // This ensures tool results are available in future conversation turns
+        yield {
+          ...response,
+          // Add a flag to help client identify this is for history preservation
+          _preserveToolContext: true,
+        } as any;
 
         // Mark that we have pending tool results to send
         // Even if cancelled, we need one more iteration to send these to the agent

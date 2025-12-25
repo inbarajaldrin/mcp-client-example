@@ -4,36 +4,37 @@
       "disabled": false,
       "timeout": 60,
       "type": "stdio",
-      "command": "/home/aaugus11/Documents/isaac-sim-mcp/mcp_venv/bin/python",
+      "command": "/path/to/isaac-sim-mcp/mcp_venv/bin/python",
       "args": [
-        "/home/aaugus11/Documents/isaac-sim-mcp/isaac_mcp/server.py"
+        "/path/to/isaac-sim-mcp/isaac_mcp/server.py"
       ]
     },
     "ros-mcp-server": {
       "disabled": false,
       "timeout": 60,
       "type": "stdio",
-      "command": "/home/aaugus11/Documents/ros-mcp-server/.venv/bin/python",
+      "command": "bash",
       "args": [
-        "/home/aaugus11/Documents/ros-mcp-server/server.py"
+        "-c",
+        "source /opt/ros/humble/setup.bash && /path/to/ros-mcp-server/.venv/bin/python /path/to/ros-mcp-server/server.py"
       ]
     },
     "Prompts": {
       "disabled": false,
       "timeout": 60,
       "type": "stdio",
-      "command": "/home/aaugus11/Documents/mcp-server-example/.venv/bin/python",
+      "command": "/path/to/mcp-server-example/.venv/bin/python",
       "args": [
-        "/home/aaugus11/Documents/mcp-server-example/prompt.py"
+        "/path/to/ros-mcp-server/prompt.py"
       ]
     },
     "Resources": {
       "disabled": false,
       "timeout": 60,
       "type": "stdio",
-      "command": "/home/aaugus11/Documents/mcp-server-example/.venv/bin/python",
+      "command": "/path/to/mcp-server-example/.venv/bin/python",
       "args": [
-        "/home/aaugus11/Documents/mcp-server-example/resource.py"
+        "/path/to/ros-mcp-server/resource.py"
       ]
     },
     "todo": {
@@ -42,8 +43,9 @@
       "type": "stdio",
       "command": "python3",
       "args": [
-        "/home/aaugus11/Documents/todo-list-mcp/server.py"
+        "/path/to/todo-list-mcp/server.py"
       ]
     }
   }
 }
+

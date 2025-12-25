@@ -475,6 +475,10 @@ export class MCPClient {
             },
           },
           CallToolResultSchema,
+          {
+            // Increase timeout to 5 minutes for long-running tools
+            timeout: 300000, // 300 seconds = 5 minutes
+          },
         );
       } else {
         // Fallback: try to find the tool in any server (backward compatibility)
@@ -497,6 +501,10 @@ export class MCPClient {
                 },
               },
               CallToolResultSchema,
+              {
+                // Increase timeout to 5 minutes for long-running tools
+                timeout: 300000, // 300 seconds = 5 minutes
+              },
             );
             found = true;
             break;
@@ -1317,6 +1325,9 @@ export class MCPClient {
         // Accumulate text from OpenAI streaming
         // Text will appear on the same line as "Assistant:" if it's the first content
         currentMessage += chunk.delta.text;
+        if (process.env.VERBOSE_LOGGING && chunk.delta.text.length > 10) {
+          this.logger.log(`\n[DEBUG] Text delta: "${chunk.delta.text.substring(0, 20)}..."\n`, { type: 'info' });
+        }
         this.logger.log(chunk.delta.text);
         hasOutputContent = true;
         continue;
@@ -1446,22 +1457,15 @@ export class MCPClient {
           hasOutputContent = true;
         }
         
-        // Extract and display text content
+        // Extract text content (but don't display it - it was already streamed in real-time)
         const textBlocks = chunk.content.filter((block: any) => block.type === 'text');
-        const textContent = textBlocks.length > 0 
+        const textContent = textBlocks.length > 0
           ? textBlocks.map((block: any) => block.text).join('\n')
           : '';
-        
-        if (textContent) {
-          // Text will appear on the same line as "Assistant:" if it's the first content
-          this.logger.log(textContent);
-          hasOutputContent = true;
-          
-          // Add newline after text content to ensure tool execution logs appear on new line
-          // This prevents server logs from appearing on the same line as assistant text
-          if (textContent && !textContent.endsWith('\n')) {
-            this.logger.log('\n');
-          }
+
+        // Debug: Check if this is being called (should NOT log text here)
+        if (textContent && process.env.VERBOSE_LOGGING) {
+          this.logger.log(`\n[DEBUG] Complete response received, NOT logging text (length: ${textContent.length})\n`, { type: 'info' });
         }
         
         // Add assistant message to messages (with tool_use blocks if present)

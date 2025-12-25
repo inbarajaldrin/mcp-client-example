@@ -15,7 +15,6 @@
     "dist"
   ],
   "scripts": {
-    "start:mcp-server-neon": "cd .. && bun run build && cd - && bun ./src/neon-cli-client.ts",
     "build": "tsc && node -e \"require('fs').chmodSync('dist/index.js', '755')\"",
     "prepare": "npm run build",
     "watch": "tsc-watch --onSuccess \"chmod 755 dist/index.js\"",
