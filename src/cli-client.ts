@@ -964,6 +964,24 @@ export class MCPClientCLI {
       }
     }
     
+    // Update state for new tools (enable them by default)
+    const toolObjects = allTools.map(t => ({
+      name: `${t.server}__${t.name}`,
+      description: `[${t.server}] ${t.name}`,
+      input_schema: {},
+    }));
+    const hadNewTools = toolManager.updateStateForNewTools(toolObjects as any);
+    
+    // If new tools were detected and enabled, reload tools to make them available
+    if (hadNewTools) {
+      await (this.client as any).initMCPTools();
+      // Re-check enabled status after reload
+      for (const tool of allTools) {
+        const prefixedName = `${tool.server}__${tool.name}`;
+        tool.enabled = toolManager.isToolEnabled(prefixedName);
+      }
+    }
+    
     // Filter to only enabled tools
     const enabledTools = allTools.filter(t => t.enabled);
     
@@ -1693,9 +1711,10 @@ export class MCPClientCLI {
         `  ${chat.sessionId} | ${date} | ${chat.messageCount} messages | ${duration}\n`,
         { type: 'info' }
       );
-      if (chat.summary) {
-        this.logger.log(`    → ${chat.summary}\n`, { type: 'info' });
-      }
+      // TODO: Fix summary creation logic - re-enable summary display when summary is properly implemented
+      // if (chat.summary) {
+      //   this.logger.log(`    → ${chat.summary}\n`, { type: 'info' });
+      // }
       if (chat.tags && chat.tags.length > 0) {
         this.logger.log(`    Tags: ${chat.tags.join(', ')}\n`, { type: 'info' });
       }
@@ -1723,9 +1742,10 @@ export class MCPClientCLI {
         `  ${chat.sessionId} | ${date} | ${chat.messageCount} messages\n`,
         { type: 'info' }
       );
-      if (chat.summary) {
-        this.logger.log(`    → ${chat.summary}\n`, { type: 'info' });
-      }
+      // TODO: Fix summary creation logic - re-enable summary display when summary is properly implemented
+      // if (chat.summary) {
+      //   this.logger.log(`    → ${chat.summary}\n`, { type: 'info' });
+      // }
     }
   }
 
@@ -1742,86 +1762,148 @@ export class MCPClientCLI {
       return;
     }
     
-    this.logger.log('\n📖 Select a chat to restore as context:\n', { type: 'info' });
+    const path = await import('path');
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
+    const pageSize = 10;
+    let offset = 0;
     
-    for (let i = 0; i < Math.min(chats.length, 20); i++) {
-      const chat = chats[i];
-      const date = new Date(chat.startTime).toLocaleString();
-      const summary = chat.summary ? ` - ${chat.summary}` : '';
-      this.logger.log(
-        `  ${i + 1}. ${chat.sessionId} | ${date} | ${chat.messageCount} messages${summary}\n`,
-        { type: 'info' }
-      );
-    }
-    
-    const selection = await this.rl.question('\nEnter number (or "q" to cancel): ');
-    
-    if (selection.toLowerCase() === 'q' || selection.toLowerCase() === 'quit') {
-      this.logger.log('\nCancelled.\n', { type: 'info' });
-      return;
-    }
-    
-    const index = parseInt(selection) - 1;
-    if (isNaN(index) || index < 0 || index >= Math.min(chats.length, 20)) {
-      this.logger.log('\nInvalid selection.\n', { type: 'error' });
-      return;
-    }
-    
-    const selectedChat = chats[index];
-    const fullChat = historyManager.loadChat(selectedChat.sessionId);
-    
-    if (!fullChat) {
-      this.logger.log('\nFailed to load chat session.\n', { type: 'error' });
-      return;
-    }
-    
-    // Load messages into current conversation context
-    const messages = (this.client as any).messages;
-    const newMessages: any[] = [];
-    let restoredCount = 0;
-    
-    // Restore messages in reverse order (oldest first) so they appear in correct order when prepended
-    for (const msg of fullChat.messages) {
-      if (msg.role === 'user' || msg.role === 'assistant') {
-        const messageObj = {
-          role: msg.role,
-          content: msg.content,
-        };
-        newMessages.push(messageObj);
+    while (true) {
+      const endIndex = Math.min(offset + pageSize, chats.length);
+      const pageChats = chats.slice(offset, endIndex);
+      
+      this.logger.log('\n📖 Select a chat to restore as context:\n', { type: 'info' });
+      
+      for (let i = 0; i < pageChats.length; i++) {
+        const chat = pageChats[i];
+        const date = new Date(chat.startTime).toLocaleString();
+        // TODO: Fix summary creation logic - re-enable summary display when summary is properly implemented
+        // const summary = chat.summary ? ` - ${chat.summary}` : '';
+        const summary = '';
         
-        // Also add to ChatHistoryManager so they're saved with the current session
-        if (msg.role === 'user') {
-          historyManager.addUserMessage(msg.content);
-        } else if (msg.role === 'assistant') {
-          historyManager.addAssistantMessage(msg.content);
-        }
-        restoredCount++;
-      } else if (msg.role === 'tool') {
-        // Also restore tool executions
-        if (msg.toolName && msg.toolInput !== undefined && msg.toolOutput !== undefined) {
-          historyManager.addToolExecution(
-            msg.toolName,
-            msg.toolInput,
-            msg.toolOutput
-          );
-          restoredCount++;
+        // Extract short session ID (last part after last hyphen)
+        const shortSessionId = chat.sessionId.split('-').pop() || chat.sessionId;
+        
+        // Extract folder name from filePath
+        const chatDir = path.basename(path.dirname(chat.filePath));
+        // If folder is a date folder (YYYY-MM-DD), consider it as root
+        const folderName = datePattern.test(chatDir) ? 'root' : chatDir;
+        const folderDisplay = folderName !== 'root' ? ` | Folder: ${folderName}` : '';
+        
+        // Display number relative to current page (1-10)
+        const displayNumber = i + 1;
+        this.logger.log(
+          `  ${displayNumber}. ${shortSessionId} | ${date} | ${chat.messageCount} messages${folderDisplay}${summary}\n`,
+          { type: 'info' }
+        );
+      }
+      
+      // Show pagination info
+      const pageInfo = `\nPage ${Math.floor(offset / pageSize) + 1} of ${Math.ceil(chats.length / pageSize)} (Showing ${offset + 1}-${endIndex} of ${chats.length})\n`;
+      this.logger.log(pageInfo, { type: 'info' });
+      
+      // Build navigation prompt
+      let prompt = '\nEnter number to select, ';
+      if (offset + pageSize < chats.length) {
+        prompt += '"n" for next page, ';
+      }
+      if (offset > 0) {
+        prompt += '"p" for previous page, ';
+      }
+      prompt += 'or "q" to cancel: ';
+      
+      const selection = (await this.rl.question(prompt)).trim().toLowerCase();
+      
+      if (selection === 'q' || selection === 'quit') {
+        this.logger.log('\nCancelled.\n', { type: 'info' });
+        return;
+      }
+      
+      // Handle pagination
+      if (selection === 'n' || selection === 'next') {
+        if (offset + pageSize < chats.length) {
+          offset += pageSize;
+          continue;
+        } else {
+          this.logger.log('\nAlready on the last page.\n', { type: 'warning' });
+          continue;
         }
       }
+      
+      if (selection === 'p' || selection === 'prev' || selection === 'previous') {
+        if (offset > 0) {
+          offset = Math.max(0, offset - pageSize);
+          continue;
+        } else {
+          this.logger.log('\nAlready on the first page.\n', { type: 'warning' });
+          continue;
+        }
+      }
+      
+      // Handle number selection
+      const index = parseInt(selection) - 1;
+      if (isNaN(index) || index < 0 || index >= pageChats.length) {
+        this.logger.log('\nInvalid selection. Please enter a valid number, "n", "p", or "q".\n', { type: 'error' });
+        continue;
+      }
+      
+      // Get the actual chat from the full list using the offset
+      const selectedChat = chats[offset + index];
+      const fullChat = historyManager.loadChat(selectedChat.sessionId);
+      
+      if (!fullChat) {
+        this.logger.log('\nFailed to load chat session.\n', { type: 'error' });
+        return;
+      }
+      
+      // Load messages into current conversation context
+      const messages = (this.client as any).messages;
+      const newMessages: any[] = [];
+      let restoredCount = 0;
+      
+      // Restore messages in reverse order (oldest first) so they appear in correct order when prepended
+      for (const msg of fullChat.messages) {
+        if (msg.role === 'user' || msg.role === 'assistant') {
+          const messageObj = {
+            role: msg.role,
+            content: msg.content,
+          };
+          newMessages.push(messageObj);
+          
+          // Also add to ChatHistoryManager so they're saved with the current session
+          if (msg.role === 'user') {
+            historyManager.addUserMessage(msg.content);
+          } else if (msg.role === 'assistant') {
+            historyManager.addAssistantMessage(msg.content);
+          }
+          restoredCount++;
+        } else if (msg.role === 'tool') {
+          // Also restore tool executions
+          if (msg.toolName && msg.toolInput !== undefined && msg.toolOutput !== undefined) {
+            historyManager.addToolExecution(
+              msg.toolName,
+              msg.toolInput,
+              msg.toolOutput
+            );
+            restoredCount++;
+          }
+        }
+      }
+      
+      // Prepend restored messages to current conversation (for the model context)
+      messages.unshift(...newMessages);
+      
+      // Update token count (approximate)
+      const tokenCounter = (this.client as any).tokenCounter;
+      for (const msg of newMessages) {
+        (this.client as any).currentTokenCount += tokenCounter.countMessageTokens(msg);
+      }
+      
+      this.logger.log(
+        `\n✓ Restored ${restoredCount} messages from chat session ${selectedChat.sessionId}\n`,
+        { type: 'success' }
+      );
+      break; // Exit the pagination loop after successful selection
     }
-    
-    // Prepend restored messages to current conversation (for the model context)
-    messages.unshift(...newMessages);
-    
-    // Update token count (approximate)
-    const tokenCounter = (this.client as any).tokenCounter;
-    for (const msg of newMessages) {
-      (this.client as any).currentTokenCount += tokenCounter.countMessageTokens(msg);
-    }
-    
-    this.logger.log(
-      `\n✓ Restored ${restoredCount} messages from chat session ${selectedChat.sessionId}\n`,
-      { type: 'success' }
-    );
   }
 
   /**
@@ -2004,12 +2086,22 @@ export class MCPClientCLI {
     const folderName = await this.selectParentFolder(historyManager);
     
     // Ask user about attachments
-    const attachmentsAction = (await this.rl.question('\nAttachments: Copy or Move? (c/m, default: c): ')).trim().toLowerCase();
-    const copyAttachments = attachmentsAction !== 'm' && attachmentsAction !== 'move';
+    const attachmentsAction = (await this.rl.question('\nAttachments: Copy, Move, or Skip? (c/m/s, default: c): ')).trim().toLowerCase();
+    let copyAttachments: boolean | null = null;
+    if (attachmentsAction === 's' || attachmentsAction === 'skip' || attachmentsAction === 'n' || attachmentsAction === 'none') {
+      copyAttachments = null; // Skip
+    } else {
+      copyAttachments = attachmentsAction !== 'm' && attachmentsAction !== 'move';
+    }
     
     // Ask user about outputs
-    const outputsAction = (await this.rl.question('Outputs: Copy or Move? (c/m, default: m): ')).trim().toLowerCase();
-    const copyOutputs = outputsAction === 'c' || outputsAction === 'copy';
+    const outputsAction = (await this.rl.question('Outputs: Copy, Move, or Skip? (c/m/s, default: m): ')).trim().toLowerCase();
+    let copyOutputs: boolean | null = null;
+    if (outputsAction === 's' || outputsAction === 'skip' || outputsAction === 'n' || outputsAction === 'none') {
+      copyOutputs = null; // Skip
+    } else {
+      copyOutputs = outputsAction === 'c' || outputsAction === 'copy';
+    }
     
     const updated = historyManager.renameChat(selectedChat.sessionId, newName, folderName, copyAttachments, copyOutputs);
     
@@ -2041,7 +2133,9 @@ export class MCPClientCLI {
     for (let i = 0; i < Math.min(chats.length, 20); i++) {
       const chat = chats[i];
       const date = new Date(chat.startTime).toLocaleString();
-      const summary = chat.summary ? ` - ${chat.summary}` : '';
+      // TODO: Fix summary creation logic - re-enable summary display when summary is properly implemented
+      // const summary = chat.summary ? ` - ${chat.summary}` : '';
+      const summary = '';
       this.logger.log(
         `  ${i + 1}. ${chat.sessionId} | ${date} | ${chat.messageCount} messages${summary}\n`,
         { type: 'info' }

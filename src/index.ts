@@ -278,6 +278,7 @@ export class MCPClient {
 
   private async initMCPTools() {
     const allTools: Tool[] = [];
+    const serversWithTools = new Set<string>();
 
     // Load tools from each server and prefix with server name
     for (const [serverName, connection] of this.servers.entries()) {
@@ -306,7 +307,10 @@ export class MCPClient {
         }
 
         connection.tools = serverTools;
-        allTools.push(...serverTools);
+        if (serverTools.length > 0) {
+          serversWithTools.add(serverName);
+          allTools.push(...serverTools);
+        }
       } catch (error) {
         this.logger.log(
           `Failed to load tools from server "${serverName}": ${error}\n`,
@@ -333,7 +337,7 @@ export class MCPClient {
       );
     } else {
       this.logger.log(
-        `Loaded ${enabledTools.length} enabled tool(s) from ${allTools.length} total tool(s) across ${this.servers.size} server(s)\n`,
+        `Loaded ${enabledTools.length} enabled tool(s) from ${allTools.length} total tool(s) across ${serversWithTools.size} server(s)\n`,
         { type: 'info' },
       );
     }
@@ -342,6 +346,7 @@ export class MCPClient {
   private async initMCPPrompts() {
     let totalPrompts = 0;
     const allPrompts: Array<{ server: string; prompt: Prompt }> = [];
+    const serversWithPrompts = new Set<string>();
 
     // Load prompts from each server
     for (const [serverName, connection] of this.servers.entries()) {
@@ -352,11 +357,14 @@ export class MCPClient {
         );
 
         connection.prompts = promptsResults.prompts || [];
-        totalPrompts += connection.prompts.length;
-        
-        // Collect prompts for state management
-        for (const prompt of connection.prompts) {
-          allPrompts.push({ server: serverName, prompt });
+        if (connection.prompts.length > 0) {
+          serversWithPrompts.add(serverName);
+          totalPrompts += connection.prompts.length;
+          
+          // Collect prompts for state management
+          for (const prompt of connection.prompts) {
+            allPrompts.push({ server: serverName, prompt });
+          }
         }
       } catch (error) {
         // Some servers may not support prompts, so we handle errors gracefully
@@ -378,7 +386,7 @@ export class MCPClient {
 
     if (totalPrompts > 0) {
       this.logger.log(
-        `Loaded ${totalPrompts} prompt(s) across ${this.servers.size} server(s)\n`,
+        `Loaded ${totalPrompts} prompt(s) across ${serversWithPrompts.size} server(s)\n`,
         { type: 'info' },
       );
     }
@@ -481,10 +489,11 @@ export class MCPClient {
           CallToolResultSchema,
           {
             // Use preference timeout (convert seconds to milliseconds)
-            // -1 means unlimited, use undefined to let SDK handle it
+            // -1 means unlimited, use a very large value (1 hour) instead of undefined
+            // to ensure long-running tools don't timeout unexpectedly
             timeout: (() => {
               const timeoutSeconds = this.preferencesManager?.getMCPTimeout() ?? 60;
-              return timeoutSeconds === -1 ? undefined : timeoutSeconds * 1000;
+              return timeoutSeconds === -1 ? 3600000 : timeoutSeconds * 1000; // 1 hour for unlimited
             })(),
           },
         );
@@ -511,10 +520,11 @@ export class MCPClient {
               CallToolResultSchema,
               {
                 // Use preference timeout (convert seconds to milliseconds)
-                // -1 means unlimited, use undefined to let SDK handle it
+                // -1 means unlimited, use a very large value (1 hour) instead of undefined
+                // to ensure long-running tools don't timeout unexpectedly
                 timeout: (() => {
                   const timeoutSeconds = this.preferencesManager?.getMCPTimeout() ?? 60;
-                  return timeoutSeconds === -1 ? undefined : timeoutSeconds * 1000;
+                  return timeoutSeconds === -1 ? 3600000 : timeoutSeconds * 1000; // 1 hour for unlimited
                 })(),
               },
             );

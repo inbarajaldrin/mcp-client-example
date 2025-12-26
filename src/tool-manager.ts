@@ -163,8 +163,9 @@ export class ToolManager {
 
   /**
    * Update state for new tools (not in saved state) - set them to enabled by default
+   * @returns true if new tools were found and enabled, false otherwise
    */
-  updateStateForNewTools(tools: Tool[]): void {
+  updateStateForNewTools(tools: Tool[]): boolean {
     let hasNewTools = false;
     for (const tool of tools) {
       if (!(tool.name in this.toolStates)) {
@@ -175,6 +176,7 @@ export class ToolManager {
     if (hasNewTools) {
       this.saveState();
     }
+    return hasNewTools;
   }
 
   /**

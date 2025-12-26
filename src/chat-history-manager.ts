@@ -29,7 +29,8 @@ export interface ChatMetadata {
   model: string;
   servers: string[];
   tags?: string[];
-  summary?: string;
+  // TODO: Fix summary creation logic - currently it's being set to end reason instead of actual chat summary
+  // summary?: string;
   filePath: string;
   mdFilePath: string;
 }
@@ -488,7 +489,8 @@ export class ChatHistoryManager {
       writeFileSync(jsonPath, JSON.stringify(sessionToSave, null, 2));
 
       // Save Markdown format (human-readable)
-      const mdContent = this.generateMarkdownChat(sessionToSave, summary);
+      // TODO: Fix summary creation logic - summary parameter should be actual chat summary, not end reason
+      const mdContent = this.generateMarkdownChat(sessionToSave); // summary);
       writeFileSync(mdPath, mdContent);
 
       // Create metadata
@@ -501,7 +503,8 @@ export class ChatHistoryManager {
         toolUseCount: sessionToSave.metadata.toolUseCount,
         model: sessionToSave.model,
         servers: sessionToSave.servers,
-        summary,
+        // TODO: Fix summary creation logic - currently summary is end reason, not actual chat summary
+        // summary,
         filePath: jsonPath,
         mdFilePath: mdPath,
       };
@@ -522,8 +525,10 @@ export class ChatHistoryManager {
 
   /**
    * End current session and save to disk
+   * TODO: Fix summary creation logic - summary parameter is being used as end reason, should be actual chat summary
    */
   endSession(summary?: string): ChatMetadata | null {
+    // TODO: Fix summary creation logic - don't pass end reason as summary
     const metadata = this.saveCurrentSession(summary);
     
     if (metadata) {
@@ -542,6 +547,7 @@ export class ChatHistoryManager {
 
   /**
    * Generate human-readable markdown from chat session
+   * TODO: Fix summary creation logic - add summary display when summary is properly implemented
    */
   private generateMarkdownChat(session: ChatSession, summary?: string): string {
     let md = '# Chat Session\n\n';
@@ -762,7 +768,8 @@ export class ChatHistoryManager {
       // Search in metadata
       if (
         chat.sessionId.includes(keyword) ||
-        chat.summary?.includes(keyword) ||
+        // TODO: Fix summary creation logic - re-enable summary search when summary is properly implemented
+        // chat.summary?.includes(keyword) ||
         chat.model.includes(keyword)
       ) {
         results.push(chat);
@@ -801,7 +808,8 @@ export class ChatHistoryManager {
     if (!chat) return null;
 
     const metadata = this.index.get(sessionId);
-    return this.generateMarkdownChat(chat, metadata?.summary);
+    // TODO: Fix summary creation logic - re-enable summary when summary is properly implemented
+    return this.generateMarkdownChat(chat); // metadata?.summary);
   }
 
   /**
@@ -1002,7 +1010,12 @@ export class ChatHistoryManager {
    * @param targetDir - The target directory for the chat
    * @param copy - If true, copy attachments; if false, move them
    */
-  private moveAttachmentsToChatFolder(chatFilePath: string, targetDir: string, copy: boolean = true): void {
+  private moveAttachmentsToChatFolder(chatFilePath: string, targetDir: string, copy: boolean | null = true): void {
+    // If copy is null, skip moving attachments
+    if (copy === null) {
+      return;
+    }
+    
     const attachmentFileNames = this.getAttachmentsFromChat(chatFilePath);
     
     if (attachmentFileNames.length === 0) {
@@ -1085,9 +1098,14 @@ export class ChatHistoryManager {
   /**
    * Move or copy outputs to the chat's folder
    * @param targetDir - The target directory for the chat
-   * @param copy - If true, copy outputs; if false, move them
+   * @param copy - If true, copy outputs; if false, move them; if null, skip
    */
-  private moveOutputsToChatFolder(targetDir: string, copy: boolean = false): void {
+  private moveOutputsToChatFolder(targetDir: string, copy: boolean | null = false): void {
+    // If copy is null, skip moving outputs
+    if (copy === null) {
+      return;
+    }
+    
     if (!existsSync(OUTPUTS_DIR)) {
       return; // No outputs directory
     }
@@ -1331,10 +1349,10 @@ export class ChatHistoryManager {
    * @param sessionId - The session ID to rename
    * @param newName - The new name for the chat (will be used as folder name)
    * @param folderName - Optional parent folder name to move the chat to (within chats directory)
-   * @param copyAttachments - If true, copy attachments; if false, move them (default: true)
-   * @param copyOutputs - If true, copy outputs; if false, move them (default: false)
+   * @param copyAttachments - If true, copy attachments; if false, move them; if null, skip (default: true)
+   * @param copyOutputs - If true, copy outputs; if false, move them; if null, skip (default: false)
    */
-  renameChat(sessionId: string, newName: string, folderName?: string, copyAttachments: boolean = true, copyOutputs: boolean = false): boolean {
+  renameChat(sessionId: string, newName: string, folderName?: string, copyAttachments: boolean | null = true, copyOutputs: boolean | null = false): boolean {
     const metadata = this.index.get(sessionId);
     if (!metadata) {
       this.logger.log(`Chat session not found: ${sessionId}\n`, {

@@ -145,6 +145,7 @@ export OPENAI_API_KEY=your_openai_key_here
 For local development (after `npm run build`):
 ```bash
 # Using npm script (recommended for local development)
+# Note: The double dash (--) is required to pass arguments to npm scripts
 npm start -- --all
 
 # Or run directly
@@ -162,6 +163,8 @@ npm start -- --all --provider=openai
 # Use a specific model
 npm start -- --server="my-server" --provider=openai --model="gpt-4o"
 ```
+
+> **Important:** When using `npm start`, you must use the double dash (`--`) to pass arguments to your script. This tells npm to pass everything after `--` to your script. Without it, `npm start --all` will not work correctly because npm treats `--all` as an npm argument, not a script argument.
 
 For published package (when installed via npm):
 ```bash
@@ -521,9 +524,10 @@ npx mcp-client --server="my-server" --provider=anthropic --model="claude-sonnet-
 6. Run the client:
    ```bash
    # Using npm script (recommended)
+   # Note: The double dash (--) is required to pass arguments to npm scripts
    npm start -- --all
    
-   # Or run directly
+   # Or run directly (no double dash needed when running node directly)
    node ./dist/bin.js --all
    ```
 
