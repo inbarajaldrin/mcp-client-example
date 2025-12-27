@@ -237,6 +237,15 @@ npx mcp-client --servers server1 server2 --provider=openai --model="gpt-4o"
         "source /opt/ros/humble/setup.bash && /path/to/venv/bin/python /path/to/ros-mcp-server/server.py"
       ]
     },
+    "mcp-tools-orchestrator": {
+      "disabled": true,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/path/to/mcp-tools-orchestrator/.venv/bin/python",
+      "args": [
+        "/path/to/mcp-tools-orchestrator/server.py"
+      ]
+    },
     "todo": {
       "disabled": true,
       "timeout": 60,
@@ -321,6 +330,85 @@ You: Now assemble 3 line_blue objects
 ```
 
 **Note:** Todo server can be disabled in `mcp_config.json` and will be excluded from `--all` servers, but `/todo-on` will still connect to it on-demand.
+
+### Orchestrator Mode
+
+Enable orchestrator mode to use the `mcp-tools-orchestrator` server, which acts as an intelligent agent that can orchestrate tool calls across all your MCP servers. When orchestrator mode is enabled, only the orchestrator's tools are visible to the LLM, while all other servers remain connected and accessible via an IPC (Inter-Process Communication) server.
+
+**How it works:**
+
+1. **IPC Server**: When orchestrator mode is enabled (or when `mcp-tools-orchestrator` is enabled in config), the client automatically starts an HTTP IPC server on a random local port. This server exposes all connected MCP server tools to the orchestrator.
+
+2. **Tool Routing**: The `mcp-tools-orchestrator` server can call tools from other servers via the IPC server, avoiding duplicate server processes. The orchestrator receives the IPC URL via the `MCP_CLIENT_IPC_URL` environment variable.
+
+3. **Tool Filtering**: In orchestrator mode, only `mcp-tools-orchestrator` tools are visible to the LLM. All other server tools are hidden from direct LLM access but remain available for the orchestrator to call via IPC.
+
+4. **Automatic Connection**: If `mcp-tools-orchestrator` is enabled in `mcp_config.json`, the IPC server starts automatically when you launch the client with `--all`. If the orchestrator server is disabled, you can connect it on-demand using `/orchestrator-on`.
+
+**Commands:**
+- `/orchestrator-on` - Enable orchestrator mode (requires `mcp-tools-orchestrator` server in `mcp_config.json`)
+- `/orchestrator-off` - Disable orchestrator mode (restore all enabled server tools)
+
+**Configuration:**
+
+Add `mcp-tools-orchestrator` to your `mcp_config.json`:
+
+```json
+{
+  "mcpServers": {
+    "mcp-tools-orchestrator": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/path/to/mcp-tools-orchestrator/.venv/bin/python",
+      "args": [
+        "/path/to/mcp-tools-orchestrator/server.py"
+      ]
+    }
+  }
+}
+```
+
+**Example Usage:**
+
+```bash
+# Start client with all servers (including orchestrator if enabled)
+npx mcp-client --all
+
+# In the interactive CLI, enable orchestrator mode
+You: /orchestrator-on
+Orchestrator IPC enabled: http://localhost:54321
+Connecting to mcp-tools-orchestrator server...
+✓ Connected to "mcp-tools-orchestrator"
+✓ Orchestrator mode enabled
+
+# Now only orchestrator tools are visible to the LLM
+# The orchestrator can call tools from other servers via IPC
+You: Write a script that uses tools from multiple servers
+
+# Disable orchestrator mode to restore direct tool access
+You: /orchestrator-off
+✓ Orchestrator mode disabled
+```
+
+**Features:**
+
+- **IPC Server**: Automatically starts an HTTP server that exposes all connected MCP server tools
+- **Tool Discovery**: The orchestrator can discover available tools via the `/list_tools` IPC endpoint
+- **Tool Execution**: The orchestrator calls tools via the `/call_tool` IPC endpoint, which routes to the appropriate server
+- **On-Demand Connection**: If `mcp-tools-orchestrator` is disabled in config, `/orchestrator-on` will connect it on-demand
+- **Visual Feedback**: IPC tool calls are displayed with distinct styling (magenta/pink) to differentiate them from direct tool calls
+- **Abort Support**: IPC tool calls respect user abort signals (Ctrl+C)
+
+**IPC Server Endpoints:**
+
+The orchestrator IPC server exposes the following endpoints:
+
+- `GET /health` - Health check endpoint
+- `GET /list_tools` - Returns all available tools grouped by server
+- `POST /call_tool` - Executes a tool call on a specific server (body: `{ server, tool, arguments }`)
+
+**Note:** The orchestrator server can be disabled in `mcp_config.json` and will be excluded from `--all` servers, but `/orchestrator-on` will still connect to it on-demand. The IPC server automatically starts when orchestrator mode is enabled, even if the orchestrator server was initially disabled.
 
 ### Tool Selection Management
 

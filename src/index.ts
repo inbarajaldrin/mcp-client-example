@@ -28,16 +28,19 @@ import type {
   MessageStreamEvent,
 } from './model-provider.js';
 import { AnthropicProvider, type ToolExecutor } from './providers/anthropic.js';
+import { OrchestratorIPCServer } from './orchestrator-ipc-server.js';
 
 type MCPClientOptions = StdioServerParameters & {
   loggerOptions?: LoggerOptions;
   summarizationConfig?: Partial<SummarizationConfig>;
   model?: string;
+  enableOrchestratorIPC?: boolean; // Enable IPC server for mcp-tools-orchestrator
 };
 
 type MultiServerConfig = {
   name: string;
   config: StdioServerParameters;
+  disabledInConfig?: boolean; // If true, server was disabled in config but loaded for IPC routing
 };
 
 type ServerConnection = {
@@ -64,19 +67,24 @@ export class MCPClient {
   private todoCompletionUserCallback?: (todosList: string) => Promise<'clear' | 'leave'>;
   private todosLeftAsIs: boolean = false; // Track if todos were left as-is (not skipped)
   private todosWereSkipped: boolean = false; // Track if todos were skipped
+  private orchestratorModeEnabled: boolean = false; // Track if orchestrator mode is enabled
   private toolManager: ToolManager;
   private promptManager: PromptManager;
   private chatHistoryManager: ChatHistoryManager;
   private attachmentManager: AttachmentManager;
   private preferencesManager: PreferencesManager;
+  private orchestratorIPCServer: OrchestratorIPCServer | null = null;
+  private enableOrchestratorIPC: boolean = false;
+  private ipcListenersSetup: boolean = false; // Track if IPC listeners are already set up
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
-    options?: { 
-      loggerOptions?: LoggerOptions; 
-      summarizationConfig?: Partial<SummarizationConfig>; 
+    options?: {
+      loggerOptions?: LoggerOptions;
+      summarizationConfig?: Partial<SummarizationConfig>;
       model?: string;
       provider?: ModelProvider;
+      enableOrchestratorIPC?: boolean;
     },
   ) {
     // Use provided provider or default to Anthropic
@@ -90,7 +98,10 @@ export class MCPClient {
     }));
 
     this.logger = new Logger(options?.loggerOptions ?? { mode: 'verbose' });
-    
+
+    // Check if IPC should be enabled
+    this.enableOrchestratorIPC = options?.enableOrchestratorIPC ?? false;
+
     // Initialize model - require explicit model specification
     if (!options?.model) {
       try {
@@ -129,11 +140,12 @@ export class MCPClient {
   // Constructor for multiple named servers
   static createMultiServer(
     servers: Array<{ name: string; config: StdioServerParameters }>,
-    options?: { 
-      loggerOptions?: LoggerOptions; 
-      summarizationConfig?: Partial<SummarizationConfig>; 
+    options?: {
+      loggerOptions?: LoggerOptions;
+      summarizationConfig?: Partial<SummarizationConfig>;
       model?: string;
       provider?: ModelProvider;
+      enableOrchestratorIPC?: boolean;
     },
   ): MCPClient {
     const client = Object.create(MCPClient.prototype);
@@ -164,6 +176,8 @@ export class MCPClient {
     client.promptManager = new PromptManager(client.logger);
     client.chatHistoryManager = new ChatHistoryManager(client.logger);
     client.attachmentManager = new AttachmentManager(client.logger);
+    client.orchestratorIPCServer = null;
+    client.enableOrchestratorIPC = options?.enableOrchestratorIPC ?? false;
     return client;
   }
 
@@ -172,21 +186,63 @@ export class MCPClient {
     if (!this.tokenCounter) {
       this.tokenCounter = await this.modelProvider.createTokenCounter(this.model, undefined);
     }
-    
+
+    // Auto-detect if mcp-tools-orchestrator is in the server list AND enabled (not disabled)
+    const hasMcpOrchestratorEnabled = this.serverConfigs.some(
+      (config) => config.name === 'mcp-tools-orchestrator' && !config.disabledInConfig
+    );
+
+    // Start orchestrator IPC server BEFORE connecting to servers if mcp-tools-orchestrator is enabled
+    // This ensures MCP_CLIENT_IPC_URL is available when mcp-tools-orchestrator starts
+    if (hasMcpOrchestratorEnabled || this.enableOrchestratorIPC) {
+      this.orchestratorIPCServer = new OrchestratorIPCServer(this, this.logger);
+      try {
+        const port = await this.orchestratorIPCServer.start();
+        // Export IPC URL via environment variable for mcp-tools-orchestrator to discover
+        process.env.MCP_CLIENT_IPC_URL = `http://localhost:${port}`;
+        this.logger.log(
+          `Orchestrator IPC enabled: ${process.env.MCP_CLIENT_IPC_URL}\n`,
+          { type: 'info' },
+        );
+        // Setup event listeners to log IPC tool calls
+        this.setupIPCEventListeners();
+      } catch (error) {
+        this.logger.log(
+          `Failed to start Orchestrator IPC server: ${error}\n`,
+          { type: 'warning' },
+        );
+      }
+    }
+
     const connectionErrors: Array<{ name: string; error: any }> = [];
 
-    // Connect to all servers with individual error handling
+    // Connect only to enabled servers (respect disabled flag)
+    // Disabled servers can be connected on-demand via /todo-on or /orchestrator-on
     for (const serverConfig of this.serverConfigs) {
+      // Skip disabled servers - they can be connected on-demand
+      if (serverConfig.disabledInConfig) {
+        continue;
+      }
+      
       try {
         this.logger.log(`Connecting to server "${serverConfig.name}"...\n`, {
           type: 'info',
         });
 
+        // Inject IPC URL into mcp-tools-orchestrator's environment
+        const config = { ...serverConfig.config };
+        if (serverConfig.name === 'mcp-tools-orchestrator' && process.env.MCP_CLIENT_IPC_URL) {
+          config.env = {
+            ...config.env,
+            MCP_CLIENT_IPC_URL: process.env.MCP_CLIENT_IPC_URL,
+          };
+        }
+
         const client = new Client(
           { name: 'cli-client', version: '1.0.0' },
           { capabilities: {} },
         );
-        const transport = new StdioClientTransport(serverConfig.config);
+        const transport = new StdioClientTransport(config);
 
         await client.connect(transport);
         
@@ -243,23 +299,24 @@ export class MCPClient {
     
     // Initialize prompts from all successfully connected servers
     await this.initMCPPrompts();
-    
+
     // Start chat session after servers are connected
     const serverNames = Array.from(this.servers.keys());
     // Get enabled tools for the session
     const enabledTools = this.tools.map(tool => ({ name: tool.name, description: tool.description }));
     this.chatHistoryManager.startSession(this.model, serverNames, enabledTools);
-    
+
+    // Log connected servers (only enabled servers should be connected now)
     this.logger.log(
       `Connected to ${this.servers.size} server(s): ${Array.from(this.servers.keys()).join(', ')}\n`,
       { type: 'info' },
     );
-    
+
     this.logger.log(
       `Chat session started: ${this.chatHistoryManager.getCurrentSessionId()}\n`,
       { type: 'info' },
     );
-    
+
     this.logger.log(
       `Using model: ${this.model}\n`,
       { type: 'info' },
@@ -267,6 +324,17 @@ export class MCPClient {
   }
 
   async stop() {
+    // Stop orchestrator IPC server if running
+    if (this.orchestratorIPCServer) {
+      try {
+        await this.orchestratorIPCServer.stop();
+      } catch (error) {
+        // Ignore errors during cleanup
+      }
+      this.orchestratorIPCServer = null;
+      delete process.env.MCP_CLIENT_IPC_URL;
+    }
+
     const closePromises = Array.from(this.servers.values()).map((connection) =>
       connection.client.close().catch(() => {
         // Ignore errors during cleanup
@@ -307,7 +375,21 @@ export class MCPClient {
         }
 
         connection.tools = serverTools;
-        if (serverTools.length > 0) {
+
+        // Check if this server was disabled in config
+        const serverConfig = this.serverConfigs.find(cfg => cfg.name === serverName);
+        const wasDisabledInConfig = serverConfig?.disabledInConfig || false;
+
+        // Only expose tools if:
+        // 1. Server was not disabled in config, OR
+        // 2. Orchestrator mode is enabled and this is the mcp-tools-orchestrator server
+        const shouldExposeTool = !wasDisabledInConfig ||
+          (this.orchestratorModeEnabled && serverName === 'mcp-tools-orchestrator');
+
+        // If orchestrator mode is enabled, only expose mcp-tools-orchestrator tools
+        const shouldExposeInOrchestratorMode = !this.orchestratorModeEnabled || serverName === 'mcp-tools-orchestrator';
+
+        if (serverTools.length > 0 && shouldExposeTool && shouldExposeInOrchestratorMode) {
           serversWithTools.add(serverName);
           allTools.push(...serverTools);
         }
@@ -392,13 +474,13 @@ export class MCPClient {
     }
   }
 
-  private formatToolCall(toolName: string, args: any): string {
+  private formatToolCall(toolName: string, args: any, fromIPC: boolean = false): string {
     // Custom formatter that handles multiline strings nicely
     const formatValue = (value: any, indent: string = ''): string => {
       if (typeof value === 'string' && value.includes('\n')) {
         // Multiline string - display with actual newlines
         const lines = value.split('\n');
-        const isCode = lines.some(line => 
+        const isCode = lines.some(line =>
           line.trim().match(/^(import|from|def|class|if|for|while|#|print|return|const|let|var|function)/)
         );
         if (isCode) {
@@ -410,7 +492,7 @@ export class MCPClient {
       }
       if (Array.isArray(value)) {
         if (value.length === 0) return '[]';
-        const items = value.map((item, i) => 
+        const items = value.map((item, i) =>
           indent + '  ' + formatValue(item, indent + '  ') + (i < value.length - 1 ? ',' : '')
         );
         return '[\n' + items.join('\n') + '\n' + indent + ']';
@@ -435,12 +517,20 @@ export class MCPClient {
       argsDisplay = '\n' + formattedArgs;
     }
 
+    // Use different colors for IPC calls:
+    // - IPC calls (automatic tool calls from orchestrator) → magenta/pink
+    // - mcp-tools-orchestrator tools (agent writing script) → normal colors
+    // - Direct LLM tool calls → normal colors
+    const isOrchestratorTool = toolName.startsWith('mcp-tools-orchestrator__');
+    const isIPCCall = fromIPC && !isOrchestratorTool;
+    const toolStyle = isIPCCall ? consoleStyles.orchestratorTool : consoleStyles.tool;
+
     return (
       '\n' +
-      consoleStyles.tool.bracket('[') +
-      consoleStyles.tool.name(toolName) +
-      consoleStyles.tool.bracket(']') +
-      consoleStyles.tool.args(argsDisplay) +
+      toolStyle.bracket('[') +
+      toolStyle.name(toolName) +
+      toolStyle.bracket(']') +
+      toolStyle.args(argsDisplay) +
       '\n'
     );
   }
@@ -460,6 +550,7 @@ export class MCPClient {
   private async executeMCPTool(
     toolName: string,
     toolInput: Record<string, any>,
+    fromIPC: boolean = false,
   ): Promise<string> {
     // Extract server name and actual tool name from prefixed name
     // Format: "server-name__tool-name"
@@ -467,10 +558,12 @@ export class MCPClient {
       ? toolName.split('__', 2)
       : [null, toolName];
 
-    // Log the tool call BEFORE execution
-    this.logger.log(
-      this.formatToolCall(toolName, toolInput) + '\n',
-    );
+    // Log the tool call BEFORE execution (skip if called from IPC - already logged by IPC listener)
+    if (!fromIPC) {
+      this.logger.log(
+        this.formatToolCall(toolName, toolInput) + '\n',
+      );
+    }
 
     let toolResult;
 
@@ -539,12 +632,20 @@ export class MCPClient {
         }
       }
 
-      // Format and return result
-      const formattedResult = this.formatJSON(
-        JSON.stringify(toolResult.content.flatMap((c) => c.type === 'text' ? c.text : '')),
-      );
+      // Extract text content from MCP response
+      const textContent = toolResult.content
+        .filter((c) => c.type === 'text')
+        .map((c) => c.text)
+        .join('');
 
-      return formattedResult;
+      // Try to parse if it's JSON, otherwise return as-is
+      try {
+        const parsed = JSON.parse(textContent);
+        return this.formatJSON(JSON.stringify(parsed));
+      } catch {
+        // Not JSON, return formatted text
+        return this.formatJSON(JSON.stringify([textContent]));
+      }
     } catch (toolError) {
       const errorMessage = `Error executing tool "${toolName}": ${
         toolError instanceof Error ? toolError.message : String(toolError)
@@ -554,6 +655,27 @@ export class MCPClient {
         type: 'error',
       });
 
+      // Check if this is a timeout error
+      const isTimeout = toolError instanceof Error &&
+        (toolError.message.includes('timeout') ||
+         toolError.message.includes('timed out') ||
+         toolError.message.includes('ETIMEDOUT'));
+
+      if (isTimeout) {
+        // For timeout errors, return an error message to the agent instead of throwing
+        // This allows the agent to see partial results and handle the error gracefully
+        const timeoutMessage = `Tool execution timed out. The tool "${toolName}" did not complete within the configured timeout period. Previous tool results are still available. You can try again with different parameters or continue with other tasks.`;
+        this.logger.log(`\n⚠️ Returning timeout error to agent (context preserved)\n`, {
+          type: 'warning',
+        });
+        return this.formatJSON(JSON.stringify([{
+          error: 'timeout',
+          message: timeoutMessage,
+          details: errorMessage
+        }]));
+      }
+
+      // For other errors, throw to maintain existing behavior
       throw new Error(errorMessage);
     }
   }
@@ -919,6 +1041,176 @@ export class MCPClient {
    */
   setTodoModeInitialized(initialized: boolean = true): void {
     this.todoModeInitialized = initialized;
+  }
+
+  /**
+   * Enable orchestrator mode - only expose mcp-tools-orchestrator tools, hide all others
+   */
+  async enableOrchestratorMode(): Promise<void> {
+    // Check if mcp-tools-orchestrator is configured
+    const orchestratorConfig = this.serverConfigs.find(cfg => cfg.name === 'mcp-tools-orchestrator');
+    if (!orchestratorConfig) {
+      throw new Error('mcp-tools-orchestrator server not found in configuration. Cannot enable orchestrator mode.');
+    }
+
+    // Start IPC server if not already started (required for mcp-tools-orchestrator)
+    if (!this.orchestratorIPCServer) {
+      this.orchestratorIPCServer = new OrchestratorIPCServer(this, this.logger);
+      try {
+        const port = await this.orchestratorIPCServer.start();
+        // Export IPC URL via environment variable for mcp-tools-orchestrator to discover
+        process.env.MCP_CLIENT_IPC_URL = `http://localhost:${port}`;
+        this.logger.log(
+          `Orchestrator IPC enabled: ${process.env.MCP_CLIENT_IPC_URL}\n`,
+          { type: 'info' },
+        );
+        // Setup event listeners to log IPC tool calls
+        this.setupIPCEventListeners();
+      } catch (error) {
+        this.logger.log(
+          `Failed to start Orchestrator IPC server: ${error}\n`,
+          { type: 'warning' },
+        );
+        throw new Error(`Failed to start Orchestrator IPC server: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    // Connect to mcp-tools-orchestrator if not already connected (e.g., if it was disabled)
+    if (!this.servers.has('mcp-tools-orchestrator')) {
+      try {
+        this.logger.log(`Connecting to mcp-tools-orchestrator server...\n`, { type: 'info' });
+        
+        // Inject IPC URL into mcp-tools-orchestrator's environment
+        const config = { ...orchestratorConfig.config };
+        if (process.env.MCP_CLIENT_IPC_URL) {
+          config.env = {
+            ...config.env,
+            MCP_CLIENT_IPC_URL: process.env.MCP_CLIENT_IPC_URL,
+          };
+        }
+        
+        const client = new Client(
+          { name: 'cli-client', version: '1.0.0' },
+          { capabilities: {} },
+        );
+        const transport = new StdioClientTransport(config);
+        await client.connect(transport);
+        
+        // Give the server process a moment to fully initialize
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+        const connection: ServerConnection = {
+          name: 'mcp-tools-orchestrator',
+          client,
+          transport,
+          tools: [],
+          prompts: [],
+        };
+
+        this.servers.set('mcp-tools-orchestrator', connection);
+        this.logger.log(`✓ Connected to "mcp-tools-orchestrator"\n`, { type: 'info' });
+        
+        // Initialize tools from the newly connected server
+        await this.initMCPTools();
+      } catch (error) {
+        throw new Error(`Failed to connect to mcp-tools-orchestrator server: ${error instanceof Error ? error.message : String(error)}`);
+      }
+    }
+
+    this.orchestratorModeEnabled = true;
+
+    // Reload tools with orchestrator mode filtering
+    await this.initMCPTools();
+
+    this.logger.log('\n✓ Orchestrator mode enabled\n', { type: 'info' });
+  }
+
+  /**
+   * Disable orchestrator mode - restore all enabled server tools
+   */
+  async disableOrchestratorMode(): Promise<void> {
+    this.orchestratorModeEnabled = false;
+
+    // Reload tools without orchestrator mode filtering
+    await this.initMCPTools();
+
+    this.logger.log('\n✓ Orchestrator mode disabled\n', { type: 'info' });
+  }
+
+  /**
+   * Check if orchestrator mode is enabled
+   */
+  isOrchestratorModeEnabled(): boolean {
+    return this.orchestratorModeEnabled;
+  }
+
+  /**
+   * Check if mcp-tools-orchestrator server is configured
+   */
+  isOrchestratorServerConfigured(): boolean {
+    return this.serverConfigs.some(cfg => cfg.name === 'mcp-tools-orchestrator');
+  }
+
+  /**
+   * Get the orchestrator IPC server instance
+   */
+  getOrchestratorIPCServer(): OrchestratorIPCServer | null {
+    return this.orchestratorIPCServer;
+  }
+
+  /**
+   * Setup event listeners for IPC server to log tool calls
+   */
+  private setupIPCEventListeners(): void {
+    if (!this.orchestratorIPCServer) return;
+
+    // Prevent duplicate listener registration
+    if (this.ipcListenersSetup) {
+      return;
+    }
+
+    // Remove any existing listeners to prevent duplicates
+    this.orchestratorIPCServer.removeAllListeners('toolCallStart');
+    this.orchestratorIPCServer.removeAllListeners('toolCallEnd');
+
+    // Listen for IPC tool calls starting
+    this.orchestratorIPCServer.on('toolCallStart', (event: any) => {
+      // Display tool call in terminal with magenta/pink colors
+      const formattedCall = this.formatToolCall(event.toolName, event.args, true);
+      this.logger.log(formattedCall);
+    });
+
+    // Listen for IPC tool calls ending
+    this.orchestratorIPCServer.on('toolCallEnd', (event: any) => {
+      // Format result for display and logging (convert objects to JSON)
+      const resultStr = typeof event.result === 'string'
+        ? event.result
+        : JSON.stringify(event.result, null, 2);
+
+      // Display result in terminal
+      if (event.error) {
+        this.logger.log(`Error: ${event.error}\n`, { type: 'error' });
+      } else {
+        // Display result with indentation
+        const lines = resultStr.split('\n');
+        for (const line of lines) {
+          const indented = '  ' + line;
+          this.logger.log(indented + '\n', { type: 'success' });
+        }
+      }
+
+      // Log to chat history (use stringified result to avoid [object Object])
+      this.chatHistoryManager.addToolExecution(
+        event.toolName,
+        event.args || {},
+        event.error || resultStr || '',
+        true, // orchestratorMode - IPC calls are in orchestrator mode
+        true, // isIPCCall - this is an automatic IPC call
+      );
+    });
+
+    // Mark listeners as set up
+    this.ipcListenersSetup = true;
   }
 
   /**
@@ -1328,6 +1620,7 @@ export class MCPClient {
           chunk.toolName,
           chunk.toolInput || {},
           chunk.result || '',
+          this.orchestratorModeEnabled, // Track if tool was called in orchestrator mode
         );
         continue;
       }
@@ -1816,6 +2109,7 @@ export class MCPClient {
       // Check if query was cancelled - messages are kept visible even when aborted
       if (cancellationCheck && cancellationCheck()) {
         // Keep messages and token count as-is so user can see the partial response
+        // Note: IPC server already logs abort message when orchestrator mode is active
         return this.messages;
       }
 

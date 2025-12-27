@@ -37,6 +37,15 @@
         "/path/to/ros-mcp-server/resource.py"
       ]
     },
+    "mcp-tools-orchestrator": {
+      "disabled": true,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/path/to/mcp-tools-orchestrator/.venv/bin/python",
+      "args": [
+        "/path/to/mcp-tools-orchestrator/server.py"
+      ]
+    },
     "todo": {
       "disabled": true,
       "timeout": 60,

@@ -26,6 +26,7 @@ export interface ChatMetadata {
   duration?: number; // milliseconds
   messageCount: number;
   toolUseCount: number;
+  ipcCallCount?: number; // IPC calls made automatically (optional for backward compatibility)
   model: string;
   servers: string[];
   tags?: string[];
@@ -57,6 +58,8 @@ export interface ChatSession {
     toolName?: string;
     toolInput?: Record<string, any>;
     toolOutput?: string;
+    orchestratorMode?: boolean; // Track if tool was called in orchestrator mode
+    isIPCCall?: boolean; // Track if this was an IPC call (automatic, not by agent)
   }>;
   tokenUsagePerCallback?: Array<{
     timestamp: string;
@@ -71,7 +74,8 @@ export interface ChatSession {
   metadata: {
     totalTokens?: number;
     messageCount: number;
-    toolUseCount: number;
+    toolUseCount: number; // Tool calls made by agent (excludes IPC calls)
+    ipcCallCount: number; // IPC calls made automatically
     totalCost?: number; // Total estimated cost in USD for the session
   };
 }
@@ -243,6 +247,7 @@ export class ChatHistoryManager {
       metadata: {
         messageCount: 0,
         toolUseCount: 0,
+        ipcCallCount: 0,
       },
     };
 
@@ -321,6 +326,8 @@ export class ChatHistoryManager {
     toolName: string,
     toolInput: Record<string, any>,
     toolOutput: string,
+    orchestratorMode: boolean = false,
+    isIPCCall: boolean = false,
   ): void {
     if (!this.currentSession) {
       this.logger.log('No active session. Call startSession() first.\n', {
@@ -336,11 +343,19 @@ export class ChatHistoryManager {
       toolName,
       toolInput,
       toolOutput,
+      orchestratorMode,
+      isIPCCall,
     });
 
     this.currentSession.metadata.messageCount++;
-    this.currentSession.metadata.toolUseCount++;
-    this.toolUseCount++;
+
+    // IPC calls are counted separately from agent tool calls
+    if (isIPCCall) {
+      this.currentSession.metadata.ipcCallCount++;
+    } else {
+      this.currentSession.metadata.toolUseCount++;
+      this.toolUseCount++;
+    }
   }
 
   /**
@@ -501,6 +516,7 @@ export class ChatHistoryManager {
         duration,
         messageCount: sessionToSave.metadata.messageCount,
         toolUseCount: sessionToSave.metadata.toolUseCount,
+        ipcCallCount: sessionToSave.metadata.ipcCallCount,
         model: sessionToSave.model,
         servers: sessionToSave.servers,
         // TODO: Fix summary creation logic - currently summary is end reason, not actual chat summary
@@ -559,7 +575,10 @@ export class ChatHistoryManager {
     md += `**Model:** ${session.model}\n`;
     md += `**Servers:** ${session.servers.join(', ')}\n`;
     md += `**Messages:** ${session.metadata.messageCount}\n`;
-    md += `**Tool Calls:** ${session.metadata.toolUseCount}\n`;
+    md += `**Tool Calls (Agent):** ${session.metadata.toolUseCount}\n`;
+    if (session.metadata.ipcCallCount > 0) {
+      md += `**IPC Calls (Automatic):** ${session.metadata.ipcCallCount}\n`;
+    }
 
     // Display total estimated cost
     if (session.metadata.totalCost !== undefined && session.metadata.totalCost > 0) {
@@ -650,7 +669,14 @@ export class ChatHistoryManager {
           tokenUsageIndex++;
         }
       } else if (msg.role === 'tool') {
-        md += `### Tool: ${msg.toolName} (${time})\n\n`;
+        // Determine the mode indicator
+        let modeIndicator = '';
+        if (msg.isIPCCall) {
+          modeIndicator = ' *IPC Tool Call*';
+        } else if (msg.orchestratorMode) {
+          modeIndicator = ' *Orchestrator Mode*';
+        }
+        md += `### Tool: ${msg.toolName} (${time})${modeIndicator}\n\n`;
         md += `**Input:**\n\`\`\`json\n${JSON.stringify(msg.toolInput, null, 2)}\n\`\`\`\n\n`;
         
         // Try to parse output as JSON for consistent formatting

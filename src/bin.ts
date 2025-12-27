@@ -478,26 +478,55 @@ async function main() {
       return;
     }
 
-    // Handle --all flag: use all enabled servers
+    // Handle --all flag: load all servers but only connect enabled ones
     if (allServers) {
-      const enabledServers = Object.entries(config.servers)
-        .filter(([name, server]) => !server.disabled)
-        .map(([name, server]) => ({
+      // Load ALL servers from mcp_config.json (including disabled ones for on-demand connection)
+      // But only enabled servers will be connected initially
+      let allServerConfigs: Array<{ name: string; config: any; disabledInConfig?: boolean }> = [];
+
+      // Try to load from mcp_config.json to get all servers (enabled + disabled)
+      if (existsSync(LOCAL_CONFIG_FILE)) {
+        try {
+          const content = readFileSync(LOCAL_CONFIG_FILE, 'utf-8');
+          const anthropicConfig: AnthropicDesktopConfig = JSON.parse(content);
+
+          if (anthropicConfig.mcpServers) {
+            // Load ALL servers, marking disabled ones
+            allServerConfigs = Object.entries(anthropicConfig.mcpServers).map(([name, server]) => ({
+              name,
+              config: {
+                command: server.command,
+                args: server.args || [],
+                env: mergeEnvironment(server.env),
+              },
+              disabledInConfig: server.disabled || false, // Track disabled status
+            }));
+          }
+        } catch (error) {
+          console.error('Error reading mcp_config.json for --all:', error);
+        }
+      }
+
+      // Fallback to enabled servers from config if we couldn't load from file
+      if (allServerConfigs.length === 0) {
+        allServerConfigs = Object.entries(config.servers).map(([name, server]) => ({
           name,
           config: {
             command: server.command,
             args: server.args,
             env: mergeEnvironment(server.env),
           },
+          disabledInConfig: false,
         }));
+      }
 
-      if (enabledServers.length === 0) {
-        console.error('Error: No enabled servers found.');
+      if (allServerConfigs.length === 0) {
+        console.error('Error: No servers found.');
         console.error('Use --list-servers to see available servers.');
         process.exit(1);
       }
 
-      const cli = new MCPClientCLI(enabledServers, {
+      const cli = new MCPClientCLI(allServerConfigs, {
         provider,
         model: selectedModel,
       });

@@ -190,6 +190,14 @@ export class MCPClientCLI {
       if (keyLower === 'a') {
         this.logger.log('\n' + chalk.bold.red('🛑 Abort requested - will finish current response then stop...') + '\n', { type: 'error' });
         this.abortCurrentQuery = true;
+
+        // Also abort IPC server ONLY if orchestrator mode is actually enabled
+        if (this.client.isOrchestratorModeEnabled()) {
+          const ipcServer = this.client.getOrchestratorIPCServer();
+          if (ipcServer) {
+            ipcServer.setAborted(true);
+          }
+        }
       }
     };
 
@@ -409,6 +417,10 @@ export class MCPClientCLI {
       `  /todo-on - Enable todo mode (agent will track tasks)\n` +
       `  /todo-off - Disable todo mode\n` +
       `\n` +
+      `Orchestrator Mode:\n` +
+      `  /orchestrator-on - Enable orchestrator mode (only mcp-tools-orchestrator tools visible, all servers stay connected for IPC)\n` +
+      `  /orchestrator-off - Disable orchestrator mode (restore all enabled server tools)\n` +
+      `\n` +
       `Tool Management:\n` +
       `  /tools or /tools-list - List currently enabled tools\n` +
       `  /tools-manager or /tools-select - Interactive tool enable/disable selection\n` +
@@ -614,6 +626,38 @@ export class MCPClientCLI {
           } catch (error) {
             this.logger.log(
               `\nFailed to disable todo mode: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/orchestrator-on') {
+          try {
+            if (!this.client.isOrchestratorServerConfigured()) {
+              this.logger.log(
+                '\nmcp-tools-orchestrator server not configured. Please add "mcp-tools-orchestrator" to mcp_config.json and start with --all.\n',
+                { type: 'error' },
+              );
+              continue;
+            }
+
+            await this.client.enableOrchestratorMode();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to enable orchestrator mode: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/orchestrator-off') {
+          try {
+            await this.client.disableOrchestratorMode();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to disable orchestrator mode: ${error}\n`,
               { type: 'error' },
             );
           }
@@ -836,6 +880,15 @@ export class MCPClientCLI {
 
         // Reset abort flag and start keyboard monitoring
         this.abortCurrentQuery = false;
+
+        // Also reset IPC server abort flag ONLY if orchestrator mode is enabled
+        if (this.client.isOrchestratorModeEnabled()) {
+          const ipcServer = this.client.getOrchestratorIPCServer();
+          if (ipcServer) {
+            ipcServer.setAborted(false);
+          }
+        }
+
         await this.startKeyboardMonitoring();
 
         // Save pending attachments before processing (they may be cleared on abort)
@@ -862,14 +915,15 @@ export class MCPClientCLI {
           );
         } catch (error: any) {
           // If aborted, log message but continue to save history
+          // Also handle errors from orchestrator mode IPC when abort is triggered
           if (this.abortCurrentQuery) {
-            this.logger.log('\n' + chalk.yellow('Query stopped after current response.') + '\n', { type: 'warning' });
             // Stop monitoring
             this.stopKeyboardMonitoring();
             // Wait a bit longer to ensure readline state is fully restored
             // This helps prevent duplicate echo after abort
             await new Promise(resolve => setTimeout(resolve, 100));
             // Continue to save history even when aborted
+            // Don't throw - we want to continue the loop and prompt for next query
           } else {
             throw error;
           }
@@ -877,10 +931,9 @@ export class MCPClientCLI {
           // Stop keyboard monitoring
           this.stopKeyboardMonitoring();
         }
-        
-        // If query was aborted, log message
+
+        // If query was aborted, wait to ensure readline state is fully restored
         if (this.abortCurrentQuery) {
-          this.logger.log('\n' + chalk.yellow('Query stopped after current response.') + '\n', { type: 'warning' });
           // Wait a bit longer to ensure readline state is fully restored
           // This helps prevent duplicate echo after abort
           await new Promise(resolve => setTimeout(resolve, 100));
@@ -2040,77 +2093,122 @@ export class MCPClientCLI {
       return;
     }
     
-    this.logger.log('\n📝 Select a chat to rename:\n', { type: 'info' });
-    
     const path = await import('path');
+    const pageSize = 10;
+    let offset = 0;
     
-    for (let i = 0; i < Math.min(chats.length, 20); i++) {
-      const chat = chats[i];
-      const date = new Date(chat.startTime).toLocaleString();
-      // Extract current filename from path (cross-platform)
-      const currentFileName = path.basename(chat.filePath);
-      this.logger.log(
-        `  ${i + 1}. ${chat.sessionId} | ${date} | ${chat.messageCount} messages | ${currentFileName}\n`,
-        { type: 'info' }
-      );
-    }
-    
-    const selection = await this.rl.question('\nEnter number (or "q" to cancel): ');
-    
-    if (selection.toLowerCase() === 'q' || selection.toLowerCase() === 'quit') {
-      this.logger.log('\nCancelled.\n', { type: 'info' });
-      return;
-    }
-    
-    const index = parseInt(selection) - 1;
-    if (isNaN(index) || index < 0 || index >= Math.min(chats.length, 20)) {
-      this.logger.log('\nInvalid selection.\n', { type: 'error' });
-      return;
-    }
-    
-    const selectedChat = chats[index];
-    const currentFileName = path.basename(selectedChat.filePath);
-    const currentDir = path.basename(path.dirname(selectedChat.filePath)) || 'root';
-    
-    this.logger.log(`\nCurrent filename: ${currentFileName}`, { type: 'info' });
-    this.logger.log(`Current folder: ${currentDir}\n`, { type: 'info' });
-    
-    const newName = (await this.rl.question('\nEnter name for the chat (will create a folder with this name): ')).trim();
-    
-    if (!newName) {
-      this.logger.log('\nName cannot be empty.\n', { type: 'error' });
-      return;
-    }
-    
-    // Ask if user wants to move to a parent folder (using shared function)
-    const folderName = await this.selectParentFolder(historyManager);
-    
-    // Ask user about attachments
-    const attachmentsAction = (await this.rl.question('\nAttachments: Copy, Move, or Skip? (c/m/s, default: c): ')).trim().toLowerCase();
-    let copyAttachments: boolean | null = null;
-    if (attachmentsAction === 's' || attachmentsAction === 'skip' || attachmentsAction === 'n' || attachmentsAction === 'none') {
-      copyAttachments = null; // Skip
-    } else {
-      copyAttachments = attachmentsAction !== 'm' && attachmentsAction !== 'move';
-    }
-    
-    // Ask user about outputs
-    const outputsAction = (await this.rl.question('Outputs: Copy, Move, or Skip? (c/m/s, default: m): ')).trim().toLowerCase();
-    let copyOutputs: boolean | null = null;
-    if (outputsAction === 's' || outputsAction === 'skip' || outputsAction === 'n' || outputsAction === 'none') {
-      copyOutputs = null; // Skip
-    } else {
-      copyOutputs = outputsAction === 'c' || outputsAction === 'copy';
-    }
-    
-    const updated = historyManager.renameChat(selectedChat.sessionId, newName, folderName, copyAttachments, copyOutputs);
-    
-    if (updated) {
-      const sanitizedName = newName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
-      const locationMsg = folderName ? ` in "${folderName}/${sanitizedName}/"` : ` in "${sanitizedName}/"`;
-      this.logger.log(`\n✓ Chat ${selectedChat.sessionId} moved to folder${locationMsg}\n`, { type: 'success' });
-    } else {
-      this.logger.log(`\n✗ Failed to rename chat ${selectedChat.sessionId}.\n`, { type: 'error' });
+    while (true) {
+      const endIndex = Math.min(offset + pageSize, chats.length);
+      const pageChats = chats.slice(offset, endIndex);
+      
+      this.logger.log('\n📝 Select a chat to rename:\n', { type: 'info' });
+      
+      for (let i = 0; i < pageChats.length; i++) {
+        const chat = pageChats[i];
+        const date = new Date(chat.startTime).toLocaleString();
+        // Extract current filename from path (cross-platform)
+        const currentFileName = path.basename(chat.filePath);
+        this.logger.log(
+          `  ${i + 1}. ${chat.sessionId} | ${date} | ${chat.messageCount} messages | ${currentFileName}\n`,
+          { type: 'info' }
+        );
+      }
+      
+      // Show pagination info
+      const pageInfo = `\nPage ${Math.floor(offset / pageSize) + 1} of ${Math.ceil(chats.length / pageSize)} (Showing ${offset + 1}-${endIndex} of ${chats.length})\n`;
+      this.logger.log(pageInfo, { type: 'info' });
+      
+      // Build navigation prompt
+      let prompt = '\nEnter number to select, ';
+      if (offset + pageSize < chats.length) {
+        prompt += '"n" for next page, ';
+      }
+      if (offset > 0) {
+        prompt += '"p" for previous page, ';
+      }
+      prompt += 'or "q" to cancel: ';
+      
+      const selection = (await this.rl.question(prompt)).trim().toLowerCase();
+      
+      if (selection === 'q' || selection === 'quit') {
+        this.logger.log('\nCancelled.\n', { type: 'info' });
+        return;
+      }
+      
+      // Handle pagination
+      if (selection === 'n' || selection === 'next') {
+        if (offset + pageSize < chats.length) {
+          offset += pageSize;
+          continue;
+        } else {
+          this.logger.log('\nAlready on the last page.\n', { type: 'warning' });
+          continue;
+        }
+      }
+      
+      if (selection === 'p' || selection === 'prev' || selection === 'previous') {
+        if (offset > 0) {
+          offset = Math.max(0, offset - pageSize);
+          continue;
+        } else {
+          this.logger.log('\nAlready on the first page.\n', { type: 'warning' });
+          continue;
+        }
+      }
+      
+      // Handle number selection
+      const index = parseInt(selection) - 1;
+      if (isNaN(index) || index < 0 || index >= pageChats.length) {
+        this.logger.log('\nInvalid selection. Please enter a valid number, "n", "p", or "q".\n', { type: 'error' });
+        continue;
+      }
+      
+      // Get the actual chat from the full list using the offset
+      const selectedChat = chats[offset + index];
+      const currentFileName = path.basename(selectedChat.filePath);
+      const currentDir = path.basename(path.dirname(selectedChat.filePath)) || 'root';
+      
+      this.logger.log(`\nCurrent filename: ${currentFileName}`, { type: 'info' });
+      this.logger.log(`Current folder: ${currentDir}\n`, { type: 'info' });
+      
+      const newName = (await this.rl.question('\nEnter name for the chat (will create a folder with this name): ')).trim();
+      
+      if (!newName) {
+        this.logger.log('\nName cannot be empty.\n', { type: 'error' });
+        return;
+      }
+      
+      // Ask if user wants to move to a parent folder (using shared function)
+      const folderName = await this.selectParentFolder(historyManager);
+      
+      // Ask user about attachments
+      const attachmentsAction = (await this.rl.question('\nAttachments: Copy, Move, or Skip? (c/m/s, default: s): ')).trim().toLowerCase();
+      let copyAttachments: boolean | null = null;
+      if (!attachmentsAction || attachmentsAction === 's' || attachmentsAction === 'skip' || attachmentsAction === 'n' || attachmentsAction === 'none') {
+        copyAttachments = null; // Skip (default)
+      } else {
+        copyAttachments = attachmentsAction !== 'm' && attachmentsAction !== 'move';
+      }
+      
+      // Ask user about outputs
+      const outputsAction = (await this.rl.question('Outputs: Copy, Move, or Skip? (c/m/s, default: s): ')).trim().toLowerCase();
+      let copyOutputs: boolean | null = null;
+      if (!outputsAction || outputsAction === 's' || outputsAction === 'skip' || outputsAction === 'n' || outputsAction === 'none') {
+        copyOutputs = null; // Skip (default)
+      } else {
+        copyOutputs = outputsAction === 'c' || outputsAction === 'copy';
+      }
+      
+      const updated = historyManager.renameChat(selectedChat.sessionId, newName, folderName, copyAttachments, copyOutputs);
+      
+      if (updated) {
+        const sanitizedName = newName.toLowerCase().replace(/\s+/g, '-').replace(/[^a-z0-9-]/g, '');
+        const locationMsg = folderName ? ` in "${folderName}/${sanitizedName}/"` : ` in "${sanitizedName}/"`;
+        this.logger.log(`\n✓ Chat ${selectedChat.sessionId} moved to folder${locationMsg}\n`, { type: 'success' });
+      } else {
+        this.logger.log(`\n✗ Failed to rename chat ${selectedChat.sessionId}.\n`, { type: 'error' });
+      }
+      break; // Exit the pagination loop after successful selection
     }
   }
 

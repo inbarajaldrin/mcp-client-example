@@ -14,6 +14,11 @@ export const consoleStyles = {
     args: chalk.yellow,
     bracket: chalk.dim,
   },
+  orchestratorTool: {
+    name: chalk.magenta.bold,
+    args: chalk.hex('#FF6B9D'), // Pink for orchestrator mode
+    bracket: chalk.hex('#9D4EDD'), // Purple brackets
+  },
   error: chalk.red,
   info: chalk.blue,
   success: chalk.green,
