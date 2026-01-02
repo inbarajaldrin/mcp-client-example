@@ -17,7 +17,7 @@ export class MCPClientCLI {
   private preferencesManager: PreferencesManager;
   private pendingAttachments: AttachmentInfo[] = [];
   private abortCurrentQuery = false;
-  private keyboardMonitor: (() => Promise<void>) | null = null;
+  private keyboardMonitor: (() => void) | null = null;
   private isMonitoring = false;
 
   constructor(
@@ -142,7 +142,7 @@ export class MCPClientCLI {
     try {
       // Stop keyboard monitoring if active
       this.stopKeyboardMonitoring();
-      
+
       if (this.rl) {
         this.rl.close();
         this.rl = null;
@@ -191,12 +191,10 @@ export class MCPClientCLI {
         this.logger.log('\n' + chalk.bold.red('🛑 Abort requested - will finish current response then stop...') + '\n', { type: 'error' });
         this.abortCurrentQuery = true;
 
-        // Also abort IPC server ONLY if orchestrator mode is actually enabled
-        if (this.client.isOrchestratorModeEnabled()) {
-          const ipcServer = this.client.getOrchestratorIPCServer();
-          if (ipcServer) {
-            ipcServer.setAborted(true);
-          }
+        // Also abort IPC server if it's running (regardless of orchestrator mode)
+        const ipcServer = this.client.getOrchestratorIPCServer();
+        if (ipcServer) {
+          ipcServer.setAborted(true);
         }
       }
     };
@@ -204,7 +202,7 @@ export class MCPClientCLI {
     stdin.on('data', keyHandler);
 
     // Store cleanup function
-    this.keyboardMonitor = async () => {
+    this.keyboardMonitor = () => {
       if (!this.isMonitoring) {
         return;
       }
@@ -410,6 +408,7 @@ export class MCPClientCLI {
       `  /token-status or /tokens - Show current token usage\n` +
       `  /summarize or /summarize-now - Manually trigger summarization\n` +
       `  /settings - View and modify client preferences\n` +
+      `  /refresh-servers - Refresh MCP server connections without restarting\n` +
       `  /set-timeout <seconds> - Set MCP tool timeout (1-3600, or "infinity"/"unlimited")\n` +
       `  /set-max-iterations <number> - Set max iterations between agent calls (1-10000, or "infinity"/"unlimited")\n` +
       `\n` +
@@ -535,6 +534,18 @@ export class MCPClientCLI {
           } catch (error) {
             this.logger.log(
               `\nFailed to display settings: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/refresh-servers') {
+          try {
+            await this.client.refreshServers();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to refresh servers: ${error}\n`,
               { type: 'error' },
             );
           }
@@ -881,12 +892,10 @@ export class MCPClientCLI {
         // Reset abort flag and start keyboard monitoring
         this.abortCurrentQuery = false;
 
-        // Also reset IPC server abort flag ONLY if orchestrator mode is enabled
-        if (this.client.isOrchestratorModeEnabled()) {
-          const ipcServer = this.client.getOrchestratorIPCServer();
-          if (ipcServer) {
-            ipcServer.setAborted(false);
-          }
+        // Also reset IPC server abort flag if it's running (regardless of orchestrator mode)
+        const ipcServer = this.client.getOrchestratorIPCServer();
+        if (ipcServer) {
+          ipcServer.setAborted(false);
         }
 
         await this.startKeyboardMonitoring();
@@ -2056,12 +2065,22 @@ export class MCPClientCLI {
     const parentFolderName = await this.selectParentFolder(historyManager);
     
     // Ask user about attachments
-    const attachmentsAction = (await this.rl.question('\nAttachments: Copy or Move? (c/m, default: c): ')).trim().toLowerCase();
-    const copyAttachments = attachmentsAction !== 'm' && attachmentsAction !== 'move';
+    const attachmentsAction = (await this.rl.question('\nAttachments: Copy, Move, or Skip? (c/m/s, default: s): ')).trim().toLowerCase();
+    let copyAttachments: boolean | null = null;
+    if (!attachmentsAction || attachmentsAction === 's' || attachmentsAction === 'skip' || attachmentsAction === 'n' || attachmentsAction === 'none') {
+      copyAttachments = null; // Skip (default)
+    } else {
+      copyAttachments = attachmentsAction !== 'm' && attachmentsAction !== 'move';
+    }
     
     // Ask user about outputs
-    const outputsAction = (await this.rl.question('Outputs: Copy or Move? (c/m, default: m): ')).trim().toLowerCase();
-    const copyOutputs = outputsAction === 'c' || outputsAction === 'copy';
+    const outputsAction = (await this.rl.question('Outputs: Copy, Move, or Skip? (c/m/s, default: s): ')).trim().toLowerCase();
+    let copyOutputs: boolean | null = null;
+    if (!outputsAction || outputsAction === 's' || outputsAction === 'skip' || outputsAction === 'n' || outputsAction === 'none') {
+      copyOutputs = null; // Skip (default)
+    } else {
+      copyOutputs = outputsAction === 'c' || outputsAction === 'copy';
+    }
     
     const success = historyManager.exportChat(
       currentSessionId,

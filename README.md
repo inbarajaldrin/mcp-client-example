@@ -282,6 +282,7 @@ While in the interactive CLI, you can use these special commands:
 - `/token-status` or `/tokens` - Show current token usage statistics
 - `/summarize` or `/summarize-now` - Manually trigger summarization (useful for testing)
 - `/settings` - View and modify client preferences (timeout, max iterations)
+- `/refresh-servers` - Refresh MCP server connections without restarting the client
 - `/set-timeout <seconds>` - Set MCP tool timeout (1-3600, or "infinity"/"unlimited", default: 60)
 - `/set-max-iterations <number>` - Set max iterations between agent calls (1-10000, or "infinity"/"unlimited", default: 100)
 

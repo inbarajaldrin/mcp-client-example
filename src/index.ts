@@ -344,6 +344,107 @@ export class MCPClient {
     this.servers.clear();
   }
 
+  async refreshServers() {
+    this.logger.log('Refreshing server connections...\n', { type: 'info' });
+
+    // Close all existing server connections (keep IPC server running)
+    const closePromises = Array.from(this.servers.values()).map((connection) =>
+      connection.client.close().catch(() => {
+        // Ignore errors during cleanup
+      }),
+    );
+    await Promise.all(closePromises);
+    this.servers.clear();
+
+    const connectionErrors: Array<{ name: string; error: any }> = [];
+
+    // Reconnect to enabled servers (same logic as start())
+    for (const serverConfig of this.serverConfigs) {
+      // Skip disabled servers - they can be connected on-demand
+      if (serverConfig.disabledInConfig) {
+        continue;
+      }
+
+      try {
+        this.logger.log(`Connecting to server "${serverConfig.name}"...\n`, {
+          type: 'info',
+        });
+
+        // Inject IPC URL into mcp-tools-orchestrator's environment
+        const config = { ...serverConfig.config };
+        if (serverConfig.name === 'mcp-tools-orchestrator' && process.env.MCP_CLIENT_IPC_URL) {
+          config.env = {
+            ...config.env,
+            MCP_CLIENT_IPC_URL: process.env.MCP_CLIENT_IPC_URL,
+          };
+        }
+
+        const client = new Client(
+          { name: 'cli-client', version: '1.0.0' },
+          { capabilities: {} },
+        );
+        const transport = new StdioClientTransport(config);
+
+        await client.connect(transport);
+
+        // Give the server process a moment to fully initialize
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+        const connection: ServerConnection = {
+          name: serverConfig.name,
+          client,
+          transport,
+          tools: [],
+          prompts: [],
+        };
+
+        this.servers.set(serverConfig.name, connection);
+        this.logger.log(`✓ Connected to "${serverConfig.name}"\n`, {
+          type: 'info',
+        });
+      } catch (error) {
+        connectionErrors.push({ name: serverConfig.name, error });
+        this.logger.log(
+          `✗ Failed to connect to "${serverConfig.name}": ${error}\n`,
+          { type: 'warning' },
+        );
+        // Continue with other servers
+      }
+    }
+
+    // Check if we have at least one successful connection
+    if (this.servers.size === 0) {
+      this.logger.log(
+        'Failed to connect to any servers. Please check your server configurations.\n',
+        { type: 'error' },
+      );
+      if (connectionErrors.length > 0) {
+        this.logger.log('Connection errors:\n', { type: 'error' });
+        connectionErrors.forEach(({ name, error }) => {
+          this.logger.log(`  ${name}: ${error}\n`, { type: 'error' });
+        });
+      }
+      return;
+    }
+
+    // Log warnings for failed connections
+    if (connectionErrors.length > 0) {
+      this.logger.log(
+        `Warning: ${connectionErrors.length} server(s) failed to connect, continuing with ${this.servers.size} server(s)\n`,
+        { type: 'warning' },
+      );
+    }
+
+    // Reinitialize tools and prompts from all successfully connected servers
+    await this.initMCPTools();
+    await this.initMCPPrompts();
+
+    this.logger.log(
+      `✓ Refreshed ${this.servers.size} server(s): ${Array.from(this.servers.keys()).join(', ')}\n`,
+      { type: 'success' },
+    );
+  }
+
   private async initMCPTools() {
     const allTools: Tool[] = [];
     const serversWithTools = new Set<string>();
@@ -1685,8 +1786,12 @@ export class MCPClient {
           this.logger.log('\n');
           hasOutputContent = true;
         }
-        
-        if (currentMessage.trim()) {
+
+        // For Anthropic: Skip creating message here UNLESS we're aborting
+        // When aborting, we need to save currentMessage because complete response might not arrive
+        // For OpenAI: Always create the message since there's no separate complete response
+        const isAborting = cancellationCheck && cancellationCheck();
+        if (currentMessage.trim() && (!isAnthropic || isAborting)) {
           const assistantMessage: Message = {
             role: 'assistant',
             content: currentMessage,

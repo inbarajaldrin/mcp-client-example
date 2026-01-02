@@ -845,16 +845,16 @@ export class ChatHistoryManager {
    * @param sessionId - The session ID to export
    * @param folderName - The name for the export folder
    * @param parentFolderName - Optional parent folder name
-   * @param copyAttachments - If true, copy attachments; if false, move them (default: true)
-   * @param copyOutputs - If true, copy outputs; if false, move them (default: false)
+   * @param copyAttachments - If true, copy attachments; if false, move them; if null, skip (default: true)
+   * @param copyOutputs - If true, copy outputs; if false, move them; if null, skip (default: false)
    * @returns true if successful, false otherwise
    */
   exportChat(
     sessionId: string,
     folderName: string,
     parentFolderName?: string,
-    copyAttachments: boolean = true,
-    copyOutputs: boolean = false
+    copyAttachments: boolean | null = true,
+    copyOutputs: boolean | null = false
   ): boolean {
     // Check if session exists in index
     let metadata = this.index.get(sessionId);
