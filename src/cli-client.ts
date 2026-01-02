@@ -5,8 +5,8 @@ import chalk from 'chalk';
 import { MCPClient } from './index.js';
 import { consoleStyles, Logger } from './logger.js';
 import type { ModelProvider } from './model-provider.js';
-import { AttachmentManager, type AttachmentInfo, type ContentBlock } from './attachment-manager.js';
-import { PreferencesManager } from './preferences-manager.js';
+import { AttachmentManager, type AttachmentInfo, type ContentBlock } from './managers/attachment-manager.js';
+import { PreferencesManager } from './managers/preferences-manager.js';
 
 export class MCPClientCLI {
   private rl: readline.Interface | null = null;

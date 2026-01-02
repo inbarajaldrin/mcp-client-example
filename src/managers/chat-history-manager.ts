@@ -1,8 +1,8 @@
 import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, renameSync, readdirSync, statSync, copyFileSync, rmdirSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
-import { Logger } from './logger.js';
-import type { Message } from './model-provider.js';
+import { Logger } from '../logger.js';
+import type { Message } from '../model-provider.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -14,10 +14,10 @@ const __dirname = dirname(__filename);
 //   │   └── chat-HHMMSS-{sessionId}.md (human-readable)
 //   └── index.json (metadata of all chats)
 
-const CHATS_DIR = join(__dirname, '..', '.mcp-client-data', 'chats');
+const CHATS_DIR = join(__dirname, '../..', '.mcp-client-data', 'chats');
 const INDEX_FILE = join(CHATS_DIR, 'index.json');
-const ATTACHMENTS_DIR = join(__dirname, '..', '.mcp-client-data', 'attachments');
-const OUTPUTS_DIR = join(__dirname, '..', '.mcp-client-data', 'outputs');
+const ATTACHMENTS_DIR = join(__dirname, '../..', '.mcp-client-data', 'attachments');
+const OUTPUTS_DIR = join(__dirname, '../..', '.mcp-client-data', 'outputs');
 
 export interface ChatMetadata {
   sessionId: string;

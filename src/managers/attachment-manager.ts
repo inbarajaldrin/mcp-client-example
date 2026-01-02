@@ -2,7 +2,7 @@ import fs from 'fs';
 import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
-import { Logger } from './logger.js';
+import { Logger } from '../logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -49,7 +49,7 @@ export class AttachmentManager {
 
   constructor(logger: Logger) {
     this.logger = logger;
-    this.attachmentsDir = join(__dirname, '..', '.mcp-client-data', 'attachments');
+    this.attachmentsDir = join(__dirname, '../..', '.mcp-client-data', 'attachments');
     this.ensureAttachmentsDir();
   }
 

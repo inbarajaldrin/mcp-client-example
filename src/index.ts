@@ -13,12 +13,12 @@ import {
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import chalk from 'chalk';
 import { consoleStyles, Logger, LoggerOptions } from './logger.js';
-import { TodoManager } from './todo.js';
-import { ToolManager } from './tool-manager.js';
-import { PromptManager } from './prompt-manager.js';
-import { ChatHistoryManager } from './chat-history-manager.js';
-import { AttachmentManager } from './attachment-manager.js';
-import { PreferencesManager } from './preferences-manager.js';
+import { TodoManager } from './managers/todo-manager.js';
+import { ToolManager } from './managers/tool-manager.js';
+import { PromptManager } from './managers/prompt-manager.js';
+import { ChatHistoryManager } from './managers/chat-history-manager.js';
+import { AttachmentManager } from './managers/attachment-manager.js';
+import { PreferencesManager } from './managers/preferences-manager.js';
 import type {
   ModelProvider,
   TokenCounter,
@@ -28,7 +28,7 @@ import type {
   MessageStreamEvent,
 } from './model-provider.js';
 import { AnthropicProvider, type ToolExecutor } from './providers/anthropic.js';
-import { OrchestratorIPCServer } from './orchestrator-ipc-server.js';
+import { OrchestratorIPCServer } from './ipc-server.js';
 
 type MCPClientOptions = StdioServerParameters & {
   loggerOptions?: LoggerOptions;
@@ -839,13 +839,15 @@ export class MCPClient {
     askUserCallback?: (todosList: string) => Promise<'clear' | 'skip' | 'leave'>,
     completionCallback?: (todosList: string) => Promise<'clear' | 'leave'>
   ): Promise<void> {
-    if (!this.todoManager.isConfigured()) {
+    const todoServerName = this.todoManager.getServerName();
+
+    // Check if todo server is configured in serverConfigs
+    const todoConfig = this.serverConfigs.find(cfg => cfg.name === todoServerName);
+    if (!todoConfig) {
       throw new Error('Todo server not configured. Please add "todo" server to mcp_config.json');
     }
 
     try {
-      const todoServerName = this.todoManager.getServerName();
-      
       // Check if todo server is already connected (from initial start)
       if (this.servers.has(todoServerName)) {
         // Use existing connection
@@ -853,14 +855,34 @@ export class MCPClient {
         this.todoManager.setConnection(existingConnection);
         this.todoManager.enable();
       } else {
-        // Connect to todo server
-        const connection = await this.todoManager.connect();
-        this.todoManager.enable();
-        
-        // Add todo server to servers map
+        // Connect to todo server on-demand (even if it was disabled in config)
+        this.logger.log(`Connecting to todo server...\n`, { type: 'info' });
+
+        const client = new Client(
+          { name: 'cli-client', version: '1.0.0' },
+          { capabilities: {} },
+        );
+        const transport = new StdioClientTransport(todoConfig.config);
+        await client.connect(transport);
+
+        // Give the server process a moment to fully initialize
+        await new Promise(resolve => setTimeout(resolve, 200));
+
+        const connection: ServerConnection = {
+          name: todoServerName,
+          client,
+          transport,
+          tools: [],
+          prompts: [],
+        };
+
         this.servers.set(todoServerName, connection);
+        this.todoManager.setConnection(connection);
+        this.todoManager.enable();
+
+        this.logger.log(`✓ Connected to todo server\n`, { type: 'info' });
       }
-      
+
       // Reload tools to apply filtering
       await this.initMCPTools();
       

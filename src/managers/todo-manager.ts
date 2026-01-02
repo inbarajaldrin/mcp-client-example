@@ -2,15 +2,15 @@ import { StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { ListToolsResultSchema, CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
-import type { Tool } from './model-provider.js';
+import type { Tool } from '../model-provider.js';
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { Logger } from './logger.js';
+import { Logger } from '../logger.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
-const CONFIG_FILE = join(__dirname, '..', 'mcp_config.json');
+const CONFIG_FILE = join(__dirname, '../..', 'mcp_config.json');
 
 interface TodoServerConfig {
   command: string;
