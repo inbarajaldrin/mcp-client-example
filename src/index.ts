@@ -1626,6 +1626,14 @@ export class MCPClient {
       regularInputTokens?: number;
       cacheCreationTokens?: number;
       cacheReadTokens?: number;
+      ollamaMetrics?: {
+        totalDuration?: number;
+        loadDuration?: number;
+        evalDuration?: number;
+        promptEvalDuration?: number;
+        evalRate?: number;
+        promptEvalRate?: number;
+      };
     } | null;
   }> {
     this.logger.log(consoleStyles.assistant);
@@ -1650,6 +1658,15 @@ export class MCPClient {
       regularInputTokens?: number;
       cacheCreationTokens?: number;
       cacheReadTokens?: number;
+      // Ollama-specific metrics
+      ollamaMetrics?: {
+        totalDuration?: number;
+        loadDuration?: number;
+        evalDuration?: number;
+        promptEvalDuration?: number;
+        evalRate?: number;
+        promptEvalRate?: number;
+      };
     } | null = null;
     
     for await (const chunk of stream) {
@@ -1775,7 +1792,7 @@ export class MCPClient {
         continue;
       }
 
-      // Handle token usage from both OpenAI and Anthropic (exact counts from API)
+      // Handle token usage from OpenAI, Anthropic, and Ollama (exact counts from API)
       if (chunk.type === 'token_usage' && chunk.input_tokens !== undefined) {
         // Store token usage for this callback
         lastTokenUsage = {
@@ -1783,12 +1800,17 @@ export class MCPClient {
           outputTokens: chunk.output_tokens,
         };
 
-        // Extract cache token breakdown if available (from Anthropic)
+        // Extract cache token breakdown if available (from Anthropic/OpenAI)
         if ((chunk as any).input_tokens_breakdown) {
           const breakdown = (chunk as any).input_tokens_breakdown;
           lastTokenUsage.regularInputTokens = breakdown.input_tokens || 0;
           lastTokenUsage.cacheCreationTokens = breakdown.cache_creation_input_tokens || 0;
           lastTokenUsage.cacheReadTokens = breakdown.cache_read_input_tokens || 0;
+        }
+
+        // Extract Ollama-specific metrics if available
+        if ((chunk as any).ollama_metrics) {
+          lastTokenUsage.ollamaMetrics = (chunk as any).ollama_metrics;
         }
 
         // Update cumulative token count by REPLACING (not adding)
@@ -1869,6 +1891,20 @@ export class MCPClient {
               lastTokenUsage.regularInputTokens,
               lastTokenUsage.cacheCreationTokens,
               lastTokenUsage.cacheReadTokens
+            );
+            lastTokenUsage = null; // Reset after logging
+            tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
+          } else if (this.modelProvider.getProviderName() === 'ollama' && lastTokenUsage) {
+            // Ollama: use exact counts from API with Ollama-specific metrics
+            const totalTokens = lastTokenUsage.inputTokens + lastTokenUsage.outputTokens;
+            this.chatHistoryManager.addTokenUsagePerCallback(
+              lastTokenUsage.inputTokens,
+              lastTokenUsage.outputTokens,
+              totalTokens,
+              undefined, // regularInputTokens - not applicable for Ollama
+              undefined, // cacheCreationTokens - not applicable for Ollama
+              undefined, // cacheReadTokens - not applicable for Ollama
+              lastTokenUsage.ollamaMetrics
             );
             lastTokenUsage = null; // Reset after logging
             tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
@@ -2009,6 +2045,20 @@ export class MCPClient {
             lastTokenUsage.regularInputTokens,
             lastTokenUsage.cacheCreationTokens,
             lastTokenUsage.cacheReadTokens
+          );
+          lastTokenUsage = null; // Reset after logging
+          tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
+        } else if (this.modelProvider.getProviderName() === 'ollama' && lastTokenUsage) {
+          // Ollama: use exact counts from API with Ollama-specific metrics
+          const totalTokens = lastTokenUsage.inputTokens + lastTokenUsage.outputTokens;
+          this.chatHistoryManager.addTokenUsagePerCallback(
+            lastTokenUsage.inputTokens,
+            lastTokenUsage.outputTokens,
+            totalTokens,
+            undefined,
+            undefined,
+            undefined,
+            lastTokenUsage.ollamaMetrics
           );
           lastTokenUsage = null; // Reset after logging
           tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
@@ -2272,7 +2322,8 @@ export class MCPClient {
           totalTokens,
           lastTokenUsage.regularInputTokens,
           lastTokenUsage.cacheCreationTokens,
-          lastTokenUsage.cacheReadTokens
+          lastTokenUsage.cacheReadTokens,
+          lastTokenUsage.ollamaMetrics
         );
       }
 
@@ -2428,7 +2479,8 @@ export class MCPClient {
               totalTokens,
               continueLastTokenUsage.regularInputTokens,
               continueLastTokenUsage.cacheCreationTokens,
-              continueLastTokenUsage.cacheReadTokens
+              continueLastTokenUsage.cacheReadTokens,
+              continueLastTokenUsage.ollamaMetrics
             );
           }
         }

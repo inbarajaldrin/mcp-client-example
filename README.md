@@ -10,8 +10,9 @@ This is a CLI client that can be used to interact with any MCP server and its to
 - **Python 3.x** - Required for Python-based MCP servers (most common)
 - **ANTHROPIC_API_KEY** - Get one from [Anthropic](https://console.anthropic.com/) (required for Anthropic provider)
 - **OPENAI_API_KEY** - Get one from [OpenAI](https://platform.openai.com/api-keys) (required for OpenAI provider)
+- **Ollama** - Install from [ollama.ai](https://ollama.ai/) (required for Ollama provider - local LLMs, no API key needed)
 
-> **Note:** The client works with any MCP server (Python, Node.js, or other). You only need API keys for the AI model provider you choose to use (Anthropic or OpenAI).
+> **Note:** The client works with any MCP server (Python, Node.js, or other). You only need API keys for cloud providers (Anthropic or OpenAI). For local LLMs, use the Ollama provider with no API key required.
 
 ## How to use
 
@@ -24,8 +25,8 @@ This is a CLI client that can be used to interact with any MCP server and its to
 - `--list-servers` - List all configured servers
 
 **Model Selection:**
-- `--provider <name>` - Select AI provider (`anthropic` or `openai`, default: `anthropic`)
-- `--model <model-id>` - Specify a specific model (e.g., `gpt-4o`, `claude-sonnet-4-20250514`)
+- `--provider <name>` - Select AI provider (`anthropic`, `openai`, or `ollama`, default: `anthropic`)
+- `--model <model-id>` - Specify a specific model (e.g., `gpt-4o`, `claude-sonnet-4-20250514`, `qwen2.5:7b`)
 - `--select-model` - Interactive model selection
 - `--list-models` - List available models for a provider
 
@@ -43,9 +44,42 @@ npx mcp-client --server="my-server" --provider=openai
 # Use a specific model
 npx mcp-client --server="my-server" --provider=openai --model="gpt-4o"
 
+# Use Ollama for local LLM inference
+npx mcp-client --all --provider=ollama --model=qwen2.5:7b
+
 # Use multiple servers
 npx mcp-client --servers server1 server2 --provider=anthropic
 ```
+
+### Ollama Provider (Local LLMs)
+
+For local LLM inference, use the Ollama provider.
+
+```bash
+# Start Ollama server (default: http://localhost:11434)
+ollama serve
+
+# Use with MCP client
+npx mcp-client --all --provider=ollama --model=llama3.2:latest
+
+# List available Ollama models
+npx mcp-client --provider=ollama --list-models
+```
+
+**Custom Ollama Host:**
+
+By default, the client connects to `http://localhost:11434`. To use a remote Ollama server or a different port, set the `OLLAMA_HOST` environment variable:
+
+```bash
+# Connect to Ollama on a different machine
+export OLLAMA_HOST=http://192.168.1.100:11434
+npx mcp-client --all --provider=ollama --model=qwen2.5:7b
+
+# Or inline for a single command
+OLLAMA_HOST=http://my-server:11434 npx mcp-client --all --provider=ollama
+```
+
+> **Note:** Ensure the remote Ollama server allows connections from your machine. You may need to start Ollama with `OLLAMA_HOST=0.0.0.0 ollama serve` on the remote machine to accept external connections.
 
 ### Configuration File
 

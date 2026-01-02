@@ -1,0 +1,886 @@
+/**
+ * Ollama Provider for MCP Client
+ * 
+ * This provider implementation was inspired by and references the excellent
+ * mcp-client-for-ollama project by jonigl:
+ * https://github.com/jonigl/mcp-client-for-ollama
+ */
+
+import { Ollama } from 'ollama';
+import type {
+  ModelProvider,
+  TokenCounter,
+  Tool,
+  Message,
+  TokenUsage,
+  SummarizationConfig,
+  MessageStreamEvent,
+  ModelInfo,
+} from '../model-provider.js';
+
+// Default Ollama host
+const DEFAULT_OLLAMA_HOST = 'http://localhost:11434';
+const DEFAULT_MODEL = 'llama3.2:latest';
+
+// Ollama-specific metrics (nanoseconds for durations)
+export interface OllamaMetrics {
+  totalDuration?: number;      // nanoseconds
+  loadDuration?: number;       // nanoseconds
+  evalDuration?: number;       // nanoseconds
+  promptEvalDuration?: number; // nanoseconds
+  evalCount?: number;          // output tokens
+  promptEvalCount?: number;    // input tokens
+  evalRate?: number;           // tokens/second
+  promptEvalRate?: number;     // tokens/second
+}
+
+// Tool Executor Type - function that executes tools on your system
+export type ToolExecutor = (
+  toolName: string,
+  toolInput: Record<string, any>,
+) => Promise<string>;
+
+// Ollama Token Counter Implementation
+export class OllamaTokenCounter implements TokenCounter {
+  private maxTokens: number;
+  private modelName: string;
+  private config: SummarizationConfig;
+  private currentTokenCount: number = 0;
+
+  constructor(
+    modelName: string,
+    config: Partial<SummarizationConfig> = {},
+    contextWindow: number = 4096,
+  ) {
+    this.modelName = modelName;
+    this.maxTokens = contextWindow;
+
+    this.config = {
+      threshold: 80, // Default: summarize at 80% of context window
+      recentMessagesToKeep: 10, // Default: keep last 10 messages
+      enabled: true,
+      ...config,
+    };
+  }
+
+  // Ollama doesn't provide a token counting API, so we estimate
+  // Average English word is ~4 characters, average token is ~4 characters
+  countTokens(text: string): number {
+    // Simple estimation: ~4 characters per token (rough approximation)
+    return Math.ceil(text.length / 4);
+  }
+
+  countMessageTokens(message: { role: string; content: string }): number {
+    const roleTokens = this.countTokens(message.role);
+    const contentTokens = this.countTokens(message.content);
+    // Add overhead for message structure (approximately 4 tokens)
+    return roleTokens + contentTokens + 4;
+  }
+
+  // Update token count from Ollama's actual metrics
+  updateFromMetrics(evalCount: number, promptEvalCount: number): void {
+    this.currentTokenCount = evalCount + promptEvalCount;
+  }
+
+  getUsage(currentTokens: number): TokenUsage {
+    const percentage = (currentTokens / this.maxTokens) * 100;
+
+    let suggestion: 'continue' | 'warn' | 'break';
+    if (percentage < 60) {
+      suggestion = 'continue';
+    } else if (percentage < 80) {
+      suggestion = 'warn';
+    } else {
+      suggestion = 'break';
+    }
+
+    return {
+      current: currentTokens,
+      limit: this.maxTokens,
+      percentage: Math.round(percentage * 100) / 100,
+      suggestion,
+    };
+  }
+
+  shouldSummarize(currentTokens: number): boolean {
+    if (!this.config.enabled) {
+      return false;
+    }
+
+    const usage = this.getUsage(currentTokens);
+    return usage.percentage >= this.config.threshold;
+  }
+
+  getContextWindow(): number {
+    return this.maxTokens;
+  }
+
+  getModelName(): string {
+    return this.modelName;
+  }
+
+  updateModel(modelName: string, contextWindow?: number): void {
+    this.modelName = modelName;
+    if (contextWindow) {
+      this.maxTokens = contextWindow;
+    }
+  }
+
+  getConfig(): SummarizationConfig {
+    return { ...this.config };
+  }
+
+  updateConfig(config: Partial<SummarizationConfig>): void {
+    this.config = { ...this.config, ...config };
+  }
+}
+
+// Ollama Provider Implementation
+export class OllamaProvider implements ModelProvider {
+  private ollamaClient: Ollama;
+  private contextWindowCache: Map<string, number> = new Map();
+  private modelCapabilitiesCache: Map<string, string[]> = new Map();
+  private host: string;
+
+  constructor(host?: string) {
+    this.host = host || process.env.OLLAMA_HOST || DEFAULT_OLLAMA_HOST;
+    this.ollamaClient = new Ollama({ host: this.host });
+  }
+
+  getProviderName(): string {
+    return 'ollama';
+  }
+
+  getDefaultModel(): string {
+    return DEFAULT_MODEL;
+  }
+
+  getContextWindow(model: string): number {
+    // Return cached value if available
+    if (this.contextWindowCache.has(model)) {
+      const cached = this.contextWindowCache.get(model)!;
+      // Many models have small defaults (4096) but support much larger contexts
+      // Use at least 32768 for tool calling to ensure all tools fit
+      return Math.max(cached, 32768);
+    }
+    // Default fallback - use 32768 for tool calling support
+    return 32768;
+  }
+
+  getToolType(): any {
+    return undefined;
+  }
+
+  /**
+   * Check if Ollama server is running
+   */
+  async isServerRunning(): Promise<boolean> {
+    try {
+      await this.ollamaClient.list();
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Check if a model supports thinking mode
+   */
+  async supportsThinkingMode(model: string): Promise<boolean> {
+    try {
+      // Check cache first
+      if (this.modelCapabilitiesCache.has(model)) {
+        const capabilities = this.modelCapabilitiesCache.get(model)!;
+        return capabilities.includes('thinking');
+      }
+
+      // Fetch model info
+      const modelInfo = await this.ollamaClient.show({ model });
+      
+      // Extract capabilities from model info
+      const capabilities: string[] = [];
+      if (modelInfo && typeof modelInfo === 'object') {
+        // Check for capabilities field
+        if ('capabilities' in modelInfo && Array.isArray((modelInfo as any).capabilities)) {
+          capabilities.push(...(modelInfo as any).capabilities);
+        }
+      }
+      
+      // Cache capabilities
+      this.modelCapabilitiesCache.set(model, capabilities);
+      
+      return capabilities.includes('thinking');
+    } catch {
+      return false;
+    }
+  }
+
+  /**
+   * Fetch and cache model information
+   */
+  private async fetchModelInfo(model: string): Promise<void> {
+    try {
+      const modelInfo = await this.ollamaClient.show({ model });
+      
+      // Extract context window from model info
+      // Ollama stores this in modelfile parameters or model_info
+      if (modelInfo) {
+        let contextWindow = 4096; // Default
+        
+        // Try to extract from modelfile or parameters
+        if ('modelfile' in modelInfo && typeof (modelInfo as any).modelfile === 'string') {
+          const modelfile = (modelInfo as any).modelfile;
+          // Look for num_ctx parameter
+          const ctxMatch = modelfile.match(/num_ctx\s+(\d+)/i);
+          if (ctxMatch) {
+            contextWindow = parseInt(ctxMatch[1], 10);
+          }
+        }
+        
+        // Try model_info field
+        if ('model_info' in modelInfo && typeof (modelInfo as any).model_info === 'object') {
+          const info = (modelInfo as any).model_info;
+          // Common fields for context length
+          if (info['context_length']) {
+            contextWindow = info['context_length'];
+          } else if (info['llama.context_length']) {
+            contextWindow = info['llama.context_length'];
+          }
+        }
+        
+        this.contextWindowCache.set(model, contextWindow);
+        
+        // Also cache capabilities
+        const capabilities: string[] = [];
+        if ('capabilities' in modelInfo && Array.isArray((modelInfo as any).capabilities)) {
+          capabilities.push(...(modelInfo as any).capabilities);
+        }
+        this.modelCapabilitiesCache.set(model, capabilities);
+      }
+    } catch (error) {
+      // Use default if we can't fetch model info
+      this.contextWindowCache.set(model, 4096);
+    }
+  }
+
+  async createTokenCounter(
+    model: string,
+    config?: Partial<SummarizationConfig>,
+  ): Promise<TokenCounter> {
+    // Ensure we have context window for this model
+    if (!this.contextWindowCache.has(model)) {
+      await this.fetchModelInfo(model);
+    }
+    
+    const contextWindow = this.contextWindowCache.get(model) || 4096;
+    return new OllamaTokenCounter(model, config, contextWindow);
+  }
+
+  /**
+   * List available models from Ollama
+   */
+  async listAvailableModels(): Promise<ModelInfo[]> {
+    try {
+      const response = await this.ollamaClient.list();
+      
+      const models: ModelInfo[] = [];
+      
+      if (response && response.models) {
+        for (const model of response.models) {
+          // Fetch context window for each model
+          if (!this.contextWindowCache.has(model.name)) {
+            await this.fetchModelInfo(model.name);
+          }
+          
+          const contextWindow = this.contextWindowCache.get(model.name);
+          const capabilities = this.modelCapabilitiesCache.get(model.name) || [];
+          
+          models.push({
+            id: model.name,
+            name: model.name,
+            description: `Size: ${this.formatBytes(model.size)}`,
+            contextWindow,
+            capabilities: ['text', 'tools', ...capabilities],
+          });
+        }
+      }
+      
+      return models;
+    } catch (error) {
+      throw new Error(
+        `Failed to fetch models from Ollama. Is Ollama running at ${this.host}? Error: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+
+  /**
+   * Format bytes to human-readable string
+   */
+  private formatBytes(bytes: number): string {
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let unitIndex = 0;
+    let size = bytes;
+    
+    while (size >= 1024 && unitIndex < units.length - 1) {
+      size /= 1024;
+      unitIndex++;
+    }
+    
+    return `${size.toFixed(1)} ${units[unitIndex]}`;
+  }
+
+  /**
+   * Convert generic Tool[] to Ollama tool format
+   */
+  private convertToolsToOllamaFormat(tools: Tool[]): any[] {
+    return tools.map((tool) => ({
+      type: 'function',
+      function: {
+        name: tool.name,
+        description: tool.description,
+        parameters: tool.input_schema,
+      },
+    }));
+  }
+
+  /**
+   * Convert generic Message[] to Ollama message format
+   */
+  private convertToOllamaMessages(messages: Message[]): any[] {
+    return messages.map((msg) => {
+      // Handle tool result messages - Ollama expects tool_name, not tool_call_id
+      if (msg.role === 'tool') {
+        return {
+          role: 'tool',
+          content: msg.content || '',
+          // Ollama uses tool_name to identify which tool the result is for
+          ...(msg.tool_name && { tool_name: msg.tool_name }),
+        };
+      }
+
+      // Handle assistant messages with tool_calls
+      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        return {
+          role: 'assistant',
+          content: msg.content || '',
+          tool_calls: msg.tool_calls.map((tc) => ({
+            id: tc.id,
+            type: 'function',
+            function: {
+              name: tc.name,
+              // Ollama expects arguments as an object, not a string
+              arguments: typeof tc.arguments === 'string' 
+                ? JSON.parse(tc.arguments) 
+                : tc.arguments,
+            },
+          })),
+        };
+      }
+
+      // Handle user messages with content_blocks (for attachments)
+      if (msg.role === 'user' && msg.content_blocks && Array.isArray(msg.content_blocks)) {
+        // Ollama supports images via base64
+        const images: string[] = [];
+        let textContent = '';
+        
+        for (const block of msg.content_blocks) {
+          if (block.type === 'image' && block.source?.data) {
+            images.push(block.source.data);
+          } else if (block.type === 'text') {
+            textContent += block.text || '';
+          }
+        }
+        
+        const result: any = {
+          role: 'user',
+          content: textContent || msg.content || '',
+        };
+        
+        if (images.length > 0) {
+          result.images = images;
+        }
+        
+        return result;
+      }
+
+      // Standard messages (user or assistant without tool_calls)
+      return {
+        role: msg.role,
+        content: msg.content || '',
+      };
+    });
+  }
+
+  /**
+   * Extract Ollama metrics from a response chunk
+   */
+  private extractMetrics(chunk: any): OllamaMetrics | null {
+    if (!chunk || !chunk.done) {
+      return null;
+    }
+
+    const metrics: OllamaMetrics = {};
+
+    if (chunk.total_duration !== undefined) {
+      metrics.totalDuration = chunk.total_duration;
+    }
+    if (chunk.load_duration !== undefined) {
+      metrics.loadDuration = chunk.load_duration;
+    }
+    if (chunk.prompt_eval_count !== undefined) {
+      metrics.promptEvalCount = chunk.prompt_eval_count;
+    }
+    if (chunk.prompt_eval_duration !== undefined) {
+      metrics.promptEvalDuration = chunk.prompt_eval_duration;
+      // Calculate prompt eval rate (tokens/second)
+      const promptDuration = metrics.promptEvalDuration;
+      if (metrics.promptEvalCount && promptDuration && promptDuration > 0) {
+        metrics.promptEvalRate = metrics.promptEvalCount / (promptDuration / 1_000_000_000);
+      }
+    }
+    if (chunk.eval_count !== undefined) {
+      metrics.evalCount = chunk.eval_count;
+    }
+    if (chunk.eval_duration !== undefined) {
+      metrics.evalDuration = chunk.eval_duration;
+      // Calculate eval rate (tokens/second)
+      const evalDuration = metrics.evalDuration;
+      if (metrics.evalCount && evalDuration && evalDuration > 0) {
+        metrics.evalRate = metrics.evalCount / (evalDuration / 1_000_000_000);
+      }
+    }
+
+    return Object.keys(metrics).length > 0 ? metrics : null;
+  }
+
+  /**
+   * Create a streaming message completion
+   */
+  async *createMessageStream(
+    messages: Message[],
+    model: string,
+    tools: Tool[],
+    maxTokens: number,
+  ): AsyncIterable<MessageStreamEvent> {
+    // Ensure context window is cached for this model
+    if (!this.contextWindowCache.has(model)) {
+      await this.fetchModelInfo(model);
+    }
+    
+    const ollamaMessages = this.convertToOllamaMessages(messages);
+    const ollamaTools = tools.length > 0 ? this.convertToolsToOllamaFormat(tools) : undefined;
+
+    const stream = await this.ollamaClient.chat({
+      model,
+      messages: ollamaMessages,
+      tools: ollamaTools,
+      stream: true,
+      options: {
+        num_predict: maxTokens,
+        num_ctx: this.getContextWindow(model), // Use model's actual context window
+      },
+    });
+
+    let messageStarted = false;
+    const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
+
+    for await (const chunk of stream) {
+      if (!messageStarted) {
+        yield { type: 'message_start' } as MessageStreamEvent;
+        messageStarted = true;
+      }
+
+      // Handle thinking content
+      if (chunk.message?.thinking) {
+        yield {
+          type: 'content_block_delta',
+          delta: {
+            type: 'thinking_delta',
+            thinking: chunk.message.thinking,
+          },
+        } as MessageStreamEvent;
+      }
+
+      // Handle regular content
+      if (chunk.message?.content) {
+        yield {
+          type: 'content_block_delta',
+          delta: {
+            type: 'text_delta',
+            text: chunk.message.content,
+          },
+        } as MessageStreamEvent;
+      }
+
+      // Handle tool calls
+      if (chunk.message?.tool_calls && chunk.message.tool_calls.length > 0) {
+        for (let i = 0; i < chunk.message.tool_calls.length; i++) {
+          const toolCall = chunk.message.tool_calls[i];
+          
+          if (!toolCallTracker.has(i)) {
+            toolCallTracker.set(i, { arguments: '' });
+            
+            // Emit tool use start
+            yield {
+              type: 'content_block_start',
+              content_block: {
+                type: 'tool_use',
+                name: toolCall.function?.name,
+                id: `ollama_tool_${Date.now()}_${i}`,
+              },
+            } as MessageStreamEvent;
+          }
+          
+          const tracker = toolCallTracker.get(i)!;
+          if (!tracker.name && toolCall.function?.name) {
+            tracker.name = toolCall.function.name;
+          }
+          if (!tracker.id) {
+            tracker.id = `ollama_tool_${Date.now()}_${i}`;
+          }
+          
+          // Emit tool arguments
+          if (toolCall.function?.arguments) {
+            const argsStr = typeof toolCall.function.arguments === 'string'
+              ? toolCall.function.arguments
+              : JSON.stringify(toolCall.function.arguments);
+            
+            yield {
+              type: 'content_block_delta',
+              delta: {
+                type: 'input_json_delta',
+                partial_json: argsStr,
+              },
+            } as MessageStreamEvent;
+          }
+        }
+      }
+
+      // Handle completion with metrics
+      if (chunk.done) {
+        const metrics = this.extractMetrics(chunk);
+        
+        // Determine stop reason
+        const hasToolCalls = toolCallTracker.size > 0;
+        const stopReason = hasToolCalls ? 'tool_use' : 'end_turn';
+        
+        yield {
+          type: 'message_delta',
+          delta: {
+            stop_reason: stopReason,
+          },
+        } as MessageStreamEvent;
+
+        // Emit token usage with Ollama metrics
+        if (metrics) {
+          yield {
+            type: 'token_usage',
+            input_tokens: metrics.promptEvalCount || 0,
+            output_tokens: metrics.evalCount || 0,
+            ollama_metrics: metrics,
+          } as MessageStreamEvent;
+        }
+
+        yield { type: 'message_stop' } as MessageStreamEvent;
+      }
+    }
+  }
+
+  /**
+   * Agentic loop with tool use support
+   */
+  async *createMessageStreamWithToolUse(
+    messages: Message[],
+    model: string,
+    tools: Tool[],
+    maxTokens: number,
+    toolExecutor: ToolExecutor,
+    maxIterations: number = 10,
+    cancellationCheck?: () => boolean,
+    thinkingMode: boolean = false,
+  ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
+    // Ensure context window is cached for this model
+    if (!this.contextWindowCache.has(model)) {
+      await this.fetchModelInfo(model);
+    }
+    
+    const ollamaTools = tools.length > 0 ? this.convertToolsToOllamaFormat(tools) : undefined;
+    
+    // Debug: log tool count and context window
+    if (process.env.VERBOSE_LOGGING) {
+      console.log(`[Ollama] Context window for ${model}: ${this.getContextWindow(model)}`);
+    }
+    if (process.env.VERBOSE_LOGGING) {
+      console.log(`[Ollama] Sending ${tools.length} tools to model ${model}`);
+      // List all tool names
+      const toolNames = tools.map(t => t.name);
+      console.log(`[Ollama] All tools: ${toolNames.join(', ')}`);
+      if (ollamaTools && ollamaTools.length > 0) {
+        console.log(`[Ollama] First tool: ${JSON.stringify(ollamaTools[0], null, 2)}`);
+      }
+    }
+
+    let conversationMessages = [...messages];
+    let iterations = 0;
+    let hasPendingToolResults = false;
+
+    while (true) {
+      // Check for cancellation
+      if (cancellationCheck && cancellationCheck()) {
+        if (!hasPendingToolResults) {
+          break;
+        }
+      }
+
+      iterations++;
+
+      // Build chat request
+      const chatParams: any = {
+        model,
+        messages: this.convertToOllamaMessages(conversationMessages),
+        tools: ollamaTools,
+        stream: true,
+        options: {
+          num_predict: maxTokens,
+          num_ctx: this.getContextWindow(model), // Use model's actual context window
+        },
+      };
+
+      // Add thinking mode if supported
+      if (thinkingMode) {
+        chatParams.think = true;
+      }
+
+      // Debug: log request details
+      if (process.env.VERBOSE_LOGGING) {
+        console.log(`[Ollama] Chat request:`, JSON.stringify({
+          model: chatParams.model,
+          messageCount: chatParams.messages.length,
+          toolCount: chatParams.tools?.length || 0,
+        }));
+        // Log the last few messages to debug tool result format
+        const lastMessages = chatParams.messages.slice(-3);
+        console.log(`[Ollama] Last messages:`, JSON.stringify(lastMessages, null, 2));
+      }
+
+      let stream;
+      try {
+        stream = await this.ollamaClient.chat(chatParams);
+      } catch (error) {
+        console.error(`[Ollama] Error calling chat API:`, error);
+        throw error;
+      }
+
+      let messageStarted = false;
+      let assistantContent = '';
+      let thinkingContent = '';
+      const toolCalls: Array<{ id: string; name: string; arguments: any }> = [];
+      let metrics: OllamaMetrics | null = null;
+
+      // Stream response
+      for await (const chunk of stream) {
+        // Debug: log first chunk
+        if (process.env.VERBOSE_LOGGING && !messageStarted) {
+          console.log(`[Ollama] First chunk:`, JSON.stringify(chunk, null, 2).substring(0, 500));
+        }
+        
+        if (!messageStarted) {
+          yield { type: 'message_start' } as MessageStreamEvent;
+          messageStarted = true;
+        }
+
+        // Handle thinking content
+        if (chunk.message?.thinking) {
+          thinkingContent += chunk.message.thinking;
+          yield {
+            type: 'content_block_delta',
+            delta: {
+              type: 'thinking_delta',
+              thinking: chunk.message.thinking,
+            },
+          } as MessageStreamEvent;
+        }
+
+        // Handle regular content
+        if (chunk.message?.content) {
+          assistantContent += chunk.message.content;
+          yield {
+            type: 'content_block_delta',
+            delta: {
+              type: 'text_delta',
+              text: chunk.message.content,
+            },
+          } as MessageStreamEvent;
+        }
+
+        // Handle tool calls
+        if (chunk.message?.tool_calls && chunk.message.tool_calls.length > 0) {
+          for (let i = 0; i < chunk.message.tool_calls.length; i++) {
+            const toolCall = chunk.message.tool_calls[i];
+            const toolId = `ollama_tool_${Date.now()}_${i}`;
+            
+            // Check if we already have this tool call
+            if (toolCalls.length <= i) {
+              toolCalls.push({
+                id: toolId,
+                name: toolCall.function?.name || '',
+                arguments: toolCall.function?.arguments || {},
+              });
+              
+              yield {
+                type: 'content_block_start',
+                content_block: {
+                  type: 'tool_use',
+                  name: toolCall.function?.name,
+                  id: toolId,
+                },
+              } as MessageStreamEvent;
+              
+              if (toolCall.function?.arguments) {
+                const argsStr = typeof toolCall.function.arguments === 'string'
+                  ? toolCall.function.arguments
+                  : JSON.stringify(toolCall.function.arguments);
+                
+                yield {
+                  type: 'content_block_delta',
+                  delta: {
+                    type: 'input_json_delta',
+                    partial_json: argsStr,
+                  },
+                } as MessageStreamEvent;
+              }
+            }
+          }
+        }
+
+        // Handle completion
+        if (chunk.done) {
+          metrics = this.extractMetrics(chunk);
+          
+          const stopReason = toolCalls.length > 0 ? 'tool_use' : 'end_turn';
+          
+          yield {
+            type: 'message_delta',
+            delta: {
+              stop_reason: stopReason,
+            },
+          } as MessageStreamEvent;
+
+          if (metrics) {
+            yield {
+              type: 'token_usage',
+              input_tokens: metrics.promptEvalCount || 0,
+              output_tokens: metrics.evalCount || 0,
+              ollama_metrics: metrics,
+            } as MessageStreamEvent;
+          }
+
+          yield { type: 'message_stop' } as MessageStreamEvent;
+        }
+      }
+
+      // Add assistant message to conversation
+      conversationMessages.push({
+        role: 'assistant',
+        content: assistantContent,
+        tool_calls: toolCalls.length > 0 ? toolCalls.map(tc => ({
+          id: tc.id,
+          name: tc.name,
+          arguments: typeof tc.arguments === 'string' ? tc.arguments : JSON.stringify(tc.arguments),
+        })) : undefined,
+      });
+
+      // If cancelled and pending results sent, break
+      if (hasPendingToolResults && cancellationCheck && cancellationCheck()) {
+        break;
+      }
+
+      hasPendingToolResults = false;
+
+      // If no tool calls, we're done
+      if (toolCalls.length === 0) {
+        break;
+      }
+
+      // Execute tools
+      for (const toolCall of toolCalls) {
+        try {
+          const toolInput = typeof toolCall.arguments === 'string'
+            ? JSON.parse(toolCall.arguments)
+            : toolCall.arguments;
+          
+          const result = await toolExecutor(toolCall.name, toolInput);
+
+          yield {
+            type: 'tool_use_complete',
+            toolName: toolCall.name,
+            toolUseId: toolCall.id,
+            toolInput,
+            result,
+          };
+
+          // Add tool result to conversation - Ollama uses tool_name, not tool_call_id
+          conversationMessages.push({
+            role: 'tool',
+            tool_name: toolCall.name,
+            content: result,
+          });
+        } catch (error) {
+          const errorMessage = `Error executing tool: ${error instanceof Error ? error.message : String(error)}`;
+          
+          yield {
+            type: 'tool_use_complete',
+            toolName: toolCall.name,
+            toolUseId: toolCall.id,
+            toolInput: toolCall.arguments,
+            result: errorMessage,
+          };
+
+          conversationMessages.push({
+            role: 'tool',
+            tool_name: toolCall.name,
+            content: errorMessage,
+          });
+        }
+      }
+
+      hasPendingToolResults = true;
+    }
+  }
+
+  /**
+   * Create a non-streaming message (for summarization)
+   */
+  async createMessage(
+    messages: Message[],
+    model: string,
+    maxTokens: number,
+  ): Promise<{ content: Array<{ type: string; text: string }> }> {
+    // Ensure context window is cached for this model
+    if (!this.contextWindowCache.has(model)) {
+      await this.fetchModelInfo(model);
+    }
+    
+    const ollamaMessages = this.convertToOllamaMessages(messages);
+
+    const response = await this.ollamaClient.chat({
+      model,
+      messages: ollamaMessages,
+      stream: false,
+      options: {
+        num_predict: maxTokens,
+        num_ctx: this.getContextWindow(model), // Use model's actual context window
+      },
+    });
+
+    return {
+      content: [
+        {
+          type: 'text',
+          text: response.message?.content || '',
+        },
+      ],
+    };
+  }
+}
+

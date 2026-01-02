@@ -12,6 +12,7 @@ export interface Message {
   role: 'user' | 'assistant' | 'tool';
   content: string;
   tool_call_id?: string; // For OpenAI tool result messages
+  tool_name?: string; // For Ollama tool result messages
   tool_calls?: ToolCall[]; // For assistant messages that contain tool calls (OpenAI-specific)
   tool_results?: Array<{ // For Anthropic tool result messages
     type: 'tool_result';

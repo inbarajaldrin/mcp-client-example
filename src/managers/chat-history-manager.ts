@@ -70,6 +70,17 @@ export interface ChatSession {
     cacheCreationTokens?: number; // Cache creation input tokens (full price)
     cacheReadTokens?: number; // Cache read tokens (90% discount)
     estimatedCost?: number; // Estimated cost in USD for this callback
+    // Ollama-specific metrics (optional, for local LLM providers)
+    ollamaMetrics?: {
+      totalDuration?: number;      // nanoseconds
+      loadDuration?: number;       // nanoseconds
+      evalDuration?: number;       // nanoseconds
+      promptEvalDuration?: number; // nanoseconds
+      evalCount?: number;          // output tokens (also stored in outputTokens)
+      promptEvalCount?: number;    // input tokens (also stored in inputTokens)
+      evalRate?: number;           // tokens/second
+      promptEvalRate?: number;     // tokens/second
+    };
   }>;
   metadata: {
     totalTokens?: number;
@@ -417,7 +428,17 @@ export class ChatHistoryManager {
     totalTokens: number,
     regularInputTokens?: number,
     cacheCreationTokens?: number,
-    cacheReadTokens?: number
+    cacheReadTokens?: number,
+    ollamaMetrics?: {
+      totalDuration?: number;
+      loadDuration?: number;
+      evalDuration?: number;
+      promptEvalDuration?: number;
+      evalCount?: number;
+      promptEvalCount?: number;
+      evalRate?: number;
+      promptEvalRate?: number;
+    }
   ): void {
     if (!this.currentSession) return;
 
@@ -425,9 +446,9 @@ export class ChatHistoryManager {
       this.currentSession.tokenUsagePerCallback = [];
     }
 
-    // Calculate estimated cost for this callback
+    // Calculate estimated cost for this callback (skip for Ollama - no cost for local LLMs)
     let estimatedCost: number | undefined;
-    if (regularInputTokens !== undefined || cacheCreationTokens !== undefined || cacheReadTokens !== undefined) {
+    if (!ollamaMetrics && (regularInputTokens !== undefined || cacheCreationTokens !== undefined || cacheReadTokens !== undefined)) {
       // Calculate total input tokens for long context pricing detection
       const totalInputTokens = (regularInputTokens || 0) + (cacheCreationTokens || 0) + (cacheReadTokens || 0);
       
@@ -456,6 +477,7 @@ export class ChatHistoryManager {
       cacheCreationTokens,
       cacheReadTokens,
       estimatedCost,
+      ollamaMetrics,
     });
   }
 
@@ -665,6 +687,33 @@ export class ChatHistoryManager {
             md += `, Cost: $${tokenUsage.estimatedCost.toFixed(6)}`;
           }
 
+          // Add Ollama metrics if available
+          if (tokenUsage.ollamaMetrics) {
+            const om = tokenUsage.ollamaMetrics;
+            md += `\n  - **Ollama Metrics:**`;
+            if (om.totalDuration) {
+              md += ` Total: ${(om.totalDuration / 1_000_000_000).toFixed(3)}s`;
+            }
+            if (om.loadDuration) {
+              md += `, Load: ${(om.loadDuration / 1_000_000).toFixed(2)}ms`;
+            }
+            if (om.promptEvalDuration) {
+              md += `, Prompt Eval: ${(om.promptEvalDuration / 1_000_000).toFixed(2)}ms`;
+            }
+            if (om.evalDuration) {
+              md += `, Eval: ${(om.evalDuration / 1_000_000_000).toFixed(3)}s`;
+            }
+            if (om.promptEvalRate || om.evalRate) {
+              md += `\n  - **Throughput:**`;
+              if (om.promptEvalRate) {
+                md += ` Prompt: ${om.promptEvalRate.toFixed(2)} tokens/s`;
+              }
+              if (om.evalRate) {
+                md += `, Generation: ${om.evalRate.toFixed(2)} tokens/s`;
+              }
+            }
+          }
+
           md += `\n\n`;
           tokenUsageIndex++;
         }
@@ -721,6 +770,33 @@ export class ChatHistoryManager {
         // Add estimated cost if available
         if (tokenUsage.estimatedCost !== undefined && tokenUsage.estimatedCost > 0) {
           md += `, Cost: $${tokenUsage.estimatedCost.toFixed(6)}`;
+        }
+
+        // Add Ollama metrics if available
+        if (tokenUsage.ollamaMetrics) {
+          const om = tokenUsage.ollamaMetrics;
+          md += `\n  - **Ollama Metrics:**`;
+          if (om.totalDuration) {
+            md += ` Total: ${(om.totalDuration / 1_000_000_000).toFixed(3)}s`;
+          }
+          if (om.loadDuration) {
+            md += `, Load: ${(om.loadDuration / 1_000_000).toFixed(2)}ms`;
+          }
+          if (om.promptEvalDuration) {
+            md += `, Prompt Eval: ${(om.promptEvalDuration / 1_000_000).toFixed(2)}ms`;
+          }
+          if (om.evalDuration) {
+            md += `, Eval: ${(om.evalDuration / 1_000_000_000).toFixed(3)}s`;
+          }
+          if (om.promptEvalRate || om.evalRate) {
+            md += `\n  - **Throughput:**`;
+            if (om.promptEvalRate) {
+              md += ` Prompt: ${om.promptEvalRate.toFixed(2)} tokens/s`;
+            }
+            if (om.evalRate) {
+              md += `, Generation: ${om.evalRate.toFixed(2)} tokens/s`;
+            }
+          }
         }
 
         md += `\n\n`;

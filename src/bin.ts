@@ -9,6 +9,7 @@ import dotenv from 'dotenv';
 import readline from 'readline';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { OpenAIProvider } from './providers/openai.js';
+import { OllamaProvider } from './providers/ollama.js';
 import type { ModelProvider, ModelInfo } from './model-provider.js';
 
 // Load .env file from mcp-client directory
@@ -361,8 +362,11 @@ function checkRequiredEnvVars(provider?: string) {
       console.error('  export ANTHROPIC_API_KEY=your_key_here');
       process.exit(1);
     }
+  } else if (providerName === 'ollama') {
+    // Ollama doesn't require an API key - it's local
+    // We'll check if the server is running later
   } else {
-    console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai`);
+    console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai, ollama`);
     process.exit(1);
   }
 }
@@ -379,10 +383,63 @@ function createProvider(providerName?: string): ModelProvider | undefined {
       return new AnthropicProvider();
     case 'openai':
       return new OpenAIProvider();
+    case 'ollama':
+      // Use OLLAMA_HOST env var or default to localhost:11434
+      return new OllamaProvider(process.env.OLLAMA_HOST);
     default:
-      console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai`);
+      console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai, ollama`);
       process.exit(1);
   }
+}
+
+// Check if Ollama server is running (async helper)
+async function checkOllamaServer(provider: ModelProvider): Promise<void> {
+  if (provider.getProviderName() === 'ollama') {
+    const ollamaProvider = provider as OllamaProvider;
+    const isRunning = await ollamaProvider.isServerRunning();
+    if (!isRunning) {
+      const host = process.env.OLLAMA_HOST || 'http://localhost:11434';
+      console.error('\x1b[31mError: Ollama server is not running\x1b[0m');
+      console.error(`\nCannot connect to Ollama at ${host}`);
+      console.error('\nTo start Ollama, run:');
+      console.error('  ollama serve');
+      console.error('\nTo use a different host, set the OLLAMA_HOST environment variable:');
+      console.error('  export OLLAMA_HOST=http://localhost:11434');
+      process.exit(1);
+    }
+  }
+}
+
+// Check if Ollama model supports thinking mode and prompt user
+async function checkOllamaThinkingMode(provider: ModelProvider, model: string): Promise<boolean> {
+  if (provider.getProviderName() !== 'ollama') {
+    return false;
+  }
+  
+  const ollamaProvider = provider as OllamaProvider;
+  const supportsThinking = await ollamaProvider.supportsThinkingMode(model);
+  
+  if (!supportsThinking) {
+    return false;
+  }
+  
+  // Prompt user to enable thinking mode
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+  
+  return new Promise((resolve) => {
+    console.log(`\n✨ Model "${model}" supports thinking mode.`);
+    rl.question('Enable thinking mode? (y/n) [n]: ', (answer) => {
+      rl.close();
+      const enabled = answer.trim().toLowerCase() === 'y';
+      if (enabled) {
+        console.log('Thinking mode enabled.\n');
+      }
+      resolve(enabled);
+    });
+  });
 }
 
 async function main() {
@@ -413,32 +470,37 @@ async function main() {
     const providerName = args.values['provider'];
     const provider = createProvider(providerName);
 
-    // Handle list-models command (needs API key)
+    // Handle list-models command (needs API key or Ollama server)
     if (args.values['list-models']) {
       if (!provider) {
         console.error('Error: --provider is required when listing models.');
-        console.error('Use --provider=anthropic or --provider=openai');
+        console.error('Use --provider=anthropic, --provider=openai, or --provider=ollama');
         process.exit(1);
       }
       checkRequiredEnvVars(providerName);
+      await checkOllamaServer(provider);
       await listModels(provider);
       return;
     }
 
-    // Handle select-model flag (needs API key)
+    // Handle select-model flag (needs API key or Ollama server)
     let selectedModel = args.values['model'];
     if (args.values['select-model']) {
       if (!provider) {
         console.error('Error: --provider is required when selecting models.');
-        console.error('Use --provider=anthropic or --provider=openai');
+        console.error('Use --provider=anthropic, --provider=openai, or --provider=ollama');
         process.exit(1);
       }
       checkRequiredEnvVars(providerName);
+      await checkOllamaServer(provider);
       selectedModel = await selectModel(provider);
     }
 
-    // For actual client usage, require API key
+    // For actual client usage, require API key or Ollama server
     checkRequiredEnvVars(providerName);
+    if (provider) {
+      await checkOllamaServer(provider);
+    }
 
     // Determine which server(s) to use
     const serversArg = args.values['servers'];
