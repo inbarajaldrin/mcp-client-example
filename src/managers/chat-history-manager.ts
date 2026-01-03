@@ -96,9 +96,10 @@ export interface ChatSession {
 // Sources: 
 // - Anthropic: https://www.anthropic.com/pricing (updated December 2025)
 // - OpenAI: https://platform.openai.com/docs/models (updated December 2025)
-// Note: Pricing may vary by context window size (e.g., >200K tokens for Sonnet 4.5)
+// - Google Gemini: https://ai.google.dev/gemini-api/docs/pricing (updated January 2025)
+// Note: Pricing may vary by context window size (e.g., >200K tokens for Sonnet 4.5, >128K for Gemini 1.5)
 // Cache pricing: Anthropic uses 10% of input price (90% discount), OpenAI varies by model
-const MODEL_PRICING: Record<string, { input: number; output: number; inputLongContext?: number; outputLongContext?: number; cachedInput?: number }> = {
+const MODEL_PRICING: Record<string, { input: number; output: number; inputLongContext?: number; outputLongContext?: number; cachedInput?: number; longContextThreshold?: number }> = {
   // ========== Anthropic Claude Models ==========
   // Claude 4.5 Opus
   'claude-opus-4-5-20251101': { input: 5.00, output: 25.00, cachedInput: 0.50 }, // 10% discount
@@ -170,6 +171,25 @@ const MODEL_PRICING: Record<string, { input: number; output: number; inputLongCo
   // GPT-3.5 Turbo
   'gpt-3.5-turbo': { input: 0.50, output: 1.50 },
   'gpt-3.5-turbo-16k': { input: 0.50, output: 1.50 },
+  
+  // ========== Google Gemini Models ==========
+  // Gemini 2.5 Pro (standard: 0-200K tokens, long context: >200K tokens)
+  'gemini-2.5-pro': { input: 1.25, output: 10.00, inputLongContext: 2.50, outputLongContext: 15.00, cachedInput: 0.125, longContextThreshold: 200_000 },
+  
+  // Gemini 2.5 Flash (flat pricing, no tiered pricing)
+  'gemini-2.5-flash': { input: 0.15, output: 0.60 },
+  
+  // Gemini 2.0 Flash (flat pricing, no tiered pricing)
+  'gemini-2.0-flash': { input: 0.10, output: 0.40, cachedInput: 0.025 },
+  
+  // Gemini 1.5 Pro (standard: 0-128K tokens, long context: >128K tokens)
+  'gemini-1.5-pro': { input: 1.25, output: 5.00, inputLongContext: 2.50, outputLongContext: 10.00, cachedInput: 0.625, longContextThreshold: 128_000 },
+  
+  // Gemini 1.5 Flash (standard: 0-128K tokens, long context: >128K tokens)
+  'gemini-1.5-flash': { input: 0.075, output: 0.30, inputLongContext: 0.15, outputLongContext: 0.60, longContextThreshold: 128_000 },
+  
+  // Gemini Robotics ER 1.5 Preview (flat pricing, no tiered pricing)
+  'gemini-robotics-er-1.5-preview': { input: 0.30, output: 2.50 },
 };
 
 export class ChatHistoryManager {
@@ -396,8 +416,11 @@ export class ChatHistoryManager {
       return 0;
     }
 
-    // Determine if long context pricing applies (>200K tokens for Sonnet 4.5)
-    const useLongContextPricing = totalInputTokens && totalInputTokens > 200_000 && 
+    // Determine if long context pricing applies
+    // Default threshold is 200K tokens (for Sonnet 4.5, Gemini 2.5 Pro)
+    // Gemini 1.5 models use 128K threshold
+    const threshold = pricing.longContextThreshold || 200_000;
+    const useLongContextPricing = totalInputTokens && totalInputTokens > threshold && 
                                    pricing.inputLongContext && pricing.outputLongContext;
     
     const inputPrice = useLongContextPricing ? pricing.inputLongContext! : pricing.input;

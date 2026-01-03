@@ -10,6 +10,7 @@ import readline from 'readline';
 import { AnthropicProvider } from './providers/anthropic.js';
 import { OpenAIProvider } from './providers/openai.js';
 import { OllamaProvider } from './providers/ollama.js';
+import { GeminiProvider } from './providers/gemini.js';
 import type { ModelProvider, ModelInfo } from './model-provider.js';
 
 // Load .env file from mcp-client directory
@@ -362,11 +363,20 @@ function checkRequiredEnvVars(provider?: string) {
       console.error('  export ANTHROPIC_API_KEY=your_key_here');
       process.exit(1);
     }
+  } else if (providerName === 'gemini') {
+    if (!process.env.GEMINI_API_KEY) {
+      console.error(
+        '\x1b[31mError: GEMINI_API_KEY environment variable is required for Gemini provider\x1b[0m',
+      );
+      console.error('Please set it before running the CLI:');
+      console.error('  export GEMINI_API_KEY=your_key_here');
+      process.exit(1);
+    }
   } else if (providerName === 'ollama') {
     // Ollama doesn't require an API key - it's local
     // We'll check if the server is running later
   } else {
-    console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai, ollama`);
+    console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai, gemini, ollama`);
     process.exit(1);
   }
 }
@@ -383,11 +393,13 @@ function createProvider(providerName?: string): ModelProvider | undefined {
       return new AnthropicProvider();
     case 'openai':
       return new OpenAIProvider();
+    case 'gemini':
+      return new GeminiProvider();
     case 'ollama':
       // Use OLLAMA_HOST env var or default to localhost:11434
       return new OllamaProvider(process.env.OLLAMA_HOST);
     default:
-      console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai, ollama`);
+      console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai, gemini, ollama`);
       process.exit(1);
   }
 }

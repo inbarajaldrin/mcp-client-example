@@ -10,9 +10,10 @@ This is a CLI client that can be used to interact with any MCP server and its to
 - **Python 3.x** - Required for Python-based MCP servers (most common)
 - **ANTHROPIC_API_KEY** - Get one from [Anthropic](https://console.anthropic.com/) (required for Anthropic provider)
 - **OPENAI_API_KEY** - Get one from [OpenAI](https://platform.openai.com/api-keys) (required for OpenAI provider)
+- **GEMINI_API_KEY** - Get one from [Google AI Studio](https://aistudio.google.com/apikey) (required for Gemini provider)
 - **Ollama** - Install from [ollama.ai](https://ollama.ai/) (required for Ollama provider - local LLMs, no API key needed)
 
-> **Note:** The client works with any MCP server (Python, Node.js, or other). You only need API keys for cloud providers (Anthropic or OpenAI). For local LLMs, use the Ollama provider with no API key required.
+> **Note:** The client works with any MCP server (Python, Node.js, or other). You only need API keys for cloud providers (Anthropic, OpenAI, or Gemini). For local LLMs, use the Ollama provider with no API key required.
 
 ## How to use
 
@@ -25,8 +26,8 @@ This is a CLI client that can be used to interact with any MCP server and its to
 - `--list-servers` - List all configured servers
 
 **Model Selection:**
-- `--provider <name>` - Select AI provider (`anthropic`, `openai`, or `ollama`, default: `anthropic`)
-- `--model <model-id>` - Specify a specific model (e.g., `gpt-4o`, `claude-sonnet-4-20250514`, `qwen2.5:7b`)
+- `--provider <name>` - Select AI provider (`anthropic`, `openai`, `gemini`, or `ollama`, default: `anthropic`)
+- `--model <model-id>` - Specify a specific model (e.g., `gpt-4o`, `claude-sonnet-4-20250514`, `gemini-2.5-flash`, `qwen2.5:7b`)
 - `--select-model` - Interactive model selection
 - `--list-models` - List available models for a provider
 
@@ -43,6 +44,9 @@ npx mcp-client --server="my-server" --provider=openai
 
 # Use a specific model
 npx mcp-client --server="my-server" --provider=openai --model="gpt-4o"
+
+# Use Gemini for AI inference
+npx mcp-client --all --provider=gemini --model=gemini-2.5-flash
 
 # Use Ollama for local LLM inference
 npx mcp-client --all --provider=ollama --model=qwen2.5:7b
@@ -170,6 +174,9 @@ export ANTHROPIC_API_KEY=your_anthropic_key_here
 
 # For OpenAI provider
 export OPENAI_API_KEY=your_openai_key_here
+
+# For Gemini provider
+export GEMINI_API_KEY=your_gemini_key_here
 ```
 
 2. **Create `mcp_config.json`** with your server configurations (see examples above)
@@ -619,6 +626,19 @@ export ANTHROPIC_API_KEY=your_anthropic_key_here
 export OPENAI_API_KEY=your_openai_key_here
 ```
 
+#### Gemini Provider
+
+- **Provider name:** `gemini`
+- **Default model:** `gemini-2.5-flash`
+- **Context window:** Varies by model (2.5-flash: 1M, 2.5-pro: 2M tokens)
+- **Tool format:** Uses Gemini's function declaration format
+- **Tool results:** Uses `functionResponse` parts in user messages
+
+**Environment Variable:**
+```bash
+export GEMINI_API_KEY=your_gemini_key_here
+```
+
 **Usage:**
 ```bash
 # Use OpenAI with default model (gpt-5) - all enabled servers
@@ -626,6 +646,12 @@ npx mcp-client --all --provider=openai
 
 # Use OpenAI with a specific model - single server
 npx mcp-client --server="my-server" --provider=openai --model="gpt-4o"
+
+# Use Gemini with default model
+npx mcp-client --all --provider=gemini
+
+# Use Gemini with a specific model
+npx mcp-client --server="my-server" --provider=gemini --model="gemini-2.5-pro"
 
 # Use Anthropic with a specific model
 npx mcp-client --server="my-server" --provider=anthropic --model="claude-sonnet-4-20250514"
@@ -639,7 +665,7 @@ npx mcp-client --server="my-server" --provider=anthropic --model="claude-sonnet-
 2. Copy `.env.example` to `.env` and fill in your API keys:
    ```bash
    cp .env.example .env
-   # Edit .env and add your ANTHROPIC_API_KEY and/or OPENAI_API_KEY
+   # Edit .env and add your ANTHROPIC_API_KEY, OPENAI_API_KEY, and/or GEMINI_API_KEY
    ```
 3. Run `npm install`
 4. Run `npm run build` to build the project
