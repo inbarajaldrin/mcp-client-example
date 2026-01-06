@@ -250,6 +250,56 @@ async function listModels(provider: ModelProvider): Promise<void> {
   }
 }
 
+async function selectProvider(): Promise<ModelProvider> {
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  const question = (prompt: string): Promise<string> => {
+    return new Promise((resolve) => {
+      rl.question(prompt, resolve);
+    });
+  };
+
+  try {
+    const providers = [
+      { name: 'anthropic', label: 'Anthropic (Claude)', defaultModel: 'claude-haiku-4-5-20251001' },
+      { name: 'openai', label: 'OpenAI (GPT)', defaultModel: 'gpt-5-mini' },
+      { name: 'gemini', label: 'Google Gemini', defaultModel: 'gemini-2.5-flash' },
+      { name: 'ollama', label: 'Ollama (Local LLMs)', defaultModel: 'llama3.2:3b' },
+    ];
+
+    console.log('\nAvailable providers:\n');
+    providers.forEach((provider, index) => {
+      console.log(`  ${index + 1}. ${provider.label}`);
+      console.log(`     Default model: ${provider.defaultModel}`);
+      console.log();
+    });
+
+    while (true) {
+      const answer = await question('Select a provider (1-4): ');
+      const trimmed = answer.trim();
+      
+      const num = parseInt(trimmed, 10);
+      if (num >= 1 && num <= providers.length) {
+        const selectedProviderName = providers[num - 1].name;
+        rl.close();
+        const provider = createProvider(selectedProviderName);
+        if (!provider) {
+          throw new Error(`Failed to create provider: ${selectedProviderName}`);
+        }
+        return provider;
+      }
+      
+      console.log(`Invalid selection. Please enter a number between 1 and ${providers.length}.`);
+    }
+  } catch (error) {
+    rl.close();
+    throw error;
+  }
+}
+
 async function selectModel(provider: ModelProvider): Promise<string> {
   const rl = readline.createInterface({
     input: process.stdin,
@@ -508,15 +558,18 @@ async function main() {
       selectedModel = await selectModel(provider);
     }
 
-    // For actual client usage, require API key or Ollama server
-    checkRequiredEnvVars(providerName);
-    if (provider) {
-      await checkOllamaServer(provider);
-    }
-
     // Determine which server(s) to use
     const serversArg = args.values['servers'];
     const allServers = args.values['all'];
+    
+    // For actual client usage, require API key or Ollama server
+    // Skip early check for --all mode when no provider is specified (will prompt for provider)
+    if (!(allServers && !provider)) {
+      checkRequiredEnvVars(providerName);
+      if (provider) {
+        await checkOllamaServer(provider);
+      }
+    }
     const serverName = args.values['server'] || config.defaultServer;
 
     // Handle multiple servers
@@ -554,6 +607,18 @@ async function main() {
 
     // Handle --all flag: load all servers but only connect enabled ones
     if (allServers) {
+      // If no provider is specified, prompt user to select one
+      let finalProvider = provider;
+      let finalProviderName = providerName;
+      
+      if (!finalProvider) {
+        finalProvider = await selectProvider();
+        finalProviderName = finalProvider.getProviderName();
+        // Check env vars and Ollama server for the selected provider
+        checkRequiredEnvVars(finalProviderName);
+        await checkOllamaServer(finalProvider);
+      }
+
       // Load ALL servers from mcp_config.json (including disabled ones for on-demand connection)
       // But only enabled servers will be connected initially
       let allServerConfigs: Array<{ name: string; config: any; disabledInConfig?: boolean }> = [];
@@ -601,7 +666,7 @@ async function main() {
       }
 
       const cli = new MCPClientCLI(allServerConfigs, {
-        provider,
+        provider: finalProvider,
         model: selectedModel,
       });
       await cli.start();

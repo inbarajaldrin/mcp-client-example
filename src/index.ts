@@ -345,6 +345,10 @@ export class MCPClient {
   }
 
   async refreshServers() {
+    // TODO: Reload mcp_config.json to check for updated disabled status
+    // Currently, refreshServers() uses serverConfigs loaded at startup, so manually
+    // editing mcp_config.json to disable a server won't be respected until restart.
+    // Should reload the config file here to check current disabled status.
     this.logger.log('Refreshing server connections...\n', { type: 'info' });
 
     // Close all existing server connections (keep IPC server running)

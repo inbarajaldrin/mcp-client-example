@@ -64,7 +64,7 @@ For local LLM inference, use the Ollama provider.
 ollama serve
 
 # Use with MCP client
-npx mcp-client --all --provider=ollama --model=llama3.2:latest
+npx mcp-client --all --provider=ollama --model=llama3.2:3b
 
 # List available Ollama models
 npx mcp-client --provider=ollama --list-models
@@ -84,6 +84,35 @@ OLLAMA_HOST=http://my-server:11434 npx mcp-client --all --provider=ollama
 ```
 
 > **Note:** Ensure the remote Ollama server allows connections from your machine. You may need to start Ollama with `OLLAMA_HOST=0.0.0.0 ollama serve` on the remote machine to accept external connections.
+
+**Context Window Configuration:**
+
+To prevent out-of-memory errors, the client caps context windows at 16K tokens by default (even if models support more). You can customize this with the `OLLAMA_MAX_CONTEXT` environment variable:
+
+```bash
+# Use 8K context window (safer for systems with limited memory)
+export OLLAMA_MAX_CONTEXT=8192
+npx mcp-client --all --provider=ollama --model=llama3.2:3b
+
+# Use 32K context window (for systems with more memory)
+export OLLAMA_MAX_CONTEXT=32768
+npx mcp-client --all --provider=ollama --model=llama3.2:3b
+
+# Use unlimited context (use model's full capacity - requires sufficient RAM)
+export OLLAMA_MAX_CONTEXT=unlimited
+npx mcp-client --all --provider=ollama --model=qwen3-vl:30b
+
+# Or inline for a single command
+OLLAMA_MAX_CONTEXT=16384 npx mcp-client --all --provider=ollama --model=llama3.2:3b
+```
+
+**Context Window Defaults:**
+- Default cap: **16K tokens** (conservative default to avoid OOM with larger models)
+- qwen2.5:14b: 16K (capped from 32K)
+- llama3.2:3b: 16K (capped from 128K)
+- qwen3-vl:30b: 16K (capped from 256K)
+
+> **Tip:** If you encounter "llama runner process has terminated" errors, try lowering `OLLAMA_MAX_CONTEXT` to 8192. If you have sufficient VRAM/RAM, you can increase it to 32768 or set to `unlimited`.
 
 ### Configuration File
 

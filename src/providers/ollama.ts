@@ -20,7 +20,12 @@ import type {
 
 // Default Ollama host
 const DEFAULT_OLLAMA_HOST = 'http://localhost:11434';
-const DEFAULT_MODEL = 'llama3.2:latest';
+const DEFAULT_MODEL = 'llama3.2:3b';
+
+// Default max context window to prevent OOM errors
+// Can be overridden with OLLAMA_MAX_CONTEXT environment variable
+// Set to 0 or 'unlimited' to use model's full capacity
+const DEFAULT_MAX_CONTEXT = 16384; // 16K tokens - conservative default to avoid OOM with larger models
 
 // Ollama-specific metrics (nanoseconds for durations)
 export interface OllamaMetrics {
@@ -141,10 +146,21 @@ export class OllamaProvider implements ModelProvider {
   private contextWindowCache: Map<string, number> = new Map();
   private modelCapabilitiesCache: Map<string, string[]> = new Map();
   private host: string;
+  private maxContextWindow: number;
 
   constructor(host?: string) {
     this.host = host || process.env.OLLAMA_HOST || DEFAULT_OLLAMA_HOST;
     this.ollamaClient = new Ollama({ host: this.host });
+    
+    // Parse max context window from environment or use default
+    const maxCtxEnv = process.env.OLLAMA_MAX_CONTEXT;
+    if (maxCtxEnv === 'unlimited' || maxCtxEnv === '0') {
+      this.maxContextWindow = Infinity;
+    } else if (maxCtxEnv && !isNaN(parseInt(maxCtxEnv))) {
+      this.maxContextWindow = parseInt(maxCtxEnv);
+    } else {
+      this.maxContextWindow = DEFAULT_MAX_CONTEXT;
+    }
   }
 
   getProviderName(): string {
@@ -155,16 +171,33 @@ export class OllamaProvider implements ModelProvider {
     return DEFAULT_MODEL;
   }
 
+  /**
+   * Get context window for a model, capped at maxContextWindow to prevent OOM.
+   * Returns the model's actual context window or the configured max, whichever is smaller.
+   * 
+   * The max can be configured via OLLAMA_MAX_CONTEXT environment variable:
+   * - Set to a number (e.g., "32768" for 32K)
+   * - Set to "unlimited" or "0" to use model's full capacity
+   * - Default: 32K tokens (safe for most systems)
+   */
   getContextWindow(model: string): number {
     // Return cached value if available
     if (this.contextWindowCache.has(model)) {
       const cached = this.contextWindowCache.get(model)!;
-      // Many models have small defaults (4096) but support much larger contexts
-      // Use at least 32768 for tool calling to ensure all tools fit
-      return Math.max(cached, 32768);
+      
+      // Cap at maxContextWindow to prevent OOM errors
+      // Unless maxContextWindow is Infinity (unlimited mode)
+      const contextWindow = this.maxContextWindow === Infinity 
+        ? cached 
+        : Math.min(cached, this.maxContextWindow);
+      
+      // ALWAYS set num_ctx to ensure tools fit in context
+      // Ollama's default (2048) is too small when we have many tools
+      return contextWindow;
     }
-    // Default fallback - use 32768 for tool calling support
-    return 32768;
+    // If we don't know the context window, use a safe default that fits tools
+    // Don't rely on Ollama's default (2048) which is too small
+    return 8192; // 8K is reasonable when we don't know the model's capacity
   }
 
   getToolType(): any {
@@ -223,28 +256,37 @@ export class OllamaProvider implements ModelProvider {
       const modelInfo = await this.ollamaClient.show({ model });
       
       // Extract context window from model info
-      // Ollama stores this in modelfile parameters or model_info
+      // Ollama API returns context_length directly in the response
       if (modelInfo) {
-        let contextWindow = 4096; // Default
+        let contextWindow = 4096; // Default fallback
         
-        // Try to extract from modelfile or parameters
-        if ('modelfile' in modelInfo && typeof (modelInfo as any).modelfile === 'string') {
+        // First, try to get context_length directly from the response
+        // This is the primary field returned by ollama show
+        if ('context_length' in modelInfo && typeof (modelInfo as any).context_length === 'number') {
+          contextWindow = (modelInfo as any).context_length;
+        }
+        // Try model_info field (nested structure)
+        else if ('model_info' in modelInfo && typeof (modelInfo as any).model_info === 'object') {
+          const info = (modelInfo as any).model_info;
+          // Common fields for context length
+          if (info['context_length']) {
+            contextWindow = info['context_length'];
+          } else {
+            // Search for architecture-specific context_length fields
+            // Different models use different prefixes: llama.context_length, qwen2.context_length, etc.
+            const contextLengthKey = Object.keys(info).find(key => key.endsWith('.context_length'));
+            if (contextLengthKey && typeof info[contextLengthKey] === 'number') {
+              contextWindow = info[contextLengthKey];
+            }
+          }
+        }
+        // Fallback: try to extract from modelfile or parameters
+        else if ('modelfile' in modelInfo && typeof (modelInfo as any).modelfile === 'string') {
           const modelfile = (modelInfo as any).modelfile;
           // Look for num_ctx parameter
           const ctxMatch = modelfile.match(/num_ctx\s+(\d+)/i);
           if (ctxMatch) {
             contextWindow = parseInt(ctxMatch[1], 10);
-          }
-        }
-        
-        // Try model_info field
-        if ('model_info' in modelInfo && typeof (modelInfo as any).model_info === 'object') {
-          const info = (modelInfo as any).model_info;
-          // Common fields for context length
-          if (info['context_length']) {
-            contextWindow = info['context_length'];
-          } else if (info['llama.context_length']) {
-            contextWindow = info['llama.context_length'];
           }
         }
         
@@ -272,7 +314,10 @@ export class OllamaProvider implements ModelProvider {
       await this.fetchModelInfo(model);
     }
     
-    const contextWindow = this.contextWindowCache.get(model) || 4096;
+    // Use cached value or default to 8192 if not available
+    // Use the model's actual context window for accurate token counting
+    const cachedWindow = this.contextWindowCache.get(model);
+    const contextWindow = cachedWindow || 8192; // Use actual context window, fallback to 8K if unknown
     return new OllamaTokenCounter(model, config, contextWindow);
   }
 
@@ -292,7 +337,8 @@ export class OllamaProvider implements ModelProvider {
             await this.fetchModelInfo(model.name);
           }
           
-          const contextWindow = this.contextWindowCache.get(model.name);
+          // Get the actual context window that will be used (with cap applied)
+          const contextWindow = this.getContextWindow(model.name);
           const capabilities = this.modelCapabilitiesCache.get(model.name) || [];
           
           models.push({
@@ -470,15 +516,18 @@ export class OllamaProvider implements ModelProvider {
     const ollamaMessages = this.convertToOllamaMessages(messages);
     const ollamaTools = tools.length > 0 ? this.convertToolsToOllamaFormat(tools) : undefined;
 
+    const contextWindow = this.getContextWindow(model);
+    const options: any = {
+      num_predict: maxTokens,
+      num_ctx: contextWindow,
+    };
+
     const stream = await this.ollamaClient.chat({
       model,
       messages: ollamaMessages,
       tools: ollamaTools,
       stream: true,
-      options: {
-        num_predict: maxTokens,
-        num_ctx: this.getContextWindow(model), // Use model's actual context window
-      },
+      options,
     });
 
     let messageStarted = false;
@@ -608,7 +657,8 @@ export class OllamaProvider implements ModelProvider {
     
     // Debug: log tool count and context window
     if (process.env.VERBOSE_LOGGING) {
-      console.log(`[Ollama] Context window for ${model}: ${this.getContextWindow(model)}`);
+      const ctxWindow = this.getContextWindow(model);
+      console.log(`[Ollama] Context window for ${model}: ${ctxWindow ?? 'Ollama default (not set)'}`);
     }
     if (process.env.VERBOSE_LOGGING) {
       console.log(`[Ollama] Sending ${tools.length} tools to model ${model}`);
@@ -635,16 +685,34 @@ export class OllamaProvider implements ModelProvider {
       iterations++;
 
       // Build chat request
+      const contextWindow = this.getContextWindow(model);
+      const options: any = {
+        num_predict: maxTokens,
+      };
+      // Only set num_ctx if we need to cap it (following mcp-client-for-ollama pattern)
+      if (contextWindow !== undefined) {
+        options.num_ctx = contextWindow;
+      }
+
       const chatParams: any = {
         model,
         messages: this.convertToOllamaMessages(conversationMessages),
         tools: ollamaTools,
         stream: true,
-        options: {
-          num_predict: maxTokens,
-          num_ctx: this.getContextWindow(model), // Use model's actual context window
-        },
+        options,
       };
+
+      // Debug: Log actual request to Ollama
+      if (process.env.VERBOSE_LOGGING) {
+        console.log(`[Ollama] Chat params:`, {
+          model,
+          messageCount: chatParams.messages.length,
+          toolCount: ollamaTools?.length || 0,
+          options,
+        });
+        console.log(`[Ollama] First 5 tool names:`, ollamaTools?.slice(0, 5).map(t => t.function.name));
+        console.log(`[Ollama] Last 5 tool names:`, ollamaTools?.slice(-5).map(t => t.function.name));
+      }
 
       // Add thinking mode if supported
       if (thinkingMode) {
@@ -863,14 +931,17 @@ export class OllamaProvider implements ModelProvider {
     
     const ollamaMessages = this.convertToOllamaMessages(messages);
 
+    const contextWindow = this.getContextWindow(model);
+    const options: any = {
+      num_predict: maxTokens,
+      num_ctx: contextWindow,
+    };
+
     const response = await this.ollamaClient.chat({
       model,
       messages: ollamaMessages,
       stream: false,
-      options: {
-        num_predict: maxTokens,
-        num_ctx: this.getContextWindow(model), // Use model's actual context window
-      },
+      options,
     });
 
     return {
