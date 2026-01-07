@@ -1944,7 +1944,10 @@ export class MCPClientCLI {
             historyManager.addToolExecution(
               msg.toolName,
               msg.toolInput,
-              msg.toolOutput
+              msg.toolOutput,
+              msg.orchestratorMode || false,
+              msg.isIPCCall || false,
+              msg.toolInputTime // Preserve original input time if available
             );
             restoredCount++;
           }

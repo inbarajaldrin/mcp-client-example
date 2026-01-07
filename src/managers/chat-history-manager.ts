@@ -58,6 +58,8 @@ export interface ChatSession {
     toolName?: string;
     toolInput?: Record<string, any>;
     toolOutput?: string;
+    toolInputTime?: string; // ISO timestamp when tool input was sent
+    toolOutputTime?: string; // ISO timestamp when tool output was received
     orchestratorMode?: boolean; // Track if tool was called in orchestrator mode
     isIPCCall?: boolean; // Track if this was an IPC call (automatic, not by agent)
   }>;
@@ -359,6 +361,7 @@ export class ChatHistoryManager {
     toolOutput: string,
     orchestratorMode: boolean = false,
     isIPCCall: boolean = false,
+    toolInputTime?: string, // Optional ISO timestamp when tool input was sent
   ): void {
     if (!this.currentSession) {
       this.logger.log('No active session. Call startSession() first.\n', {
@@ -367,13 +370,18 @@ export class ChatHistoryManager {
       return;
     }
 
+    const toolOutputTime = new Date().toISOString();
+    const timestamp = toolInputTime || toolOutputTime; // Use input time if available, otherwise output time
+
     this.currentSession.messages.push({
-      timestamp: new Date().toISOString(),
+      timestamp,
       role: 'tool',
       content: toolOutput,
       toolName,
       toolInput,
       toolOutput,
+      toolInputTime: toolInputTime || toolOutputTime, // If not provided, use output time as fallback
+      toolOutputTime,
       orchestratorMode,
       isIPCCall,
     });
@@ -530,8 +538,11 @@ export class ChatHistoryManager {
     const sessionToSave = { ...this.currentSession };
     sessionToSave.endTime = endTime.toISOString();
 
-    // Create directory for today's date
-    const today = endTime.toISOString().split('T')[0]; // YYYY-MM-DD
+    // Create directory for today's date (using local time)
+    const year = endTime.getFullYear();
+    const month = String(endTime.getMonth() + 1).padStart(2, '0');
+    const day = String(endTime.getDate()).padStart(2, '0');
+    const today = `${year}-${month}-${day}`; // YYYY-MM-DD in local time
     const dateDir = join(CHATS_DIR, today);
 
     try {
@@ -539,8 +550,11 @@ export class ChatHistoryManager {
         mkdirSync(dateDir, { recursive: true });
       }
 
-      // Generate file paths
-      const timestamp = endTime.toISOString().split('T')[1].split('.')[0].replace(/:/g, '');
+      // Generate file paths (using local time)
+      const hours = String(endTime.getHours()).padStart(2, '0');
+      const minutes = String(endTime.getMinutes()).padStart(2, '0');
+      const seconds = String(endTime.getSeconds()).padStart(2, '0');
+      const timestamp = `${hours}${minutes}${seconds}`; // HHMMSS in local time
       const baseName = `chat-${timestamp}-${sessionToSave.sessionId}`;
       const jsonPath = join(dateDir, `${baseName}.json`);
       const mdPath = join(dateDir, `${baseName}.md`);
@@ -748,8 +762,17 @@ export class ChatHistoryManager {
         } else if (msg.orchestratorMode) {
           modeIndicator = ' *Orchestrator Mode*';
         }
-        md += `### Tool: ${msg.toolName} (${time})${modeIndicator}\n\n`;
-        md += `**Input:**\n\`\`\`json\n${JSON.stringify(msg.toolInput, null, 2)}\n\`\`\`\n\n`;
+        
+        // Display timestamps for input and output separately
+        const inputTime = msg.toolInputTime 
+          ? new Date(msg.toolInputTime).toLocaleTimeString()
+          : time;
+        const outputTime = msg.toolOutputTime 
+          ? new Date(msg.toolOutputTime).toLocaleTimeString()
+          : time;
+        
+        md += `### Tool: ${msg.toolName}${modeIndicator}\n\n`;
+        md += `**Input (${inputTime}):**\n\`\`\`json\n${JSON.stringify(msg.toolInput, null, 2)}\n\`\`\`\n\n`;
         
         // Try to parse output as JSON for consistent formatting
         const toolOutput = msg.toolOutput || '';
@@ -767,7 +790,7 @@ export class ChatHistoryManager {
           outputLang = '';
         }
         
-        md += `**Output:**\n\`\`\`${outputLang ? ' ' + outputLang : ''}\n${outputFormatted}\n\`\`\`\n\n`;
+        md += `**Output (${outputTime}):**\n\`\`\`${outputLang ? ' ' + outputLang : ''}\n${outputFormatted}\n\`\`\`\n\n`;
       }
     }
 
@@ -1597,10 +1620,16 @@ export class ChatHistoryManager {
    * Generate unique session ID
    */
   private generateSessionId(): string {
-    // Format: YYYYMMDD-HHMMSS-random
+    // Format: YYYYMMDD-HHMMSS-random (using local time)
     const now = new Date();
-    const date = now.toISOString().split('T')[0].replace(/-/g, '');
-    const time = now.toISOString().split('T')[1].split('.')[0].replace(/:/g, '');
+    const year = now.getFullYear();
+    const month = String(now.getMonth() + 1).padStart(2, '0');
+    const day = String(now.getDate()).padStart(2, '0');
+    const date = `${year}${month}${day}`;
+    const hours = String(now.getHours()).padStart(2, '0');
+    const minutes = String(now.getMinutes()).padStart(2, '0');
+    const seconds = String(now.getSeconds()).padStart(2, '0');
+    const time = `${hours}${minutes}${seconds}`;
     const random = Math.random().toString(36).substring(2, 8);
     return `${date}-${time}-${random}`;
   }

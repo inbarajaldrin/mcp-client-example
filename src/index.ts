@@ -76,6 +76,7 @@ export class MCPClient {
   private orchestratorIPCServer: OrchestratorIPCServer | null = null;
   private enableOrchestratorIPC: boolean = false;
   private ipcListenersSetup: boolean = false; // Track if IPC listeners are already set up
+  private toolInputTimes: Map<string, string> = new Map(); // Track tool input times by tool name/id
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -178,6 +179,8 @@ export class MCPClient {
     client.attachmentManager = new AttachmentManager(client.logger);
     client.orchestratorIPCServer = null;
     client.enableOrchestratorIPC = options?.enableOrchestratorIPC ?? false;
+    client.ipcListenersSetup = false;
+    client.toolInputTimes = new Map(); // Track tool input times by tool name/id
     return client;
   }
 
@@ -1305,6 +1308,13 @@ export class MCPClient {
       // Display tool call in terminal with magenta/pink colors
       const formattedCall = this.formatToolCall(event.toolName, event.args, true);
       this.logger.log(formattedCall);
+      
+      // Track tool input time for IPC calls
+      // Use tool name + timestamp as key, and store input time
+      // We'll match it in toolCallEnd by finding the most recent unused entry
+      const inputTime = new Date().toISOString();
+      const toolKey = `ipc_${event.toolName}_${Date.now()}`;
+      this.toolInputTimes.set(toolKey, inputTime);
     });
 
     // Listen for IPC tool calls ending
@@ -1326,6 +1336,28 @@ export class MCPClient {
         }
       }
 
+      // Retrieve tool input time - find the most recent entry for this tool name
+      let toolInputTime: string | undefined;
+      const toolPrefix = `ipc_${event.toolName}_`;
+      let latestKey: string | undefined;
+      let latestTime = 0;
+      
+      for (const [key, time] of this.toolInputTimes.entries()) {
+        if (key.startsWith(toolPrefix)) {
+          const timestamp = parseInt(key.split('_').pop() || '0');
+          if (timestamp > latestTime) {
+            latestTime = timestamp;
+            latestKey = key;
+            toolInputTime = time;
+          }
+        }
+      }
+      
+      // Clean up the used entry
+      if (latestKey) {
+        this.toolInputTimes.delete(latestKey);
+      }
+
       // Log to chat history (use stringified result to avoid [object Object])
       this.chatHistoryManager.addToolExecution(
         event.toolName,
@@ -1333,6 +1365,7 @@ export class MCPClient {
         event.error || resultStr || '',
         true, // orchestratorMode - IPC calls are in orchestrator mode
         true, // isIPCCall - this is an automatic IPC call
+        toolInputTime, // Pass the input time
       );
     });
 
@@ -1759,12 +1792,21 @@ export class MCPClient {
             this.logger.log(indented + '\n', { type: 'success' });
           }
         }
+        // Retrieve tool input time if available (from tool_use start event)
+        const toolId = (chunk as any).toolUseId || (chunk as any).toolCallId;
+        const toolInputTime = toolId ? this.toolInputTimes.get(toolId) : undefined;
+        if (toolId) {
+          this.toolInputTimes.delete(toolId); // Clean up
+        }
+        
         // Log tool execution to history
         this.chatHistoryManager.addToolExecution(
           chunk.toolName,
           chunk.toolInput || {},
           chunk.result || '',
           this.orchestratorModeEnabled, // Track if tool was called in orchestrator mode
+          false, // isIPCCall - regular tool calls
+          toolInputTime, // Pass the input time
         );
         continue;
       }
@@ -1780,6 +1822,11 @@ export class MCPClient {
         // Content block starting - reset message if it's a new text block
         if (chunk.content_block?.type === 'text') {
           currentMessage = '';
+        }
+        // Track tool input time when tool_use starts
+        if (chunk.content_block?.type === 'tool_use' && chunk.content_block?.id) {
+          const toolId = chunk.content_block.id;
+          this.toolInputTimes.set(toolId, new Date().toISOString());
         }
         continue;
       }
