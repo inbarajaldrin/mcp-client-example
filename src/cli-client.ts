@@ -226,11 +226,19 @@ export class MCPClientCLI {
       // Close and recreate readline interface to ensure clean terminal state
       // This prevents double-echo issues after restoring from raw mode
       if (this.rl) {
+        // Preserve history before recreating readline
+        const savedHistory = [...(this.rl as any).history];
+
         this.rl.close();
         this.rl = readline.createInterface({
           input: process.stdin,
           output: process.stdout,
         });
+
+        // Restore history after recreating readline
+        if (savedHistory.length > 0) {
+          (this.rl as any).history = savedHistory;
+        }
       }
     };
   }
@@ -403,6 +411,7 @@ export class MCPClientCLI {
       `\nAvailable commands:\n` +
       `  /help - Show this help message\n` +
       `  /exit or exit - Exit the application\n` +
+      `  /clear or /clear-context - Clear current chat and start fresh (servers stay connected)\n` +
       `\n` +
       `System & Status:\n` +
       `  /token-status or /tokens - Show current token usage\n` +
@@ -542,7 +551,15 @@ export class MCPClientCLI {
 
         if (query.toLowerCase() === '/refresh-servers' || query.toLowerCase() === '/refresh') {
           try {
+            // Preserve readline history before refresh (server stdio can affect terminal state)
+            const savedHistory = this.rl ? [...(this.rl as any).history] : [];
+
             await this.client.refreshServers();
+
+            // Restore readline history after refresh
+            if (this.rl && savedHistory.length > 0) {
+              (this.rl as any).history = savedHistory;
+            }
           } catch (error) {
             this.logger.log(
               `\nFailed to refresh servers: ${error}\n`,
@@ -819,6 +836,22 @@ export class MCPClientCLI {
           } catch (error) {
             this.logger.log(
               `\nFailed to clear chat: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/clear' || query.toLowerCase() === '/clear-context') {
+          try {
+            this.client.clearContext();
+            this.logger.log(
+              '\n✓ Chat context cleared. Starting fresh session.\n',
+              { type: 'success' },
+            );
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to clear context: ${error}\n`,
               { type: 'error' },
             );
           }

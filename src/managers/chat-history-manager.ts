@@ -605,10 +605,10 @@ export class ChatHistoryManager {
   endSession(summary?: string): ChatMetadata | null {
     // TODO: Fix summary creation logic - don't pass end reason as summary
     const metadata = this.saveCurrentSession(summary);
-    
+
     if (metadata) {
       this.logger.log(
-        `Chat saved\n`,
+        `Chat saved: ${metadata.sessionId}\n`,
         { type: 'success' },
       );
     }
@@ -618,6 +618,19 @@ export class ChatHistoryManager {
     this.sessionStartTime = null;
 
     return metadata;
+  }
+
+  /**
+   * Discard the current session without saving
+   * Used when clearing context to start a fresh session
+   */
+  discardSession(): void {
+    if (this.currentSession) {
+      this.logger.log(`Discarded chat session: ${this.currentSession.sessionId}\n`, { type: 'info' });
+    }
+    this.currentSession = null;
+    this.sessionStartTime = null;
+    this.toolUseCount = 0;
   }
 
   /**

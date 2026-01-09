@@ -1000,6 +1000,29 @@ export class MCPClient {
   }
 
   /**
+   * Clear the current chat context and start a new session
+   * This discards the current session without saving and clears all messages
+   */
+  clearContext(): void {
+    // Discard the current session without saving
+    this.chatHistoryManager.discardSession();
+
+    // Clear all messages
+    this.messages = [];
+
+    // Reset token count
+    this.currentTokenCount = 0;
+
+    // Start a new session with the same model and servers
+    const serverNames = Array.from(this.servers.keys());
+    const enabledTools = this.toolManager.getEnabledTools(this.tools).map(t => ({
+      name: t.name,
+      description: t.description || '',
+    }));
+    this.chatHistoryManager.startSession(this.model, serverNames, enabledTools);
+  }
+
+  /**
    * List all available prompts from all servers or a specific server
    */
   listPrompts(serverName?: string): Array<{ server: string; prompt: Prompt }> {

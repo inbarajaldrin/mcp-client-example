@@ -349,6 +349,7 @@ The client automatically manages conversation context to prevent hitting token l
 
 While in the interactive CLI, you can use these special commands:
 
+- `/clear` or `/clear-context` - Clear current chat and start fresh (servers stay connected, discarded chat is not saved)
 - `/token-status` or `/tokens` - Show current token usage statistics
 - `/summarize` or `/summarize-now` - Manually trigger summarization (useful for testing)
 - `/settings` - View and modify client preferences (timeout, max iterations)
@@ -369,6 +370,11 @@ Token Usage Status:
 You: /summarize
 Manually triggering summarization...
 Conversation summarized. Context reduced from 12 to 1 summary message.
+
+You: /clear
+Discarded chat session: session-abc123
+✓ Chat context cleared. Starting fresh session.
+Started chat session: session-xyz789
 ```
 
 ### Todo Mode
