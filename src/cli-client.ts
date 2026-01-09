@@ -408,7 +408,7 @@ export class MCPClientCLI {
       `  /token-status or /tokens - Show current token usage\n` +
       `  /summarize or /summarize-now - Manually trigger summarization\n` +
       `  /settings - View and modify client preferences\n` +
-      `  /refresh-servers - Refresh MCP server connections without restarting\n` +
+      `  /refresh or /refresh-servers - Refresh MCP server connections without restarting\n` +
       `  /set-timeout <seconds> - Set MCP tool timeout (1-3600, or "infinity"/"unlimited")\n` +
       `  /set-max-iterations <number> - Set max iterations between agent calls (1-10000, or "infinity"/"unlimited")\n` +
       `\n` +
@@ -540,7 +540,7 @@ export class MCPClientCLI {
           continue;
         }
 
-        if (query.toLowerCase() === '/refresh-servers') {
+        if (query.toLowerCase() === '/refresh-servers' || query.toLowerCase() === '/refresh') {
           try {
             await this.client.refreshServers();
           } catch (error) {
