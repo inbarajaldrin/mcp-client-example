@@ -19,6 +19,7 @@ export class MCPClientCLI {
   private abortCurrentQuery = false;
   private keyboardMonitor: (() => void) | null = null;
   private isMonitoring = false;
+  private pendingInput: string = ''; // Buffer for text typed during agent execution
 
   constructor(
     serverConfig: StdioServerParameters | Array<{ name: string; config: StdioServerParameters }>,
@@ -184,10 +185,12 @@ export class MCPClientCLI {
       if (!this.isMonitoring) {
         return;
       }
-      
-      // Handle single character 'a'
+
+      // Handle special keys
       const keyLower = key.toLowerCase();
-      if (keyLower === 'a') {
+
+      // 'a' triggers abort only if not already aborted
+      if (keyLower === 'a' && !this.abortCurrentQuery) {
         this.logger.log('\n' + chalk.bold.red('🛑 Abort requested - will finish current response then stop...') + '\n', { type: 'error' });
         this.abortCurrentQuery = true;
 
@@ -196,7 +199,29 @@ export class MCPClientCLI {
         if (ipcServer) {
           ipcServer.setAborted(true);
         }
+        return;
       }
+
+      // Handle Ctrl+C (exit)
+      if (key === '\x03') {
+        return;
+      }
+
+      // Handle backspace (delete last character from buffer)
+      if (key === '\x7f' || key === '\b') {
+        if (this.pendingInput.length > 0) {
+          this.pendingInput = this.pendingInput.slice(0, -1);
+        }
+        return;
+      }
+
+      // Ignore Enter and other control characters
+      if (key === '\r' || key === '\n' || key.charCodeAt(0) < 32) {
+        return;
+      }
+
+      // Buffer printable characters for next prompt
+      this.pendingInput += key;
     };
 
     stdin.on('data', keyHandler);
@@ -215,11 +240,12 @@ export class MCPClientCLI {
         stdin.setRawMode(false);
       }
 
-      // Flush any buffered input to prevent key presses from leaking into next input
+      // Flush stdin buffer to prevent raw mode input from interfering with readline
+      // Note: User input is already captured in this.pendingInput by the keyHandler
       if (stdin.readable) {
         let chunk;
         while ((chunk = stdin.read()) !== null) {
-          // Discard the chunk
+          // Discard - already captured in pendingInput
         }
       }
 
@@ -469,7 +495,19 @@ export class MCPClientCLI {
         
         // Reset abort flag before reading next query to ensure clean state
         this.abortCurrentQuery = false;
-        
+
+        // Pre-fill prompt with any text typed during agent execution
+        const pendingText = this.pendingInput;
+        this.pendingInput = '';
+        if (pendingText) {
+          // Use setImmediate to write after the prompt is displayed
+          setImmediate(() => {
+            if (this.rl) {
+              this.rl.write(pendingText);
+            }
+          });
+        }
+
         let query = (await this.rl.question(consoleStyles.prompt)).trim();
         
         if (this.isShuttingDown) {
