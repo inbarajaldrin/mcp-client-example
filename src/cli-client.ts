@@ -159,8 +159,13 @@ export class MCPClientCLI {
    * Start monitoring keyboard input for 'a' key to abort current query
    */
   private async startKeyboardMonitoring(): Promise<void> {
-    if (this.isMonitoring || !process.stdin.isTTY) {
+    if (!process.stdin.isTTY) {
       return;
+    }
+
+    // Always clean up any existing monitoring before starting fresh
+    if (this.isMonitoring) {
+      this.stopKeyboardMonitoring();
     }
 
     this.isMonitoring = true;
