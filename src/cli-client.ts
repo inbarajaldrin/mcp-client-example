@@ -2124,10 +2124,9 @@ export class MCPClientCLI {
       const path = await import('path');
       const currentFileName = path.basename(currentChat.filePath);
       const currentDir = path.basename(path.dirname(currentChat.filePath)) || 'root';
-      this.logger.log(`\nCurrent filename: ${currentFileName}`, { type: 'info' });
-      this.logger.log(`Current folder: ${currentDir}\n`, { type: 'info' });
+      this.logger.log(`\nCurrent filename: ${currentFileName}\nCurrent folder: ${currentDir}\n`, { type: 'info' });
     }
-    
+
     const folderName = (await this.rl.question('\nEnter name for the export folder (will create a folder with this name): ')).trim();
     
     if (!folderName) {
@@ -2261,9 +2260,8 @@ export class MCPClientCLI {
       const currentFileName = path.basename(selectedChat.filePath);
       const currentDir = path.basename(path.dirname(selectedChat.filePath)) || 'root';
       
-      this.logger.log(`\nCurrent filename: ${currentFileName}`, { type: 'info' });
-      this.logger.log(`Current folder: ${currentDir}\n`, { type: 'info' });
-      
+      this.logger.log(`\nCurrent filename: ${currentFileName}\nCurrent folder: ${currentDir}\n`, { type: 'info' });
+
       const newName = (await this.rl.question('\nEnter name for the chat (will create a folder with this name): ')).trim();
       
       if (!newName) {
