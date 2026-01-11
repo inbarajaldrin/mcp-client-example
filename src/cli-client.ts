@@ -2191,22 +2191,31 @@ export class MCPClientCLI {
     }
     
     const path = await import('path');
+    const datePattern = /^\d{4}-\d{2}-\d{2}$/;
     const pageSize = 10;
     let offset = 0;
-    
+
     while (true) {
       const endIndex = Math.min(offset + pageSize, chats.length);
       const pageChats = chats.slice(offset, endIndex);
-      
+
       this.logger.log('\n📝 Select a chat to rename:\n', { type: 'info' });
-      
+
       for (let i = 0; i < pageChats.length; i++) {
         const chat = pageChats[i];
         const date = new Date(chat.startTime).toLocaleString();
-        // Extract current filename from path (cross-platform)
-        const currentFileName = path.basename(chat.filePath);
+
+        // Extract short session ID (last part after last hyphen)
+        const shortSessionId = chat.sessionId.split('-').pop() || chat.sessionId;
+
+        // Extract folder name from filePath
+        const chatDir = path.basename(path.dirname(chat.filePath));
+        // If folder is a date folder (YYYY-MM-DD), consider it as root
+        const folderName = datePattern.test(chatDir) ? 'root' : chatDir;
+        const folderDisplay = folderName !== 'root' ? ` | Folder: ${folderName}` : '';
+
         this.logger.log(
-          `  ${i + 1}. ${chat.sessionId} | ${date} | ${chat.messageCount} messages | ${currentFileName}\n`,
+          `  ${i + 1}. ${shortSessionId} | ${date} | ${chat.messageCount} messages${folderDisplay}\n`,
           { type: 'info' }
         );
       }
