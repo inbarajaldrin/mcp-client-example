@@ -62,19 +62,22 @@ export class MCPClientCLI {
       this.isShuttingDown = true;
       
       this.logger.log('\n\nShutting down gracefully...\n', { type: 'info' });
-      
+
       try {
-        // End chat session before shutdown (do this first to ensure it's saved)
-        this.client.getChatHistoryManager().endSession('Chat session ended by user');
-        
+        // Stop video recording first (before saving chat so video paths can be included)
+        await this.client.cleanupVideoRecording();
+
         // Close readline
         if (this.rl) {
           this.rl.close();
           this.rl = null;
         }
-        
+
         // Close MCP client connection
         await this.client.stop();
+
+        // End chat session last so "Chat saved" is the final message
+        this.client.getChatHistoryManager().endSession('Chat session ended by user');
       } catch (error) {
         this.logger.log(`Error during cleanup: ${error}\n`, { type: 'error' });
       }
@@ -539,6 +542,9 @@ export class MCPClientCLI {
           });
         }
 
+        if (!this.rl) {
+          break;
+        }
         let query = (await this.rl.question(consoleStyles.prompt)).trim();
         
         if (this.isShuttingDown) {
@@ -567,9 +573,20 @@ export class MCPClientCLI {
         const trimmedQuery = query.trim().toLowerCase();
         if (trimmedQuery === 'exit' || trimmedQuery === '/exit') {
           this.logger.log('\nGoodbye! 👋\n', { type: 'warning' });
-          // End chat session before exiting
+          // Mark as shutting down to prevent duplicate cleanup in finally block
+          this.isShuttingDown = true;
+          // Stop video recording first (before saving chat so video paths can be included)
+          await this.client.cleanupVideoRecording();
+          // Close readline
+          if (this.rl) {
+            this.rl.close();
+            this.rl = null;
+          }
+          // Stop MCP connections (so "Orchestrator IPC server stopped" appears before chat saved)
+          await this.client.stop();
+          // End chat session last so "Chat saved" is the final message
           this.client.getChatHistoryManager().endSession('Chat session ended by user');
-          break;
+          process.exit(0);
         }
 
         // Handle help command
