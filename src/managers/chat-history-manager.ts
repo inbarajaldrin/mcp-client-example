@@ -499,6 +499,12 @@ export class ChatHistoryManager {
       this.currentSession.metadata.totalCost += estimatedCost;
     }
 
+    // Update total tokens
+    if (!this.currentSession.metadata.totalTokens) {
+      this.currentSession.metadata.totalTokens = 0;
+    }
+    this.currentSession.metadata.totalTokens += totalTokens;
+
     this.currentSession.tokenUsagePerCallback.push({
       timestamp: new Date().toISOString(),
       inputTokens,
@@ -650,6 +656,11 @@ export class ChatHistoryManager {
     md += `**Tool Calls (Agent):** ${session.metadata.toolUseCount}\n`;
     if (session.metadata.ipcCallCount > 0) {
       md += `**IPC Calls (Automatic):** ${session.metadata.ipcCallCount}\n`;
+    }
+
+    // Display total tokens
+    if (session.metadata.totalTokens !== undefined && session.metadata.totalTokens > 0) {
+      md += `**Total Tokens:** ${session.metadata.totalTokens.toLocaleString()}\n`;
     }
 
     // Display total estimated cost
