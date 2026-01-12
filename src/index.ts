@@ -1025,6 +1025,79 @@ export class MCPClient {
   }
 
   /**
+   * Switch the model provider and model for ablation studies
+   * This clears the context and reinitializes the token counter
+   */
+  async switchProviderAndModel(provider: ModelProvider, model: string): Promise<void> {
+    // Update provider and model
+    this.modelProvider = provider;
+    this.model = model;
+
+    // Reinitialize token counter for new model
+    this.tokenCounter = await this.modelProvider.createTokenCounter(this.model, undefined);
+
+    // Clear context for fresh conversation
+    this.clearContext();
+
+    this.logger.log(`Switched to ${provider.getProviderName()}/${model}\n`, { type: 'info' });
+  }
+
+  /**
+   * Get the current model name
+   */
+  getModel(): string {
+    return this.model;
+  }
+
+  /**
+   * Save current chat state (messages and session) for later restoration
+   * Used by ablation to preserve the original chat while running tests
+   */
+  saveState(): { messages: Message[]; tokenCount: number } {
+    // End current session to save it to disk
+    this.chatHistoryManager.endSession('Session paused for ablation');
+
+    return {
+      messages: [...this.messages], // Clone the messages array
+      tokenCount: this.currentTokenCount,
+    };
+  }
+
+  /**
+   * Restore chat state after ablation completes
+   * Optionally accepts provider/model to restore to original configuration
+   */
+  async restoreState(
+    state: { messages: Message[]; tokenCount: number },
+    provider?: ModelProvider,
+    model?: string
+  ): Promise<void> {
+    // Restore provider and model if provided
+    if (provider && model) {
+      this.modelProvider = provider;
+      this.model = model;
+      // Reinitialize token counter for restored model
+      this.tokenCounter = await this.modelProvider.createTokenCounter(this.model, undefined);
+    }
+
+    // Restore messages
+    this.messages = state.messages;
+    this.currentTokenCount = state.tokenCount;
+
+    // Start a new session (continuation of the original)
+    const serverNames = Array.from(this.servers.keys());
+    const enabledTools = this.toolManager.getEnabledTools(this.tools).map(t => ({
+      name: t.name,
+      description: t.description || '',
+    }));
+    this.chatHistoryManager.startSession(this.model, serverNames, enabledTools);
+
+    if (this.messages.length > 0) {
+      this.logger.log(`Restored chat with ${this.messages.length} messages\n`, { type: 'info' });
+    }
+  }
+
+  /**
    * List all available prompts from all servers or a specific server
    */
   listPrompts(serverName?: string): Array<{ server: string; prompt: Prompt }> {

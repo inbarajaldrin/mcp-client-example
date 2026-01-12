@@ -631,6 +631,127 @@ You: /set-max-iterations 200
 
 **Note:** Preferences are saved automatically and persist across sessions. Edit `mcp_config.json` directly to add/remove servers.
 
+### Ablation Studies
+
+Run automated tests across multiple AI models using the same set of commands. Ablation studies allow you to compare how different models perform on identical tasks.
+
+**Commands:**
+- `/ablation-create` - Create a new ablation study interactively
+- `/ablation-list` - List all ablation studies
+- `/ablation-edit <name>` - Edit an existing ablation study
+- `/ablation-run <name>` - Run an ablation study
+- `/ablation-delete <name>` - Delete an ablation study
+- `/ablation-results <name>` - View results of past ablation runs
+
+**Key Concepts:**
+
+- **Phases**: Named groups of commands that execute sequentially. Each phase can contain multiple commands (prompts, tool calls, queries).
+- **Models**: Provider + model combinations to test (e.g., `anthropic/claude-sonnet-4-20250514`, `openai/gpt-4o`, `ollama/qwen2.5:7b`).
+- **Runs**: Each phase × model combination runs as an isolated chat session. Results are saved for comparison.
+
+**Creating an Ablation Study:**
+
+```bash
+You: /ablation-create
+Enter ablation name: model-comparison-test
+Enter description: Compare coding task performance across models
+
+Adding phases (enter 'done' when finished):
+
+Phase name: coding-task
+Enter commands for phase 'coding-task' (enter 'done' when finished):
+> /add-prompt 1
+> Write a fibonacci function in Python
+> done
+
+Phase name: done
+
+Select models to include:
+  1. anthropic/claude-sonnet-4-20250514
+  2. openai/gpt-4o
+  3. gemini/gemini-2.5-flash
+  4. ollama/qwen2.5:7b
+> 1,2,3
+
+Configure settings:
+  Max iterations per run [100]: 50
+
+✓ Created ablation: model-comparison-test
+  Phases: 1
+  Models: 3
+  Total runs: 3
+```
+
+**Running an Ablation:**
+
+```bash
+You: /ablation-run model-comparison-test
+
+Running ablation: model-comparison-test
+Phase: coding-task (1/1)
+  [1/3] anthropic/claude-sonnet-4-20250514... ✓ (12.3s, 1,245 tokens)
+  [2/3] openai/gpt-4o... ✓ (8.7s, 987 tokens)
+  [3/3] gemini/gemini-2.5-flash... ✓ (5.2s, 756 tokens)
+
+Ablation complete!
+  Total time: 26.2s
+  Total tokens: 2,988
+  Results saved to: .mcp-client-data/ablations/runs/model-comparison-test/2025-01-12-143052/
+```
+
+**Viewing Results:**
+
+```bash
+You: /ablation-results model-comparison-test
+
+Available runs for 'model-comparison-test':
+  1. 2025-01-12-143052 (3 runs, 2,988 tokens, 26.2s)
+  2. 2025-01-11-091530 (3 runs, 3,102 tokens, 28.1s)
+
+Select run number: 1
+
+Results for run 2025-01-12-143052:
+Phase: coding-task
+  anthropic/claude-sonnet-4-20250514: completed (12.3s, 1,245 tokens)
+  openai/gpt-4o: completed (8.7s, 987 tokens)
+  gemini/gemini-2.5-flash: completed (5.2s, 756 tokens)
+```
+
+**Features:**
+
+- **Isolated sessions**: Each run starts with a fresh chat context, ensuring fair comparison
+- **Error handling**: If a run fails, the error is logged and the study continues with remaining runs
+- **State preservation**: Your current chat session is preserved when running an ablation mid-conversation
+- **Prompt arguments**: MCP prompts with required arguments are collected during ablation creation
+- **Token tracking**: Total tokens used per run are recorded for cost comparison
+- **Persistent storage**: Ablation definitions (YAML) and run results (JSON) are saved to `.mcp-client-data/ablations/`
+
+**Configuration:**
+
+Ablation definitions are stored as YAML files in `.mcp-client-data/ablations/`:
+
+```yaml
+name: model-comparison-test
+description: Compare coding task performance across models
+created: '2025-01-12T14:30:00.000Z'
+phases:
+  - name: coding-task
+    commands:
+      - '/add-prompt 1'
+      - 'Write a fibonacci function in Python'
+models:
+  - provider: anthropic
+    model: claude-sonnet-4-20250514
+  - provider: openai
+    model: gpt-4o
+  - provider: gemini
+    model: gemini-2.5-flash
+settings:
+  maxIterations: 50
+```
+
+**Note:** Ablation studies require the respective API keys for each provider you include. Ensure `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` are set as needed, or have Ollama running for local models.
+
 ### Model Providers
 
 The client supports multiple AI model providers, each with their own characteristics:
