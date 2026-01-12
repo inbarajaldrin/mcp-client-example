@@ -490,9 +490,11 @@ export class MCPClient {
 
         // Only expose tools if:
         // 1. Server was not disabled in config, OR
-        // 2. Orchestrator mode is enabled and this is the mcp-tools-orchestrator server
+        // 2. Orchestrator mode is enabled and this is the mcp-tools-orchestrator server, OR
+        // 3. Todo mode is enabled and this is the todo server
         const shouldExposeTool = !wasDisabledInConfig ||
-          (this.orchestratorModeEnabled && serverName === 'mcp-tools-orchestrator');
+          (this.orchestratorModeEnabled && serverName === 'mcp-tools-orchestrator') ||
+          (this.todoManager.isEnabled() && serverName === this.todoManager.getServerName());
 
         // If orchestrator mode is enabled, only expose mcp-tools-orchestrator tools
         const shouldExposeInOrchestratorMode = !this.orchestratorModeEnabled || serverName === 'mcp-tools-orchestrator';

@@ -294,6 +294,11 @@ export class MCPClientCLI {
       return 'leave';
     }
 
+    // Stop keyboard monitoring to prevent input from being captured twice
+    // and clear any pending input that was buffered during agent execution
+    this.stopKeyboardMonitoring();
+    this.pendingInput = '';
+
     // Get active todos count from the client
     const todoStatus = await this.client.checkTodoStatus();
     // Get skipped todos count
@@ -382,6 +387,11 @@ export class MCPClientCLI {
     if (!this.rl) {
       return 'leave';
     }
+
+    // Stop keyboard monitoring to prevent input from being captured twice
+    // and clear any pending input that was buffered during agent execution
+    this.stopKeyboardMonitoring();
+    this.pendingInput = '';
 
     console.log(`\n✓ All todos have been completed!`);
     console.log('\n' + '─'.repeat(50));
