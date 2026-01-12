@@ -2978,6 +2978,20 @@ export class MCPClientCLI {
             }
           }
 
+          // Check if this is /attachment-insert - resolve index to filename for consistent matching
+          if (pendingCommand.toLowerCase() === '/attachment-insert') {
+            const attachmentIndex = parseInt(input) - 1;
+            const attachments = this.attachmentManager.listAttachments();
+            if (attachmentIndex >= 0 && attachmentIndex < attachments.length) {
+              const attachment = attachments[attachmentIndex];
+              fullCommand = `/attachment-insert ${attachment.fileName}`;
+            } else {
+              this.logger.log(`    ✗ Invalid attachment index: ${input}\n`, { type: 'error' });
+              pendingCommand = null;
+              continue;
+            }
+          }
+
           commands.push(fullCommand);
           this.logger.log(`    ✓ Recorded: ${fullCommand}\n`, { type: 'success' });
           pendingCommand = null;
@@ -3323,16 +3337,62 @@ export class MCPClientCLI {
           break;
         }
         case '/add-attachment': {
-          // /add-attachment <index>
+          // /add-attachment <index|filename>
           if (args.length === 0) {
-            throw new Error('Usage: /add-attachment <index>');
+            throw new Error('Usage: /add-attachment <index|filename>');
           }
-          const attachmentIndex = parseInt(args[0]) - 1;
           const attachments = this.attachmentManager.listAttachments();
-          if (attachmentIndex < 0 || attachmentIndex >= attachments.length) {
-            throw new Error(`Invalid attachment index: ${args[0]}`);
+          let attachment;
+
+          // Check if arg is a number (index) or filename
+          const argValue = args.join(' '); // Handle filenames with spaces
+          const attachmentIndex = parseInt(args[0]);
+
+          if (!isNaN(attachmentIndex) && String(attachmentIndex) === args[0]) {
+            // It's an index (1-based)
+            const idx = attachmentIndex - 1;
+            if (idx < 0 || idx >= attachments.length) {
+              throw new Error(`Invalid attachment index: ${args[0]}`);
+            }
+            attachment = attachments[idx];
+          } else {
+            // It's a filename - find by name
+            attachment = attachments.find(a => a.fileName === argValue);
+            if (!attachment) {
+              throw new Error(`Attachment not found: ${argValue}`);
+            }
           }
-          const attachment = attachments[attachmentIndex];
+
+          this.pendingAttachments.push(attachment);
+          break;
+        }
+        case '/attachment-insert': {
+          // /attachment-insert <index|filename>
+          if (args.length === 0) {
+            throw new Error('Usage: /attachment-insert <index|filename>');
+          }
+          const attachments = this.attachmentManager.listAttachments();
+          let attachment;
+
+          // Check if arg is a number (index) or filename
+          const argValue = args.join(' '); // Handle filenames with spaces
+          const attachmentIndex = parseInt(args[0]);
+
+          if (!isNaN(attachmentIndex) && String(attachmentIndex) === args[0]) {
+            // It's an index (1-based)
+            const idx = attachmentIndex - 1;
+            if (idx < 0 || idx >= attachments.length) {
+              throw new Error(`Invalid attachment index: ${args[0]}`);
+            }
+            attachment = attachments[idx];
+          } else {
+            // It's a filename - find by name
+            attachment = attachments.find(a => a.fileName === argValue);
+            if (!attachment) {
+              throw new Error(`Attachment not found: ${argValue}`);
+            }
+          }
+
           this.pendingAttachments.push(attachment);
           break;
         }
@@ -3455,6 +3515,13 @@ export class MCPClientCLI {
     // Create run directory
     const { runDir, timestamp } = this.ablationManager.createRunDirectory(ablation.name);
 
+    // Copy attachments to run directory (same for all runs)
+    this.ablationManager.copyAttachmentsToRun(runDir, ablation);
+
+    // Snapshot current outputs folder to ensure each run starts with the same state
+    this.logger.log('  Snapshotting outputs folder...\n', { type: 'info' });
+    this.ablationManager.snapshotOutputs(runDir);
+
     // Initialize run results
     const run: AblationRun = {
       ablationName: ablation.name,
@@ -3464,12 +3531,15 @@ export class MCPClientCLI {
 
     let runNumber = 0;
     const totalStartTime = Date.now();
+    let shouldBreak = false;
 
     // Execute each phase × model combination
     for (const phase of ablation.phases) {
+      if (shouldBreak) break;
       const phaseDir = this.ablationManager.createPhaseDirectory(runDir, phase.name);
 
       for (const model of ablation.models) {
+        if (shouldBreak) break;
         runNumber++;
         const modelShortName = this.ablationManager.getModelShortName(model);
 
@@ -3477,6 +3547,9 @@ export class MCPClientCLI {
         this.logger.log(`  RUN ${runNumber}/${totalRuns}: ${phase.name} + ${modelShortName}\n`, { type: 'info' });
         this.logger.log(`  Provider: ${model.provider} │ Model: ${model.model}\n`, { type: 'info' });
         this.logger.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`, { type: 'info' });
+
+        // Restore outputs from snapshot before each run
+        this.ablationManager.restoreOutputsFromSnapshot(runDir);
 
         const result: AblationRunResult = {
           phase: phase.name,
@@ -3506,6 +3579,12 @@ export class MCPClientCLI {
           result.duration = Date.now() - startTime;
           result.chatFile = `chats/${phase.name}/${this.ablationManager.getChatFileName(model)}`;
 
+          // Capture outputs written during this run
+          const capturedCount = this.ablationManager.captureRunOutputs(runDir, phase.name, model);
+          if (capturedCount > 0) {
+            this.logger.log(`  📁 Captured ${capturedCount} output files\n`, { type: 'info' });
+          }
+
           // Save chat history to phase directory
           const chatHistoryManager = this.client.getChatHistoryManager();
           chatHistoryManager.endSession(`Ablation run: ${phase.name} with ${model.provider}/${model.model}`);
@@ -3516,6 +3595,13 @@ export class MCPClientCLI {
           result.status = 'failed';
           result.error = error.message;
           result.duration = Date.now() - startTime;
+
+          // Still capture any outputs that were written before failure
+          const capturedCount = this.ablationManager.captureRunOutputs(runDir, phase.name, model);
+          if (capturedCount > 0) {
+            this.logger.log(`  📁 Captured ${capturedCount} output files before failure\n`, { type: 'info' });
+          }
+
           this.logger.log(`\n  ✗ Scenario failed: ${error.message}\n`, { type: 'error' });
         }
 
@@ -3525,7 +3611,7 @@ export class MCPClientCLI {
         if (result.status === 'failed') {
           this.logger.log(`\nAblation stopped due to error: ${result.error}\n`, { type: 'error' });
           this.logger.log('Partial results saved.\n', { type: 'warning' });
-          break;
+          shouldBreak = true;
         }
       }
     }
@@ -3554,8 +3640,12 @@ export class MCPClientCLI {
     this.logger.log(`\n  Outputs saved to:\n`, { type: 'info' });
     this.logger.log(`    ${runDir}\n`, { type: 'info' });
 
+    // Restore original outputs folder state
+    this.logger.log('\n  Restoring original outputs folder...\n', { type: 'info' });
+    this.ablationManager.cleanupOutputsSnapshot(runDir, true);
+
     // Restore original provider/model and chat state
-    this.logger.log('\n  Restoring original session...\n', { type: 'info' });
+    this.logger.log('  Restoring original session...\n', { type: 'info' });
     const originalProvider = this.createProviderInstance(originalProviderName);
     await this.client.restoreState(savedState, originalProvider, originalModel);
     this.logger.log(`  ✓ Restored to ${originalProviderName}/${originalModel}\n`, { type: 'success' });

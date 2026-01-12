@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, cpSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { Logger } from '../logger.js';
@@ -9,6 +9,8 @@ const __dirname = dirname(__filename);
 
 const ABLATIONS_DIR = join(__dirname, '../..', '.mcp-client-data', 'ablations');
 const RUNS_DIR = join(ABLATIONS_DIR, 'runs');
+const OUTPUTS_DIR = join(__dirname, '../..', '.mcp-client-data', 'outputs');
+const ATTACHMENTS_DIR = join(__dirname, '../..', '.mcp-client-data', 'attachments');
 
 // ==================== Types ====================
 
@@ -486,5 +488,267 @@ export class AblationManager {
    */
   getChatFileName(model: AblationModel): string {
     return `${this.sanitizeName(model.model)}.json`;
+  }
+
+  // ==================== Attachments Management ====================
+
+  /**
+   * Copy referenced attachments to the run directory
+   * Only copies attachments that are used in /attachment-insert commands in the ablation
+   */
+  copyAttachmentsToRun(runDir: string, ablation: AblationDefinition): number {
+    const runAttachmentsDir = join(runDir, 'attachments');
+
+    try {
+      if (!existsSync(ATTACHMENTS_DIR)) {
+        return 0; // No attachments folder
+      }
+
+      // Parse commands to find /attachment-insert references (by filename)
+      const referencedFiles = new Set<string>();
+      for (const phase of ablation.phases) {
+        for (const command of phase.commands) {
+          // Match /attachment-insert followed by filename
+          const match = command.match(/^\/attachment-insert\s+(.+)$/i);
+          if (match) {
+            const fileName = match[1].trim();
+            referencedFiles.add(fileName);
+          }
+        }
+      }
+
+      if (referencedFiles.size === 0) {
+        return 0; // No attachments referenced
+      }
+
+      // Create attachments directory in run folder
+      mkdirSync(runAttachmentsDir, { recursive: true });
+
+      // Copy only referenced attachments
+      let copiedCount = 0;
+      for (const fileName of referencedFiles) {
+        const sourcePath = join(ATTACHMENTS_DIR, fileName);
+        if (existsSync(sourcePath)) {
+          const destPath = join(runAttachmentsDir, fileName);
+          cpSync(sourcePath, destPath);
+          copiedCount++;
+        } else {
+          this.logger.log(`  Warning: Attachment not found: ${fileName}\n`, { type: 'warning' });
+        }
+      }
+
+      if (copiedCount > 0) {
+        this.logger.log(`  Attachments copied (${copiedCount} referenced files)\n`, { type: 'info' });
+      }
+      return copiedCount;
+    } catch (error) {
+      this.logger.log(`Failed to copy attachments: ${error}\n`, { type: 'error' });
+      return 0;
+    }
+  }
+
+  // ==================== Outputs Management ====================
+
+  /**
+   * Get the snapshot directory path within the outputs folder
+   */
+  private getSnapshotDir(runDir: string): string {
+    return join(runDir, 'outputs', '_initial');
+  }
+
+  /**
+   * Snapshot the current outputs folder to preserve initial state
+   * Called once before ablation starts
+   */
+  snapshotOutputs(runDir: string): boolean {
+    const snapshotDir = this.getSnapshotDir(runDir);
+
+    try {
+      // Create snapshot directory
+      mkdirSync(snapshotDir, { recursive: true });
+
+      if (!existsSync(OUTPUTS_DIR)) {
+        // No outputs folder exists, create empty snapshot marker
+        writeFileSync(join(snapshotDir, '.empty'), '', 'utf-8');
+        return true;
+      }
+
+      const items = readdirSync(OUTPUTS_DIR);
+      if (items.length === 0) {
+        // Outputs folder is empty, create empty snapshot marker
+        writeFileSync(join(snapshotDir, '.empty'), '', 'utf-8');
+        return true;
+      }
+
+      // Copy all contents from outputs to snapshot
+      cpSync(OUTPUTS_DIR, snapshotDir, { recursive: true });
+      this.logger.log(`  Outputs snapshot saved (${items.length} items)\n`, { type: 'info' });
+      return true;
+    } catch (error) {
+      this.logger.log(`Failed to snapshot outputs: ${error}\n`, { type: 'error' });
+      return false;
+    }
+  }
+
+  /**
+   * Restore outputs folder from snapshot
+   * Called before each ablation run to ensure consistent starting state
+   */
+  restoreOutputsFromSnapshot(runDir: string): boolean {
+    const snapshotDir = this.getSnapshotDir(runDir);
+
+    try {
+      if (!existsSync(snapshotDir)) {
+        this.logger.log(`No outputs snapshot found\n`, { type: 'warning' });
+        return false;
+      }
+
+      // Clear current outputs folder
+      if (existsSync(OUTPUTS_DIR)) {
+        rmSync(OUTPUTS_DIR, { recursive: true, force: true });
+      }
+
+      // Check if snapshot was empty
+      const emptyMarker = join(snapshotDir, '.empty');
+      if (existsSync(emptyMarker)) {
+        // Original outputs was empty, just create empty folder
+        mkdirSync(OUTPUTS_DIR, { recursive: true });
+        return true;
+      }
+
+      // Restore from snapshot
+      mkdirSync(OUTPUTS_DIR, { recursive: true });
+      cpSync(snapshotDir, OUTPUTS_DIR, { recursive: true });
+      return true;
+    } catch (error) {
+      this.logger.log(`Failed to restore outputs from snapshot: ${error}\n`, { type: 'error' });
+      return false;
+    }
+  }
+
+  /**
+   * Capture outputs written during a run and save to run results
+   * Identifies new/modified files by comparing against snapshot
+   */
+  captureRunOutputs(runDir: string, phaseName: string, model: AblationModel): number {
+    const snapshotDir = this.getSnapshotDir(runDir);
+    const runOutputsDir = join(runDir, 'outputs', this.sanitizeName(phaseName), this.sanitizeName(model.model));
+
+    try {
+      if (!existsSync(OUTPUTS_DIR)) {
+        return 0; // No outputs folder, nothing to capture
+      }
+
+      const currentItems = this.getDirectoryContents(OUTPUTS_DIR);
+      const snapshotItems = existsSync(snapshotDir) && !existsSync(join(snapshotDir, '.empty'))
+        ? this.getDirectoryContents(snapshotDir)
+        : new Map<string, { size: number; mtime: number }>();
+
+      // Find new or modified items
+      const newItems: string[] = [];
+      for (const [relativePath, stats] of currentItems) {
+        const snapshotStats = snapshotItems.get(relativePath);
+        if (!snapshotStats || stats.size !== snapshotStats.size || stats.mtime > snapshotStats.mtime) {
+          newItems.push(relativePath);
+        }
+      }
+
+      if (newItems.length === 0) {
+        return 0; // No new outputs to capture
+      }
+
+      // Create run outputs directory
+      mkdirSync(runOutputsDir, { recursive: true });
+
+      // Copy new/modified items to run outputs
+      for (const relativePath of newItems) {
+        const sourcePath = join(OUTPUTS_DIR, relativePath);
+        const destPath = join(runOutputsDir, relativePath);
+
+        // Ensure parent directory exists
+        mkdirSync(dirname(destPath), { recursive: true });
+
+        const stats = statSync(sourcePath);
+        if (stats.isDirectory()) {
+          cpSync(sourcePath, destPath, { recursive: true });
+        } else {
+          cpSync(sourcePath, destPath);
+        }
+      }
+
+      return newItems.length;
+    } catch (error) {
+      this.logger.log(`Failed to capture run outputs: ${error}\n`, { type: 'error' });
+      return 0;
+    }
+  }
+
+  /**
+   * Get all files/folders in a directory with their stats
+   * Returns a map of relative paths to {size, mtime}
+   */
+  private getDirectoryContents(dir: string, basePath: string = ''): Map<string, { size: number; mtime: number }> {
+    const contents = new Map<string, { size: number; mtime: number }>();
+
+    try {
+      const items = readdirSync(dir);
+      for (const item of items) {
+        const fullPath = join(dir, item);
+        const relativePath = basePath ? join(basePath, item) : item;
+        const stats = statSync(fullPath);
+
+        contents.set(relativePath, {
+          size: stats.size,
+          mtime: stats.mtimeMs
+        });
+
+        if (stats.isDirectory()) {
+          // Recursively get contents of subdirectories
+          const subContents = this.getDirectoryContents(fullPath, relativePath);
+          for (const [subPath, subStats] of subContents) {
+            contents.set(subPath, subStats);
+          }
+        }
+      }
+    } catch (error) {
+      // Ignore errors, return what we have
+    }
+
+    return contents;
+  }
+
+  /**
+   * Clean up after ablation completes
+   * Restores the original outputs state from the _initial snapshot
+   */
+  cleanupOutputsSnapshot(runDir: string, restoreOriginal: boolean = true): void {
+    const snapshotDir = this.getSnapshotDir(runDir);
+
+    try {
+      if (restoreOriginal && existsSync(snapshotDir)) {
+        // Restore original outputs state
+        if (existsSync(OUTPUTS_DIR)) {
+          rmSync(OUTPUTS_DIR, { recursive: true, force: true });
+        }
+
+        const emptyMarker = join(snapshotDir, '.empty');
+        if (!existsSync(emptyMarker)) {
+          mkdirSync(OUTPUTS_DIR, { recursive: true });
+          cpSync(snapshotDir, OUTPUTS_DIR, { recursive: true });
+        } else {
+          // Original was empty, just create empty folder
+          mkdirSync(OUTPUTS_DIR, { recursive: true });
+        }
+      }
+    } catch (error) {
+      this.logger.log(`Failed to cleanup outputs snapshot: ${error}\n`, { type: 'error' });
+    }
+  }
+
+  /**
+   * Get the outputs directory for a specific run result
+   */
+  getRunOutputsDir(runDir: string, phaseName: string, model: AblationModel): string {
+    return join(runDir, 'outputs', this.sanitizeName(phaseName), this.sanitizeName(model.model));
   }
 }
