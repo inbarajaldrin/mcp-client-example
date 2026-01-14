@@ -69,6 +69,7 @@ export class MCPClientCLI {
 
         // Close readline
         if (this.rl) {
+          this.client.setReadlineInterface(null);
           this.rl.close();
           this.rl = null;
         }
@@ -133,6 +134,25 @@ export class MCPClientCLI {
         output: process.stdout,
       });
 
+      // Share readline with MCP client for elicitation handling
+      this.client.setReadlineInterface(this.rl);
+
+      // Set elicitation callbacks to pause/resume keyboard monitoring
+      let wasMonitoring = false;
+      this.client.setElicitationCallbacks(
+        () => {
+          wasMonitoring = this.isMonitoring;
+          if (wasMonitoring) {
+            this.stopKeyboardMonitoring();
+          }
+        },
+        () => {
+          if (wasMonitoring) {
+            this.startKeyboardMonitoring();
+          }
+        }
+      );
+
       await this.chat_loop();
     } catch (error) {
       if (!this.isShuttingDown) {
@@ -156,10 +176,11 @@ export class MCPClientCLI {
       this.stopKeyboardMonitoring();
 
       if (this.rl) {
+        this.client.setReadlineInterface(null);
         this.rl.close();
         this.rl = null;
       }
-      
+
       await this.client.stop();
     } catch (error) {
       // Ignore errors during cleanup
@@ -276,6 +297,9 @@ export class MCPClientCLI {
           input: process.stdin,
           output: process.stdout,
         });
+
+        // Share readline with MCP client for elicitation handling
+        this.client.setReadlineInterface(this.rl);
 
         // Restore history after recreating readline
         if (savedHistory.length > 0) {

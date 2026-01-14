@@ -1,7 +1,9 @@
 import { StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { StdioClientTransport } from '@modelcontextprotocol/sdk/client/stdio.js';
-import { ListToolsResultSchema, CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
+import { ListToolsResultSchema, CallToolResultSchema, ElicitRequestSchema, type ElicitRequest } from '@modelcontextprotocol/sdk/types.js';
+import { ElicitationHandler } from '../handlers/elicitation-handler.js';
+import readline from 'readline/promises';
 import type { Tool } from '../model-provider.js';
 import { readFileSync, existsSync } from 'fs';
 import { join, dirname } from 'path';
@@ -117,12 +119,23 @@ export class TodoManager {
 
     const client = new Client(
       { name: 'cli-client', version: '1.0.0' },
-      { capabilities: {} },
+      { capabilities: { elicitation: { form: {} } } },
     );
     const transport = new StdioClientTransport(this.todoServerConfig);
 
     await client.connect(transport);
-    
+
+    // Register elicitation request handler
+    const elicitationHandler = new ElicitationHandler(this.logger, () =>
+      readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      })
+    );
+    client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
+      return elicitationHandler.handleElicitation(request);
+    });
+
     // Give the server process a moment to fully initialize
     await new Promise(resolve => setTimeout(resolve, 200));
 

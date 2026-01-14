@@ -600,6 +600,63 @@ You: /prompts-manager
 
 **Note:** Prompt states persist across all launch modes, similar to tool states.
 
+### MCP Elicitation Support
+
+The client supports MCP elicitation, allowing servers to request additional user input during tool execution. This is useful for confirmations, form fields, or gathering required information before proceeding with an operation.
+
+**How it works:**
+
+When a server sends an elicitation request, the CLI will:
+1. Display the server's message
+2. Prompt you to Accept, Decline, or Cancel
+3. If accepted, collect form data based on the server's schema
+
+**Example:**
+
+```bash
+────────────────────────────────────────────────────────────
+[Server Request]
+Please confirm the gripper operation you want to perform:
+
+[A]ccept / [D]ecline / [C]ancel: a
+
+Gripper Action * (Select the gripper action to perform)
+  Options:
+    1. Open
+    2. Close (default)
+  Select (number or value): 2
+
+Force (N) (Gripper force in Newtons)
+  [1-100] (default: 50): 75
+
+────────────────────────────────────────────────────────────
+```
+
+**Response Options:**
+
+- **Accept (a)**: Proceed with providing the requested information
+- **Decline (d)**: Refuse the request (server receives decline response)
+- **Cancel (c)**: Cancel the operation (server receives cancel response)
+
+**Supported Field Types:**
+
+| Type | Input Method |
+|------|--------------|
+| `string` | Text input with optional format validation (email, uri, date) |
+| `string` (enum) | Numbered selection menu |
+| `string` (oneOf) | Numbered selection menu with titles |
+| `number`/`integer` | Numeric input with min/max validation |
+| `boolean` | y/n prompt |
+| `array` | Comma-separated numbered selections |
+
+**Server Requirements:**
+
+To use elicitation, your MCP server must:
+- Use MCP SDK version 1.25.0 or later (Python) / 1.25.2 or later (Node.js)
+- Declare elicitation capability and call the elicit method
+
+**Note:** URL-based elicitation (for OAuth flows, etc.) is not currently supported. The client will automatically decline URL elicitation requests.
+
 ### Client Preferences
 
 The client stores user preferences in `.mcp-client-data/preferences.json`. This includes tool states, prompt states, and client settings.

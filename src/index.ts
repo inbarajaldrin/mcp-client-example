@@ -7,8 +7,10 @@ import {
   CallToolResultSchema,
   ListPromptsResultSchema,
   GetPromptResultSchema,
+  ElicitRequestSchema,
   type Prompt,
   type GetPromptResult,
+  type ElicitRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import chalk from 'chalk';
@@ -30,6 +32,8 @@ import type {
 } from './model-provider.js';
 import { AnthropicProvider, type ToolExecutor } from './providers/anthropic.js';
 import { OrchestratorIPCServer } from './ipc-server.js';
+import { ElicitationHandler } from './handlers/elicitation-handler.js';
+import readline from 'readline/promises';
 
 type MCPClientOptions = StdioServerParameters & {
   loggerOptions?: LoggerOptions;
@@ -79,6 +83,7 @@ export class MCPClient {
   private enableOrchestratorIPC: boolean = false;
   private ipcListenersSetup: boolean = false; // Track if IPC listeners are already set up
   private toolInputTimes: Map<string, string> = new Map(); // Track tool input times by tool name/id
+  private elicitationHandler: ElicitationHandler;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -141,6 +146,14 @@ export class MCPClient {
     
     // Initialize attachment manager
     this.attachmentManager = new AttachmentManager(this.logger);
+
+    // Initialize elicitation handler
+    this.elicitationHandler = new ElicitationHandler(this.logger, () =>
+      readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      })
+    );
   }
 
   // Constructor for multiple named servers
@@ -187,6 +200,12 @@ export class MCPClient {
     client.enableOrchestratorIPC = options?.enableOrchestratorIPC ?? false;
     client.ipcListenersSetup = false;
     client.toolInputTimes = new Map(); // Track tool input times by tool name/id
+    client.elicitationHandler = new ElicitationHandler(client.logger, () =>
+      readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      })
+    );
     return client;
   }
 
@@ -249,12 +268,17 @@ export class MCPClient {
 
         const client = new Client(
           { name: 'cli-client', version: '1.0.0' },
-          { capabilities: {} },
+          { capabilities: { elicitation: { form: {} } } },
         );
         const transport = new StdioClientTransport(config);
 
         await client.connect(transport);
-        
+
+        // Register elicitation request handler
+        client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
+          return this.elicitationHandler.handleElicitation(request);
+        });
+
         // Give the server process a moment to fully initialize
         await new Promise(resolve => setTimeout(resolve, 200));
 
@@ -413,11 +437,16 @@ export class MCPClient {
 
         const client = new Client(
           { name: 'cli-client', version: '1.0.0' },
-          { capabilities: {} },
+          { capabilities: { elicitation: { form: {} } } },
         );
         const transport = new StdioClientTransport(config);
 
         await client.connect(transport);
+
+        // Register elicitation request handler
+        client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
+          return this.elicitationHandler.handleElicitation(request);
+        });
 
         // Give the server process a moment to fully initialize
         await new Promise(resolve => setTimeout(resolve, 200));
@@ -894,10 +923,15 @@ export class MCPClient {
 
         const client = new Client(
           { name: 'cli-client', version: '1.0.0' },
-          { capabilities: {} },
+          { capabilities: { elicitation: { form: {} } } },
         );
         const transport = new StdioClientTransport(todoConfig.config);
         await client.connect(transport);
+
+        // Register elicitation request handler
+        client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
+          return this.elicitationHandler.handleElicitation(request);
+        });
 
         // Give the server process a moment to fully initialize
         await new Promise(resolve => setTimeout(resolve, 200));
@@ -1072,6 +1106,22 @@ export class MCPClient {
    */
   getModel(): string {
     return this.model;
+  }
+
+  /**
+   * Set the readline interface for elicitation handling.
+   * This prevents double input capture when CLI already has a readline active.
+   */
+  setReadlineInterface(rl: readline.Interface | null): void {
+    this.elicitationHandler.setExternalReadline(rl);
+  }
+
+  /**
+   * Set callbacks for elicitation start/end events.
+   * Used by CLI to pause keyboard monitoring during elicitation.
+   */
+  setElicitationCallbacks(onStart: () => void, onEnd: () => void): void {
+    this.elicitationHandler.setElicitationCallbacks(onStart, onEnd);
   }
 
   /**
@@ -1344,11 +1394,16 @@ export class MCPClient {
         
         const client = new Client(
           { name: 'cli-client', version: '1.0.0' },
-          { capabilities: {} },
+          { capabilities: { elicitation: { form: {} } } },
         );
         const transport = new StdioClientTransport(config);
         await client.connect(transport);
-        
+
+        // Register elicitation request handler
+        client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
+          return this.elicitationHandler.handleElicitation(request);
+        });
+
         // Give the server process a moment to fully initialize
         await new Promise(resolve => setTimeout(resolve, 200));
 
