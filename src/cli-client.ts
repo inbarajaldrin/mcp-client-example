@@ -14,6 +14,21 @@ import { ChatHistoryCLI } from './cli/chat-history-cli.js';
 import { PromptCLI } from './cli/prompt-cli.js';
 import { AblationCLI } from './cli/ablation-cli.js';
 
+// Command list for tab autocomplete
+const CLI_COMMANDS = [
+  '/help', '/exit', '/clear', '/clear-context',
+  '/token-status', '/tokens', '/summarize', '/summarize-now',
+  '/settings', '/refresh', '/refresh-servers',
+  '/set-timeout', '/set-max-iterations',
+  '/todo-on', '/todo-off',
+  '/orchestrator-on', '/orchestrator-off',
+  '/tools', '/tools-list', '/tools-manager', '/tools-select',
+  '/prompts', '/prompts-list', '/prompts-manager', '/prompts-select', '/add-prompt',
+  '/attachment-upload', '/attachment-list', '/attachment-insert', '/attachment-rename', '/attachment-clear',
+  '/chat-list', '/chat-search', '/chat-restore', '/chat-export', '/chat-rename', '/chat-clear',
+  '/ablation-create', '/ablation-list', '/ablation-edit', '/ablation-run', '/ablation-delete', '/ablation-results',
+];
+
 export class MCPClientCLI {
   private rl: readline.Interface | null = null;
   private client: MCPClient;
@@ -141,6 +156,14 @@ export class MCPClientCLI {
     this.signalHandler.setup();
   }
 
+  /**
+   * Tab autocomplete for CLI commands
+   */
+  private completer(line: string): [string[], string] {
+    const hits = CLI_COMMANDS.filter(cmd => cmd.startsWith(line.toLowerCase()));
+    return [hits.length ? hits : CLI_COMMANDS, line];
+  }
+
   async start() {
     try {
       this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
@@ -166,6 +189,7 @@ export class MCPClientCLI {
       this.rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
+        completer: this.completer.bind(this),
       });
 
       // Share readline with MCP client for elicitation handling
