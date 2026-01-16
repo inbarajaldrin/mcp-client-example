@@ -32,6 +32,11 @@ export interface MCPToolExecutorCallbacks {
   /** Get preferences manager */
   getPreferencesManager: () => PreferencesManager | undefined;
   /**
+   * Check if abort has been requested by the user.
+   * The force stop timer only starts AFTER abort is requested.
+   */
+  isAbortRequested?: () => boolean;
+  /**
    * Ask user if they want to force stop a long-running tool call.
    * Returns true if user wants to force stop, false to continue waiting.
    * If not provided, no force stop prompt will be shown.
@@ -56,7 +61,8 @@ export class MCPToolExecutor {
 
   /**
    * Wraps a promise with a force stop timeout mechanism.
-   * After FORCE_STOP_TIMEOUT_SECONDS, prompts the user if they want to force stop.
+   * The timer only starts AFTER the user presses abort.
+   * After FORCE_STOP_TIMEOUT_SECONDS from abort, prompts the user if they want to force stop.
    * If user approves, rejects the promise. Otherwise, continues waiting.
    */
   private async withForceStopPrompt<T>(
@@ -64,14 +70,16 @@ export class MCPToolExecutor {
     toolPromise: Promise<T>,
   ): Promise<T> {
     const askForceStop = this.callbacks.askForceStop;
-    if (!askForceStop) {
-      // No callback provided, just return the original promise
+    const isAbortRequested = this.callbacks.isAbortRequested;
+    if (!askForceStop || !isAbortRequested) {
+      // No callbacks provided, just return the original promise
       return toolPromise;
     }
 
     return new Promise<T>((resolve, reject) => {
       let isCompleted = false;
-      let elapsedSeconds = 0;
+      let abortDetected = false;
+      let elapsedSecondsAfterAbort = 0;
 
       // Handle tool completion
       toolPromise
@@ -88,31 +96,51 @@ export class MCPToolExecutor {
           }
         });
 
-      // Set up recurring timeout check
-      const checkTimeout = async () => {
+      // Poll for abort being requested, then start the force stop timer
+      const pollInterval = 500; // Check every 500ms for abort
+
+      const checkAbortAndTimeout = async () => {
         if (isCompleted) return;
 
-        elapsedSeconds += FORCE_STOP_TIMEOUT_SECONDS;
+        // Check if abort was requested
+        if (!abortDetected && isAbortRequested()) {
+          abortDetected = true;
+          elapsedSecondsAfterAbort = 0;
+          // Abort detected, now start the countdown
+        }
 
-        try {
-          const shouldForceStop = await askForceStop(toolName, elapsedSeconds);
-          if (shouldForceStop && !isCompleted) {
-            isCompleted = true;
-            reject(new Error(`Tool "${toolName}" force stopped by user after ${elapsedSeconds} seconds`));
-          } else if (!isCompleted) {
-            // User chose to continue waiting, set up another timeout
-            setTimeout(checkTimeout, FORCE_STOP_TIMEOUT_SECONDS * 1000);
+        if (abortDetected) {
+          elapsedSecondsAfterAbort += pollInterval / 1000;
+
+          // Check if we've waited long enough after abort
+          if (elapsedSecondsAfterAbort >= FORCE_STOP_TIMEOUT_SECONDS) {
+            try {
+              const shouldForceStop = await askForceStop(toolName, Math.floor(elapsedSecondsAfterAbort));
+              if (shouldForceStop && !isCompleted) {
+                isCompleted = true;
+                reject(new Error(`Tool "${toolName}" force stopped by user after ${Math.floor(elapsedSecondsAfterAbort)} seconds`));
+                return;
+              } else if (!isCompleted) {
+                // User chose to continue waiting, reset the timer
+                elapsedSecondsAfterAbort = 0;
+              }
+            } catch (promptError) {
+              // If prompting fails, reset the timer and continue
+              if (!isCompleted) {
+                elapsedSecondsAfterAbort = 0;
+              }
+            }
           }
-        } catch (promptError) {
-          // If prompting fails, continue waiting silently
-          if (!isCompleted) {
-            setTimeout(checkTimeout, FORCE_STOP_TIMEOUT_SECONDS * 1000);
-          }
+        }
+
+        // Continue polling
+        if (!isCompleted) {
+          setTimeout(checkAbortAndTimeout, pollInterval);
         }
       };
 
-      // Start the first timeout
-      setTimeout(checkTimeout, FORCE_STOP_TIMEOUT_SECONDS * 1000);
+      // Start polling for abort
+      setTimeout(checkAbortAndTimeout, pollInterval);
     });
   }
 

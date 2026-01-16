@@ -211,7 +211,12 @@ export class MCPClientCLI {
         }
       );
 
-      // Set force stop callback to prompt user when tool calls take too long
+      // Set abort check callback to detect when user presses 'a' to abort
+      this.client.setAbortRequestedCallback(() => {
+        return this.keyboardMonitor.abortRequested;
+      });
+
+      // Set force stop callback to prompt user when tool calls take too long after abort
       this.client.setForceStopCallback(async (toolName, elapsedSeconds) => {
         return this.askForceStopPrompt(toolName, elapsedSeconds);
       });

@@ -87,6 +87,7 @@ export class MCPClient {
   private elicitationHandler: ElicitationHandler;
   private toolExecutor: MCPToolExecutor;
   private forceStopCallback?: (toolName: string, elapsedSeconds: number) => Promise<boolean>;
+  private isAbortRequestedCallback?: () => boolean;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -150,6 +151,12 @@ export class MCPClient {
     this.toolExecutor = new MCPToolExecutor(this.logger, {
       getServers: () => this.servers,
       getPreferencesManager: () => this.preferencesManager,
+      isAbortRequested: () => {
+        if (this.isAbortRequestedCallback) {
+          return this.isAbortRequestedCallback();
+        }
+        return false; // Default: not aborted
+      },
       askForceStop: (toolName, elapsedSeconds) => {
         if (this.forceStopCallback) {
           return this.forceStopCallback(toolName, elapsedSeconds);
@@ -223,6 +230,12 @@ export class MCPClient {
     client.toolExecutor = new MCPToolExecutor(client.logger, {
       getServers: () => client.servers,
       getPreferencesManager: () => client.preferencesManager,
+      isAbortRequested: () => {
+        if (client.isAbortRequestedCallback) {
+          return client.isAbortRequestedCallback();
+        }
+        return false; // Default: not aborted
+      },
       askForceStop: (toolName, elapsedSeconds) => {
         if (client.forceStopCallback) {
           return client.forceStopCallback(toolName, elapsedSeconds);
@@ -921,11 +934,19 @@ export class MCPClient {
 
   /**
    * Set callback for force stop prompts.
-   * Called when a tool call exceeds the force stop timeout (10 seconds).
+   * Called when a tool call exceeds the force stop timeout (10 seconds after abort is requested).
    * The callback should prompt the user and return true to force stop, false to continue waiting.
    */
   setForceStopCallback(callback: (toolName: string, elapsedSeconds: number) => Promise<boolean>): void {
     this.forceStopCallback = callback;
+  }
+
+  /**
+   * Set callback to check if abort has been requested.
+   * The force stop timer only starts AFTER abort is requested.
+   */
+  setAbortRequestedCallback(callback: () => boolean): void {
+    this.isAbortRequestedCallback = callback;
   }
 
   /**
