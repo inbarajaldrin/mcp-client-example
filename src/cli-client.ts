@@ -187,6 +187,11 @@ export class MCPClientCLI {
         }
       );
 
+      // Set force stop callback to prompt user when tool calls take too long
+      this.client.setForceStopCallback(async (toolName, elapsedSeconds) => {
+        return this.askForceStopPrompt(toolName, elapsedSeconds);
+      });
+
       await this.chat_loop();
     } catch (error) {
       if (!this.isShuttingDown) {
@@ -218,6 +223,61 @@ export class MCPClientCLI {
       await this.client.stop();
     } catch (error) {
       // Ignore errors during cleanup
+    }
+  }
+
+  /**
+   * Prompt user to force stop a long-running tool call.
+   * Returns true if user wants to force stop, false to continue waiting.
+   */
+  private async askForceStopPrompt(toolName: string, elapsedSeconds: number): Promise<boolean> {
+    // Stop keyboard monitoring to allow readline to work
+    const wasMonitoring = this.keyboardMonitor.isMonitoring;
+    if (wasMonitoring) {
+      this.keyboardMonitor.stop();
+    }
+
+    // Clear any pending input to avoid it interfering with the prompt
+    this.keyboardMonitor.clearPendingInput();
+
+    // Create a temporary readline if needed
+    let tempRl: readline.Interface | null = null;
+    let rlToUse = this.rl;
+
+    if (!rlToUse) {
+      tempRl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      rlToUse = tempRl;
+    }
+
+    try {
+      console.log(`\nTool "${toolName}" has been running for ${elapsedSeconds} seconds.`);
+      console.log('Do you want to force stop this tool call? (y/n)');
+
+      const response = await rlToUse.question('> ');
+      const answer = response.trim().toLowerCase();
+
+      const shouldStop = answer === 'y' || answer === 'yes';
+
+      if (shouldStop) {
+        this.logger.log('\nForce stopping tool call...\n', { type: 'warning' });
+      } else {
+        this.logger.log('\nContinuing to wait for tool result...\n', { type: 'info' });
+      }
+
+      return shouldStop;
+    } finally {
+      // Clean up temporary readline if we created one
+      if (tempRl) {
+        tempRl.close();
+      }
+
+      // Restart keyboard monitoring if it was active
+      if (wasMonitoring) {
+        this.keyboardMonitor.start();
+      }
     }
   }
 

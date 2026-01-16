@@ -86,6 +86,7 @@ export class MCPClient {
   private toolInputTimes: Map<string, string> = new Map(); // Track tool input times by tool name/id
   private elicitationHandler: ElicitationHandler;
   private toolExecutor: MCPToolExecutor;
+  private forceStopCallback?: (toolName: string, elapsedSeconds: number) => Promise<boolean>;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -149,6 +150,12 @@ export class MCPClient {
     this.toolExecutor = new MCPToolExecutor(this.logger, {
       getServers: () => this.servers,
       getPreferencesManager: () => this.preferencesManager,
+      askForceStop: (toolName, elapsedSeconds) => {
+        if (this.forceStopCallback) {
+          return this.forceStopCallback(toolName, elapsedSeconds);
+        }
+        return Promise.resolve(false); // Default: don't force stop
+      },
     });
     
     // Initialize prompt manager
@@ -216,6 +223,12 @@ export class MCPClient {
     client.toolExecutor = new MCPToolExecutor(client.logger, {
       getServers: () => client.servers,
       getPreferencesManager: () => client.preferencesManager,
+      askForceStop: (toolName, elapsedSeconds) => {
+        if (client.forceStopCallback) {
+          return client.forceStopCallback(toolName, elapsedSeconds);
+        }
+        return Promise.resolve(false); // Default: don't force stop
+      },
     });
     client.promptManager = new PromptManager(client.logger);
     client.chatHistoryManager = new ChatHistoryManager(client.logger);
@@ -904,6 +917,15 @@ export class MCPClient {
    */
   setElicitationCallbacks(onStart: () => void, onEnd: () => void): void {
     this.elicitationHandler.setElicitationCallbacks(onStart, onEnd);
+  }
+
+  /**
+   * Set callback for force stop prompts.
+   * Called when a tool call exceeds the force stop timeout (10 seconds).
+   * The callback should prompt the user and return true to force stop, false to continue waiting.
+   */
+  setForceStopCallback(callback: (toolName: string, elapsedSeconds: number) => Promise<boolean>): void {
+    this.forceStopCallback = callback;
   }
 
   /**
