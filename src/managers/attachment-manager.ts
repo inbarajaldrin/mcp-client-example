@@ -3,6 +3,7 @@ import path from 'path';
 import { fileURLToPath } from 'url';
 import { dirname, join } from 'path';
 import { Logger } from '../logger.js';
+import { getMediaType as getMimeType } from '../utils/mime-types.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -73,19 +74,7 @@ export class AttachmentManager {
    * Map file extension to MIME type
    */
   getMediaType(ext: string): string {
-    const types: Record<string, string> = {
-      '.pdf': 'application/pdf',
-      '.png': 'image/png',
-      '.jpg': 'image/jpeg',
-      '.jpeg': 'image/jpeg',
-      '.gif': 'image/gif',
-      '.webp': 'image/webp',
-      '.txt': 'text/plain',
-      '.md': 'text/markdown',
-      '.json': 'application/json',
-      '.csv': 'text/csv',
-    };
-    return types[ext.toLowerCase()] || 'application/octet-stream';
+    return getMimeType(ext);
   }
 
   /**

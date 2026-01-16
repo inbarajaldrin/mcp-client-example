@@ -3,6 +3,7 @@ import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { Logger } from '../logger.js';
 import * as yaml from 'yaml';
+import { sanitizeFolderName } from '../utils/path-utils.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -87,26 +88,14 @@ export class AblationManager {
    * Get path to an ablation definition file
    */
   private getAblationPath(name: string): string {
-    return join(ABLATIONS_DIR, `${this.sanitizeName(name)}.yaml`);
-  }
-
-  /**
-   * Sanitize ablation name for file system
-   */
-  private sanitizeName(name: string): string {
-    return name
-      .toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, '')
-      .replace(/\s+/g, '-')
-      .replace(/-+/g, '-')
-      .replace(/^-|-$/g, '');
+    return join(ABLATIONS_DIR, `${sanitizeFolderName(name)}.yaml`);
   }
 
   /**
    * Create a new ablation study
    */
   create(ablation: Omit<AblationDefinition, 'created'>): AblationDefinition {
-    const sanitizedName = this.sanitizeName(ablation.name);
+    const sanitizedName = sanitizeFolderName(ablation.name);
     const path = this.getAblationPath(sanitizedName);
 
     if (existsSync(path)) {
@@ -348,7 +337,7 @@ export class AblationManager {
    */
   getRunDirectory(ablationName: string, timestamp?: string): string {
     const ts = timestamp || this.formatTimestamp(new Date());
-    return join(RUNS_DIR, this.sanitizeName(ablationName), ts);
+    return join(RUNS_DIR, sanitizeFolderName(ablationName), ts);
   }
 
   /**
@@ -382,7 +371,7 @@ export class AblationManager {
    * Create phase directory within a run
    */
   createPhaseDirectory(runDir: string, phaseName: string): string {
-    const phaseDir = join(runDir, 'chats', this.sanitizeName(phaseName));
+    const phaseDir = join(runDir, 'chats', sanitizeFolderName(phaseName));
     mkdirSync(phaseDir, { recursive: true });
     return phaseDir;
   }
@@ -418,7 +407,7 @@ export class AblationManager {
    * List all runs for an ablation
    */
   listRuns(ablationName: string): { timestamp: string; run: AblationRun }[] {
-    const ablationRunsDir = join(RUNS_DIR, this.sanitizeName(ablationName));
+    const ablationRunsDir = join(RUNS_DIR, sanitizeFolderName(ablationName));
     const runs: { timestamp: string; run: AblationRun }[] = [];
 
     if (!existsSync(ablationRunsDir)) {
@@ -487,7 +476,7 @@ export class AblationManager {
    * Get chat file name for a run
    */
   getChatFileName(model: AblationModel): string {
-    return `${this.sanitizeName(model.model)}.json`;
+    return `${sanitizeFolderName(model.model)}.json`;
   }
 
   // ==================== Attachments Management ====================
@@ -632,7 +621,7 @@ export class AblationManager {
    */
   captureRunOutputs(runDir: string, phaseName: string, model: AblationModel): number {
     const snapshotDir = this.getSnapshotDir(runDir);
-    const runOutputsDir = join(runDir, 'outputs', this.sanitizeName(phaseName), this.sanitizeName(model.model));
+    const runOutputsDir = join(runDir, 'outputs', sanitizeFolderName(phaseName), sanitizeFolderName(model.model));
 
     try {
       if (!existsSync(OUTPUTS_DIR)) {
@@ -749,6 +738,6 @@ export class AblationManager {
    * Get the outputs directory for a specific run result
    */
   getRunOutputsDir(runDir: string, phaseName: string, model: AblationModel): string {
-    return join(runDir, 'outputs', this.sanitizeName(phaseName), this.sanitizeName(model.model));
+    return join(runDir, 'outputs', sanitizeFolderName(phaseName), sanitizeFolderName(model.model));
   }
 }

@@ -1,5 +1,6 @@
 import readline from 'readline/promises';
 import { Logger } from '../logger.js';
+import { AbstractHandler } from './base-handler.js';
 import type { ElicitRequest, ElicitResult } from '@modelcontextprotocol/sdk/types.js';
 
 // Field schema types from MCP spec
@@ -64,16 +65,29 @@ interface ElicitationSchema {
   required?: string[];
 }
 
-export class ElicitationHandler {
-  private logger: Logger;
+export class ElicitationHandler extends AbstractHandler {
   private createReadline: () => readline.Interface;
   private externalReadline: readline.Interface | null = null;
   private onElicitationStart: (() => void) | null = null;
   private onElicitationEnd: (() => void) | null = null;
 
   constructor(logger: Logger, createReadline: () => readline.Interface) {
-    this.logger = logger;
+    super(logger);
     this.createReadline = createReadline;
+  }
+
+  /**
+   * No setup needed for elicitation handler.
+   */
+  setup(): void {
+    // Elicitation handler doesn't need setup - it's request-driven
+  }
+
+  /**
+   * No cleanup needed for elicitation handler.
+   */
+  cleanup(): void {
+    // Elicitation handler doesn't need cleanup
   }
 
   /**

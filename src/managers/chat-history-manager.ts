@@ -1,8 +1,11 @@
-import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, renameSync, readdirSync, statSync, copyFileSync, rmdirSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, appendFileSync, unlinkSync, renameSync, readdirSync, statSync, copyFileSync } from 'fs';
 import { join, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { Logger } from '../logger.js';
 import type { Message } from '../model-provider.js';
+import { MODEL_PRICING } from '../utils/model-pricing.js';
+import { sanitizeFolderName } from '../utils/path-utils.js';
+import { directoryHasFiles, copyDirectoryRecursive, moveDirectoryRecursive } from '../utils/file-ops.js';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -92,107 +95,6 @@ export interface ChatSession {
     totalCost?: number; // Total estimated cost in USD for the session
   };
 }
-
-// Model pricing (per million tokens in USD)
-// Model pricing per million tokens (USD)
-// Sources: 
-// - Anthropic: https://www.anthropic.com/pricing (updated December 2025)
-// - OpenAI: https://platform.openai.com/docs/models (updated December 2025)
-// - Google Gemini: https://ai.google.dev/gemini-api/docs/pricing (updated January 2025)
-// Note: Pricing may vary by context window size (e.g., >200K tokens for Sonnet 4.5, >128K for Gemini 1.5)
-// Cache pricing: Anthropic uses 10% of input price (90% discount), OpenAI varies by model
-const MODEL_PRICING: Record<string, { input: number; output: number; inputLongContext?: number; outputLongContext?: number; cachedInput?: number; longContextThreshold?: number }> = {
-  // ========== Anthropic Claude Models ==========
-  // Claude 4.5 Opus
-  'claude-opus-4-5-20251101': { input: 5.00, output: 25.00, cachedInput: 0.50 }, // 10% discount
-  'claude-4-5-opus': { input: 5.00, output: 25.00, cachedInput: 0.50 },
-  
-  // Claude Sonnet 4.5 (standard: 0-200K tokens, long context: >200K tokens)
-  'claude-sonnet-4-5-20251101': { input: 3.00, output: 15.00, inputLongContext: 6.00, outputLongContext: 22.50, cachedInput: 0.30 },
-  'claude-3-7-sonnet-latest': { input: 3.00, output: 15.00, inputLongContext: 6.00, outputLongContext: 22.50, cachedInput: 0.30 },
-  'claude-3-7-sonnet-20250219': { input: 3.00, output: 15.00, inputLongContext: 6.00, outputLongContext: 22.50, cachedInput: 0.30 },
-  
-  // Claude 3.5 Sonnet
-  'claude-3-5-sonnet-20241022': { input: 3.00, output: 15.00, cachedInput: 0.30 },
-  'claude-3-5-sonnet-20240620': { input: 3.00, output: 15.00, cachedInput: 0.30 },
-  'claude-3-5-sonnet-latest': { input: 3.00, output: 15.00, cachedInput: 0.30 },
-  
-  // Claude 3.5 Haiku
-  'claude-haiku-4-5-20251001': { input: 0.80, output: 4.00, cachedInput: 0.08 },
-  'claude-3-5-haiku-20241022': { input: 0.80, output: 4.00, cachedInput: 0.08 },
-  'claude-3-5-haiku-latest': { input: 0.80, output: 4.00, cachedInput: 0.08 },
-  
-  // Claude 3 Opus (legacy)
-  'claude-3-opus-20240229': { input: 15.00, output: 75.00, cachedInput: 1.50 },
-  
-  // Claude 3 Sonnet (legacy)
-  'claude-3-sonnet-20240229': { input: 3.00, output: 15.00, cachedInput: 0.30 },
-  
-  // Claude 3 Haiku (legacy)
-  'claude-3-haiku-20240307': { input: 0.25, output: 1.25, cachedInput: 0.025 },
-  
-  // ========== OpenAI Models ==========
-  // GPT-5 and GPT-5-Codex
-  'gpt-5': { input: 1.25, output: 10.00, cachedInput: 0.125 }, // 10% discount
-  'gpt-5-chat-latest': { input: 1.25, output: 10.00, cachedInput: 0.125 },
-  'gpt-5-codex': { input: 1.25, output: 10.00, cachedInput: 0.125 },
-  
-  // GPT-5 Mini
-  'gpt-5-mini': { input: 0.25, output: 2.00, cachedInput: 0.025 }, // 10% discount
-  'gpt-5-mini-latest': { input: 0.25, output: 2.00, cachedInput: 0.025 },
-  
-  // ChatGPT-4o
-  'chatgpt-4o-latest': { input: 5.00, output: 15.00 },
-  
-  // GPT-4o
-  'gpt-4o': { input: 2.50, output: 10.00 },
-  'gpt-4o-2024-08-06': { input: 2.50, output: 10.00 },
-  'gpt-4o-2024-05-13': { input: 2.50, output: 10.00 },
-  
-  // GPT-4o mini
-  'gpt-4o-mini': { input: 0.15, output: 0.60 },
-  'gpt-4o-mini-2024-07-18': { input: 0.15, output: 0.60 },
-  
-  // GPT-4o mini Realtime
-  'gpt-4o-mini-realtime-preview': { input: 0.60, output: 2.40, cachedInput: 0.30 }, // 50% discount
-  
-  // GPT-4 Turbo
-  'gpt-4-turbo': { input: 10.00, output: 30.00 },
-  'gpt-4-turbo-2024-04-09': { input: 10.00, output: 30.00 },
-  
-  // GPT-4 (legacy)
-  'gpt-4': { input: 30.00, output: 60.00 },
-  'gpt-4-32k': { input: 60.00, output: 120.00 },
-  
-  // o1 series (reasoning models)
-  'o1-preview': { input: 15.00, output: 60.00, cachedInput: 7.50 }, // 50% discount
-  'o1-mini': { input: 3.00, output: 12.00, cachedInput: 1.50 }, // 50% discount
-  'o1-pro': { input: 15.00, output: 60.00, cachedInput: 7.50 },
-  'o3': { input: 15.00, output: 60.00, cachedInput: 7.50 },
-  
-  // GPT-3.5 Turbo
-  'gpt-3.5-turbo': { input: 0.50, output: 1.50 },
-  'gpt-3.5-turbo-16k': { input: 0.50, output: 1.50 },
-  
-  // ========== Google Gemini Models ==========
-  // Gemini 2.5 Pro (standard: 0-200K tokens, long context: >200K tokens)
-  'gemini-2.5-pro': { input: 1.25, output: 10.00, inputLongContext: 2.50, outputLongContext: 15.00, cachedInput: 0.125, longContextThreshold: 200_000 },
-  
-  // Gemini 2.5 Flash (flat pricing, no tiered pricing)
-  'gemini-2.5-flash': { input: 0.15, output: 0.60 },
-  
-  // Gemini 2.0 Flash (flat pricing, no tiered pricing)
-  'gemini-2.0-flash': { input: 0.10, output: 0.40, cachedInput: 0.025 },
-  
-  // Gemini 1.5 Pro (standard: 0-128K tokens, long context: >128K tokens)
-  'gemini-1.5-pro': { input: 1.25, output: 5.00, inputLongContext: 2.50, outputLongContext: 10.00, cachedInput: 0.625, longContextThreshold: 128_000 },
-  
-  // Gemini 1.5 Flash (standard: 0-128K tokens, long context: >128K tokens)
-  'gemini-1.5-flash': { input: 0.075, output: 0.30, inputLongContext: 0.15, outputLongContext: 0.60, longContextThreshold: 128_000 },
-  
-  // Gemini Robotics ER 1.5 Preview (flat pricing, no tiered pricing)
-  'gemini-robotics-er-1.5-preview': { input: 0.30, output: 2.50 },
-};
 
 export class ChatHistoryManager {
   private currentSession: ChatSession | null = null;
@@ -1234,40 +1136,6 @@ export class ChatHistoryManager {
   }
 
   /**
-   * Check if a directory contains any files (recursively)
-   * @param dirPath - Directory path to check
-   * @returns true if directory contains at least one file, false otherwise
-   */
-  private directoryHasFiles(dirPath: string): boolean {
-    try {
-      const items = readdirSync(dirPath);
-      
-      for (const item of items) {
-        const itemPath = join(dirPath, item);
-        try {
-          const stats = statSync(itemPath);
-          
-          if (stats.isFile()) {
-            return true; // Found at least one file
-          } else if (stats.isDirectory()) {
-            // Recursively check subdirectory
-            if (this.directoryHasFiles(itemPath)) {
-              return true;
-            }
-          }
-        } catch (error) {
-          // Skip items that can't be accessed
-          continue;
-        }
-      }
-      
-      return false; // No files found
-    } catch (error) {
-      return false;
-    }
-  }
-
-  /**
    * Move or copy outputs to the chat's folder
    * @param targetDir - The target directory for the chat
    * @param copy - If true, copy outputs; if false, move them; if null, skip
@@ -1307,7 +1175,7 @@ export class ChatHistoryManager {
             });
           } else if (stats.isDirectory()) {
             // Only include directory if it contains files
-            if (this.directoryHasFiles(sourcePath)) {
+            if (directoryHasFiles(sourcePath)) {
               itemsToMove.push({
                 sourcePath,
                 destPath: join(targetDir, 'outputs', item),
@@ -1350,9 +1218,9 @@ export class ChatHistoryManager {
             // Move or copy directory recursively
             if (!existsSync(item.destPath)) {
               if (copy) {
-                this.copyDirectoryRecursive(item.sourcePath, item.destPath);
+                copyDirectoryRecursive(item.sourcePath, item.destPath);
               } else {
-                this.moveDirectoryRecursive(item.sourcePath, item.destPath);
+                moveDirectoryRecursive(item.sourcePath, item.destPath);
               }
               movedCount++;
             }
@@ -1379,113 +1247,13 @@ export class ChatHistoryManager {
   }
 
   /**
-   * Recursively copy a directory
-   * @param sourceDir - Source directory path
-   * @param destDir - Destination directory path
-   */
-  private copyDirectoryRecursive(sourceDir: string, destDir: string): void {
-    if (!existsSync(destDir)) {
-      mkdirSync(destDir, { recursive: true });
-    }
-
-    const items = readdirSync(sourceDir);
-    
-    for (const item of items) {
-      const sourcePath = join(sourceDir, item);
-      const destPath = join(destDir, item);
-      
-      try {
-        const stats = statSync(sourcePath);
-        
-        if (stats.isFile()) {
-          copyFileSync(sourcePath, destPath);
-        } else if (stats.isDirectory()) {
-          // Only copy directory if it contains files
-          if (this.directoryHasFiles(sourcePath)) {
-            this.copyDirectoryRecursive(sourcePath, destPath);
-          }
-        }
-      } catch (error) {
-        // Skip items that can't be copied
-        continue;
-      }
-    }
-  }
-
-  /**
-   * Recursively move a directory (files are moved, not copied)
-   * @param sourceDir - Source directory path
-   * @param destDir - Destination directory path
-   */
-  private moveDirectoryRecursive(sourceDir: string, destDir: string): void {
-    if (!existsSync(destDir)) {
-      mkdirSync(destDir, { recursive: true });
-    }
-
-    const items = readdirSync(sourceDir);
-    
-    for (const item of items) {
-      const sourcePath = join(sourceDir, item);
-      const destPath = join(destDir, item);
-      
-      try {
-        const stats = statSync(sourcePath);
-        
-        if (stats.isFile()) {
-          // Move file (remove from source)
-          renameSync(sourcePath, destPath);
-        } else if (stats.isDirectory()) {
-          // Only move directory if it contains files
-          if (this.directoryHasFiles(sourcePath)) {
-            this.moveDirectoryRecursive(sourcePath, destPath);
-            // Remove empty source directory after moving contents
-            try {
-              const remainingItems = readdirSync(sourcePath);
-              if (remainingItems.length === 0) {
-                rmdirSync(sourcePath);
-              }
-            } catch (error) {
-              // Ignore errors when removing directory
-            }
-          }
-        }
-      } catch (error) {
-        // Skip items that can't be moved
-        continue;
-      }
-    }
-    
-    // Try to remove source directory if it's now empty
-    try {
-      const remainingItems = readdirSync(sourceDir);
-      if (remainingItems.length === 0) {
-        rmdirSync(sourceDir);
-      }
-    } catch (error) {
-      // Ignore errors when removing directory
-    }
-  }
-
-  /**
-   * Sanitize a folder name (remove special chars, replace spaces with hyphens)
-   */
-  private sanitizeFolderName(name: string): string {
-    return name
-      .toLowerCase()
-      .replace(/[^a-z0-9\s-]/g, '') // Remove special characters
-      .replace(/\s+/g, '-') // Replace spaces with hyphens
-      .replace(/-+/g, '-') // Replace multiple hyphens with single
-      .replace(/^-|-$/g, ''); // Remove leading/trailing hyphens
-  }
-
-  /**
    * Calculate and create target directory for chat operations
    * @param folderName - The folder name
    * @param parentFolderName - Optional parent folder name
    * @returns The target directory path, or null if invalid
    */
   private getTargetDirectory(folderName: string, parentFolderName?: string): string | null {
-    const sanitizedName = this.sanitizeFolderName(folderName);
+    const sanitizedName = sanitizeFolderName(folderName);
     
     if (!sanitizedName) {
       this.logger.log('Invalid folder name provided\n', { type: 'error' });
@@ -1494,7 +1262,7 @@ export class ChatHistoryManager {
 
     let targetDir: string;
     if (parentFolderName) {
-      const sanitizedParentName = this.sanitizeFolderName(parentFolderName);
+      const sanitizedParentName = sanitizeFolderName(parentFolderName);
       
       if (!sanitizedParentName) {
         this.logger.log('Invalid parent folder name provided\n', { type: 'error' });

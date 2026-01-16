@@ -13,7 +13,6 @@ import {
   type ElicitRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
-import chalk from 'chalk';
 import { consoleStyles, Logger, LoggerOptions } from './logger.js';
 import { TodoManager } from './managers/todo-manager.js';
 import { ROS2VideoRecordingManager } from './managers/ros2-video-recording-manager.js';
@@ -24,7 +23,6 @@ import { AttachmentManager } from './managers/attachment-manager.js';
 import { PreferencesManager } from './managers/preferences-manager.js';
 import type {
   ModelProvider,
-  TokenCounter,
   Tool,
   Message,
   SummarizationConfig,
@@ -33,6 +31,9 @@ import type {
 import { AnthropicProvider, type ToolExecutor } from './providers/anthropic.js';
 import { OrchestratorIPCServer } from './ipc-server.js';
 import { ElicitationHandler } from './handlers/elicitation-handler.js';
+import { formatToolCall, formatJSON } from './utils/formatting.js';
+import { TokenManager } from './core/token-manager.js';
+import { MCPToolExecutor } from './core/tool-executor.js';
 import readline from 'readline/promises';
 
 type MCPClientOptions = StdioServerParameters & {
@@ -63,7 +64,7 @@ export class MCPClient {
   private tools: Tool[] = [];
   private logger: Logger;
   private serverConfigs: MultiServerConfig[];
-  private tokenCounter: TokenCounter | null = null;
+  private tokenManager: TokenManager;
   private currentTokenCount: number = 0;
   private model: string;
   private todoManager: TodoManager;
@@ -84,6 +85,7 @@ export class MCPClient {
   private ipcListenersSetup: boolean = false; // Track if IPC listeners are already set up
   private toolInputTimes: Map<string, string> = new Map(); // Track tool input times by tool name/id
   private elicitationHandler: ElicitationHandler;
+  private toolExecutor: MCPToolExecutor;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -123,10 +125,15 @@ export class MCPClient {
       this.model = options.model;
     }
     
-    // Token counter will be initialized asynchronously in start() method
-    // We can't initialize it here because createTokenCounter is now async
-    // and we need to fetch context window from API
-    this.tokenCounter = null as any; // Will be set in start()
+    // Initialize token manager with callbacks
+    this.tokenManager = new TokenManager(this.logger, {
+      getMessages: () => this.messages,
+      setMessages: (messages) => { this.messages = messages; },
+      getCurrentTokenCount: () => this.currentTokenCount,
+      setCurrentTokenCount: (count) => { this.currentTokenCount = count; },
+      getModelProvider: () => this.modelProvider,
+      getModel: () => this.model,
+    });
     
     // Initialize todo manager
     this.todoManager = new TodoManager(this.logger);
@@ -137,6 +144,12 @@ export class MCPClient {
     // Initialize tool manager
     this.preferencesManager = new PreferencesManager(this.logger);
     this.toolManager = new ToolManager(this.logger);
+
+    // Initialize tool executor
+    this.toolExecutor = new MCPToolExecutor(this.logger, {
+      getServers: () => this.servers,
+      getPreferencesManager: () => this.preferencesManager,
+    });
     
     // Initialize prompt manager
     this.promptManager = new PromptManager(this.logger);
@@ -187,12 +200,23 @@ export class MCPClient {
       client.model = options.model;
     }
     client.currentTokenCount = 0;
-    // Token counter will be initialized asynchronously - set to null for now
-    client.tokenCounter = null as any;
+    // Initialize token manager with callbacks
+    client.tokenManager = new TokenManager(client.logger, {
+      getMessages: () => client.messages,
+      setMessages: (messages) => { client.messages = messages; },
+      getCurrentTokenCount: () => client.currentTokenCount,
+      setCurrentTokenCount: (count) => { client.currentTokenCount = count; },
+      getModelProvider: () => client.modelProvider,
+      getModel: () => client.model,
+    });
     client.todoManager = new TodoManager(client.logger);
     client.ros2VideoRecordingManager = new ROS2VideoRecordingManager(client.logger);
     client.preferencesManager = new PreferencesManager(client.logger);
     client.toolManager = new ToolManager(client.logger);
+    client.toolExecutor = new MCPToolExecutor(client.logger, {
+      getServers: () => client.servers,
+      getPreferencesManager: () => client.preferencesManager,
+    });
     client.promptManager = new PromptManager(client.logger);
     client.chatHistoryManager = new ChatHistoryManager(client.logger);
     client.attachmentManager = new AttachmentManager(client.logger);
@@ -211,9 +235,7 @@ export class MCPClient {
 
   async start() {
     // Initialize token counter from provider (async, fetches context window from API)
-    if (!this.tokenCounter) {
-      this.tokenCounter = await this.modelProvider.createTokenCounter(this.model, undefined);
-    }
+    await this.tokenManager.ensureTokenCounter();
 
     // Auto-detect if mcp-tools-orchestrator is in the server list AND enabled (not disabled)
     const hasMcpOrchestratorEnabled = this.serverConfigs.some(
@@ -638,259 +660,19 @@ export class MCPClient {
     }
   }
 
-  private formatToolCall(toolName: string, args: any, fromIPC: boolean = false): string {
-    // Custom formatter that handles multiline strings nicely
-    const formatValue = (value: any, indent: string = ''): string => {
-      if (typeof value === 'string' && value.includes('\n')) {
-        // Multiline string - display with actual newlines
-        const lines = value.split('\n');
-        const isCode = lines.some(line =>
-          line.trim().match(/^(import|from|def|class|if|for|while|#|print|return|const|let|var|function)/)
-        );
-        if (isCode) {
-          // Format as code block
-          return '```\n' + value + '\n```';
-        }
-        // Format with triple quotes
-        return '"""\n' + value + '\n"""';
-      }
-      if (Array.isArray(value)) {
-        if (value.length === 0) return '[]';
-        const items = value.map((item, i) =>
-          indent + '  ' + formatValue(item, indent + '  ') + (i < value.length - 1 ? ',' : '')
-        );
-        return '[\n' + items.join('\n') + '\n' + indent + ']';
-      }
-      if (value && typeof value === 'object') {
-        const entries = Object.entries(value);
-        if (entries.length === 0) return '{}';
-        const formatted = entries.map(([key, val], i) => {
-          const formattedVal = formatValue(val, indent + '  ');
-          return indent + '  ' + JSON.stringify(key) + ': ' + formattedVal + (i < entries.length - 1 ? ',' : '');
-        });
-        return '{\n' + formatted.join('\n') + '\n' + indent + '}';
-      }
-      return JSON.stringify(value);
-    };
-
-    const formattedArgs = formatValue(args);
-
-    // If formatted args starts with '{', put the bracket on a new line
-    let argsDisplay = formattedArgs;
-    if (formattedArgs.startsWith('{')) {
-      argsDisplay = '\n' + formattedArgs;
-    }
-
-    // Use different colors for IPC calls:
-    // - IPC calls (automatic tool calls from orchestrator) → magenta/pink
-    // - mcp-tools-orchestrator tools (agent writing script) → normal colors
-    // - Direct LLM tool calls → normal colors
-    const isOrchestratorTool = toolName.startsWith('mcp-tools-orchestrator__');
-    const isIPCCall = fromIPC && !isOrchestratorTool;
-    const toolStyle = isIPCCall ? consoleStyles.orchestratorTool : consoleStyles.tool;
-
-    return (
-      '\n' +
-      toolStyle.bracket('[') +
-      toolStyle.name(toolName) +
-      toolStyle.bracket(']') +
-      toolStyle.args(argsDisplay) +
-      '\n'
-    );
-  }
-
-  private formatJSON(json: string): string {
-    return json
-      .replace(/"([^"]+)":/g, chalk.blue('"$1":'))
-      .replace(/: "([^"]+)"/g, ': ' + chalk.green('"$1"'));
-  }
-
-  /**
-   * Execute a tool via MCP servers
-   * This is the callback that the provider calls when Anthropic wants to use a tool
-   * 
-   * Extracts server name, routes to correct MCP server, and returns result
-   */
-  private async executeMCPTool(
-    toolName: string,
-    toolInput: Record<string, any>,
-    fromIPC: boolean = false,
-  ): Promise<string> {
-    // Extract server name and actual tool name from prefixed name
-    // Format: "server-name__tool-name"
-    const [serverName, actualToolName] = toolName.includes('__')
-      ? toolName.split('__', 2)
-      : [null, toolName];
-
-    // Log the tool call BEFORE execution (skip if called from IPC - already logged by IPC listener)
-    if (!fromIPC) {
-      this.logger.log(
-        this.formatToolCall(toolName, toolInput) + '\n',
-      );
-    }
-
-    let toolResult;
-
-    try {
-      if (serverName && this.servers.has(serverName)) {
-        // Route to the specific server
-        const connection = this.servers.get(serverName)!;
-        toolResult = await connection.client.request(
-          {
-            method: 'tools/call',
-            params: {
-              name: actualToolName,
-              arguments: toolInput,
-            },
-          },
-          CallToolResultSchema,
-          {
-            // Use preference timeout (convert seconds to milliseconds)
-            // -1 means unlimited, use a very large value (1 hour) instead of undefined
-            // to ensure long-running tools don't timeout unexpectedly
-            timeout: (() => {
-              const timeoutSeconds = this.preferencesManager?.getMCPTimeout() ?? 60;
-              return timeoutSeconds === -1 ? 3600000 : timeoutSeconds * 1000; // 1 hour for unlimited
-            })(),
-          },
-        );
-      } else {
-        // Fallback: try to find the tool in any server (backward compatibility)
-        let found = false;
-        for (const [name, connection] of this.servers.entries()) {
-          const tool = connection.tools.find(
-            (t) =>
-              t.name === toolName || t.name.endsWith(`__${toolName}`),
-          );
-          if (tool) {
-            const actualName = tool.name.includes('__')
-              ? tool.name.split('__')[1]
-              : tool.name;
-            toolResult = await connection.client.request(
-              {
-                method: 'tools/call',
-                params: {
-                  name: actualName,
-                  arguments: toolInput,
-                },
-              },
-              CallToolResultSchema,
-              {
-                // Use preference timeout (convert seconds to milliseconds)
-                // -1 means unlimited, use a very large value (1 hour) instead of undefined
-                // to ensure long-running tools don't timeout unexpectedly
-                timeout: (() => {
-                  const timeoutSeconds = this.preferencesManager?.getMCPTimeout() ?? 60;
-                  return timeoutSeconds === -1 ? 3600000 : timeoutSeconds * 1000; // 1 hour for unlimited
-                })(),
-              },
-            );
-            found = true;
-            break;
-          }
-        }
-        if (!found || !toolResult) {
-          throw new Error(
-            `Tool "${toolName}" not found in any server`,
-          );
-        }
-      }
-
-      // Extract text content from MCP response
-      const textContent = toolResult.content
-        .filter((c) => c.type === 'text')
-        .map((c) => c.text)
-        .join('');
-
-      // Try to parse if it's JSON, otherwise return as-is
-      try {
-        const parsed = JSON.parse(textContent);
-        return this.formatJSON(JSON.stringify(parsed));
-      } catch {
-        // Not JSON, return formatted text
-        return this.formatJSON(JSON.stringify([textContent]));
-      }
-    } catch (toolError) {
-      const errorMessage = `Error executing tool "${toolName}": ${
-        toolError instanceof Error ? toolError.message : String(toolError)
-      }`;
-
-      this.logger.log(`\n⚠️ ${errorMessage}\n`, {
-        type: 'error',
-      });
-
-      // Check if this is a timeout error
-      const isTimeout = toolError instanceof Error &&
-        (toolError.message.includes('timeout') ||
-         toolError.message.includes('timed out') ||
-         toolError.message.includes('ETIMEDOUT'));
-
-      if (isTimeout) {
-        // For timeout errors, return an error message to the agent instead of throwing
-        // This allows the agent to see partial results and handle the error gracefully
-        const timeoutMessage = `Tool execution timed out. The tool "${toolName}" did not complete within the configured timeout period. Previous tool results are still available. You can try again with different parameters or continue with other tasks.`;
-        this.logger.log(`\n⚠️ Returning timeout error to agent (context preserved)\n`, {
-          type: 'warning',
-        });
-        return this.formatJSON(JSON.stringify([{
-          error: 'timeout',
-          message: timeoutMessage,
-          details: errorMessage
-        }]));
-      }
-
-      // For other errors, throw to maintain existing behavior
-      throw new Error(errorMessage);
-    }
-  }
-
-  private async ensureTokenCounter(): Promise<void> {
-    if (!this.tokenCounter) {
-      this.tokenCounter = await this.modelProvider.createTokenCounter(this.model, undefined);
-    }
-  }
-
-  private shouldSummarize(): boolean {
-    if (!this.tokenCounter) {
-      throw new Error('Token counter not initialized. Please call start() first.');
-    }
-    return this.tokenCounter.shouldSummarize(this.currentTokenCount);
-  }
-
   // Public method to get token usage status (for testing/debugging)
   getTokenUsage() {
-    if (!this.tokenCounter) {
-      throw new Error('Token counter not initialized. Please call start() first.');
-    }
-    return this.tokenCounter.getUsage(this.currentTokenCount);
+    return this.tokenManager.getTokenUsage();
   }
 
   // Public method to manually trigger summarization (for testing)
   async manualSummarize(): Promise<void> {
-    await this.ensureTokenCounter();
-    await this.autoSummarize();
+    await this.tokenManager.manualSummarize();
   }
 
   // Public method to set test mode (lower threshold for easier testing)
   async setTestMode(enabled: boolean = true, testThreshold: number = 5) {
-    await this.ensureTokenCounter();
-    if (enabled) {
-      this.tokenCounter!.updateConfig({
-        threshold: testThreshold, // Very low threshold for testing
-        enabled: true,
-      });
-      this.logger.log(
-        `\nTest mode enabled: Summarization will trigger at ${testThreshold}% (${Math.round(this.tokenCounter!.getContextWindow() * testThreshold / 100)} tokens)\n`,
-        { type: 'info' },
-      );
-    } else {
-      this.tokenCounter!.updateConfig({
-        threshold: 80, // Back to normal
-      });
-      this.logger.log('\nTest mode disabled: Summarization threshold reset to 80%\n', {
-        type: 'info',
-      });
-    }
+    await this.tokenManager.setTestMode(enabled, testThreshold);
   }
 
   /**
@@ -1093,7 +875,7 @@ export class MCPClient {
     this.model = model;
 
     // Reinitialize token counter for new model
-    this.tokenCounter = await this.modelProvider.createTokenCounter(this.model, undefined);
+    await this.tokenManager.reinitializeTokenCounter();
 
     // Clear context for fresh conversation
     this.clearContext();
@@ -1152,7 +934,7 @@ export class MCPClient {
       this.modelProvider = provider;
       this.model = model;
       // Reinitialize token counter for restored model
-      this.tokenCounter = await this.modelProvider.createTokenCounter(this.model, undefined);
+      await this.tokenManager.reinitializeTokenCounter();
     }
 
     // Restore messages
@@ -1484,7 +1266,7 @@ export class MCPClient {
     // Listen for IPC tool calls starting
     this.orchestratorIPCServer.on('toolCallStart', (event: any) => {
       // Display tool call in terminal with magenta/pink colors
-      const formattedCall = this.formatToolCall(event.toolName, event.args, true);
+      const formattedCall = formatToolCall(event.toolName, event.args, true);
       this.logger.log(formattedCall);
       
       // Track tool input time for IPC calls
@@ -1714,108 +1496,6 @@ export class MCPClient {
     }
   }
 
-  private async autoSummarize(): Promise<void> {
-    await this.ensureTokenCounter();
-    if (!this.tokenCounter!.getConfig().enabled) {
-      return;
-    }
-
-    const config = this.tokenCounter!.getConfig();
-    const recentCount = config.recentMessagesToKeep;
-
-    // Need at least recentCount + 1 messages to summarize
-    if (this.messages.length <= recentCount) {
-      return;
-    }
-
-      this.logger.log(
-        `\n⚠️ Context window approaching limit (${this.tokenCounter!.getUsage(this.currentTokenCount).percentage}% used). Summarizing conversation...\n`,
-        { type: 'warning' },
-      );
-
-    try {
-      // Keep recent messages
-      const recentMessages = this.messages.slice(-recentCount);
-      const oldMessages = this.messages.slice(0, -recentCount);
-
-      // Create summarization prompt
-      const messagesToSummarize = oldMessages.map((m) => ({
-        role: m.role,
-        content: m.content,
-      }));
-
-      // Call API to summarize (using AnthropicProvider's createMessage for non-streaming)
-      const summaryMessages: Message[] = [
-        ...messagesToSummarize,
-        {
-          role: 'user',
-          content:
-            'Summarize the above conversation concisely, preserving key decisions, context, important information, and any tool usage patterns. Focus on what was accomplished and what context is needed to continue the conversation.',
-        },
-      ];
-      
-      // Use provider's createMessage if available, otherwise use stream
-      let summaryText: string;
-      if ((this.modelProvider as any).createMessage) {
-        const summaryResponse = await (this.modelProvider as any).createMessage(
-          summaryMessages,
-          this.model,
-          2000,
-        );
-        summaryText =
-          summaryResponse.content[0]?.type === 'text'
-            ? summaryResponse.content[0].text
-            : JSON.stringify(summaryResponse.content);
-      } else {
-        // Fallback: use streaming and collect text
-        let collectedText = '';
-        const summaryStream = this.modelProvider.createMessageStream(
-          summaryMessages,
-          this.model,
-          [],
-          2000,
-        );
-        for await (const chunk of summaryStream) {
-          if (chunk.type === 'content_block_delta' && (chunk as any).delta?.type === 'text_delta') {
-            collectedText += (chunk as any).delta.text;
-          }
-        }
-        summaryText = collectedText || 'Summary unavailable';
-      }
-
-      // Recalculate token count
-      // Remove old messages from count
-      let oldTokenCount = 0;
-      for (const msg of oldMessages) {
-        oldTokenCount += this.tokenCounter!.countMessageTokens(msg);
-      }
-
-      // Count summary message
-      const summaryMessage: Message = {
-        role: 'user',
-        content: `[Previous conversation summary: ${summaryText}]`,
-      };
-      const summaryTokenCount =
-        this.tokenCounter!.countMessageTokens(summaryMessage);
-
-      // Update messages and token count
-      this.messages = [summaryMessage, ...recentMessages];
-      this.currentTokenCount =
-        this.currentTokenCount - oldTokenCount + summaryTokenCount;
-
-      this.logger.log(
-        `✓ Conversation summarized. Context reduced from ${oldMessages.length} to 1 summary message. Token usage: ${this.tokenCounter!.getUsage(this.currentTokenCount).percentage}%\n`,
-        { type: 'info' },
-      );
-    } catch (error) {
-      this.logger.log(
-        `Failed to summarize conversation: ${error}\n`,
-        { type: 'error' },
-      );
-      // Continue without summarization - let API handle the limit
-    }
-  }
-
   /**
    * Simplified stream processor for tool use loop
    * Handles text output and final message collection
@@ -1937,7 +1617,7 @@ export class MCPClient {
                 parsed = JSON.parse(parsed[0]);
                 // If inner string was valid JSON, format it normally
                 const formatted = JSON.stringify(parsed, null, 2);
-                const colored = this.formatJSON(formatted);
+                const colored = formatJSON(formatted);
                 const truncated = colored.length > 10000 
                   ? colored.substring(0, 10000) + '\n     ...(truncated)'
                   : colored;
@@ -1957,7 +1637,7 @@ export class MCPClient {
               // Not an array with single string - format normally
               const formatted = JSON.stringify(parsed, null, 2);
               // Apply color formatting and truncate if needed (increased limit to 10000)
-              const colored = this.formatJSON(formatted);
+              const colored = formatJSON(formatted);
               const truncated = colored.length > 10000 
                 ? colored.substring(0, 10000) + '\n     ...(truncated)'
                 : colored;
@@ -2146,8 +1826,8 @@ export class MCPClient {
         }
 
         // Check if we need to summarize after this response
-        if (this.shouldSummarize()) {
-          await this.autoSummarize();
+        if (this.tokenManager.shouldSummarize()) {
+          await this.tokenManager.autoSummarize();
         }
 
         // Reset for next message (if loop continues)
@@ -2294,8 +1974,8 @@ export class MCPClient {
         }
 
         // Check if we need to summarize after this response
-        if (this.shouldSummarize()) {
-          await this.autoSummarize();
+        if (this.tokenManager.shouldSummarize()) {
+          await this.tokenManager.autoSummarize();
         }
 
         // If stop_reason is 'end_turn', Anthropic is done
@@ -2372,8 +2052,8 @@ export class MCPClient {
     
     try {
       // Check if we need to summarize before adding new message
-      if (this.shouldSummarize()) {
-        await this.autoSummarize();
+      if (this.tokenManager.shouldSummarize()) {
+        await this.tokenManager.autoSummarize();
       }
 
       // Note: System prompt is now logged BEFORE the user message in cli-client.ts
@@ -2400,12 +2080,12 @@ export class MCPClient {
       this.messages.push(userMessage);
       // Token counting for messages with attachments is approximate
       // Anthropic API will provide accurate counts during streaming
-      await this.ensureTokenCounter();
-      this.currentTokenCount += this.tokenCounter!.countMessageTokens(userMessage);
+      await this.tokenManager.ensureTokenCounter();
+      this.currentTokenCount += this.tokenManager.getTokenCounter()!.countMessageTokens(userMessage);
 
       // Check again after adding message
-      if (this.shouldSummarize()) {
-        await this.autoSummarize();
+      if (this.tokenManager.shouldSummarize()) {
+        await this.tokenManager.autoSummarize();
       }
 
       // Define how to execute MCP tools (callback for the provider)
@@ -2413,7 +2093,7 @@ export class MCPClient {
         toolName: string,
         toolInput: Record<string, any>,
       ) => {
-        return await this.executeMCPTool(toolName, toolInput);
+        return await this.toolExecutor.executeMCPTool(toolName, toolInput);
       };
 
       // Use the provider's agentic loop instead of manual processing
@@ -2586,7 +2266,7 @@ export class MCPClient {
             content: `You have ${todoStatus.activeCount} incomplete todo(s). Please complete them using complete-todo. Only skip them using skip-todo if you cannot perform these tasks. Before executing the next action, first update the previous action you completed (mark it as complete using complete-todo), then read the next todo using read-next-todo.\n\nActive todos:\n${todoStatus.todosList}\n\nYou cannot exit until all todos are completed or skipped.`,
           };
           this.messages.push(reminderMessage);
-          this.currentTokenCount += this.tokenCounter!.countMessageTokens(reminderMessage);
+          this.currentTokenCount += this.tokenManager.getTokenCounter()!.countMessageTokens(reminderMessage);
           
           // Log the reminder message to chat history (as client message)
           this.chatHistoryManager.addClientMessage(reminderMessage.content);
