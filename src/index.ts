@@ -1619,7 +1619,15 @@ export class MCPClient {
         );
         continue;
       }
-      
+
+      // Handle client_info events (provider-generated messages for user)
+      if (chunk.type === 'client_info') {
+        // Display with distinct styling to differentiate from model output
+        const provider = chunk.provider ? `[${chunk.provider}] ` : '';
+        this.logger.log(`\nℹ️  ${provider}${chunk.message}\n`, { type: 'info' });
+        continue;
+      }
+
       // Handle tool_use_complete events (from provider)
       if (chunk.type === 'tool_use_complete') {
         // Tool was executed - provider already handled it

@@ -39,11 +39,14 @@ export interface OllamaMetrics {
   promptEvalRate?: number;     // tokens/second
 }
 
+import type { ToolExecutionResult } from '../core/tool-executor.js';
+
 // Tool Executor Type - function that executes tools on your system
+// Returns ToolExecutionResult with display text and content blocks (including images)
 export type ToolExecutor = (
   toolName: string,
   toolInput: Record<string, any>,
-) => Promise<string>;
+) => Promise<ToolExecutionResult>;
 
 // Ollama Token Counter Implementation
 export class OllamaTokenCounter implements TokenCounter {
@@ -876,26 +879,34 @@ export class OllamaProvider implements ModelProvider {
           const toolInput = typeof toolCall.arguments === 'string'
             ? JSON.parse(toolCall.arguments)
             : toolCall.arguments;
-          
+
           const result = await toolExecutor(toolCall.name, toolInput);
 
+          // Yield the result so caller can see what happened (use displayText for CLI)
           yield {
             type: 'tool_use_complete',
             toolName: toolCall.name,
             toolUseId: toolCall.id,
             toolInput,
-            result,
+            result: result.displayText,
+            hasImages: result.hasImages,
           };
+
+          // Ollama doesn't support images in tool results, use text content only
+          const textContent = result.contentBlocks
+            .filter((b) => b.type === 'text')
+            .map((b) => (b as { type: 'text'; text: string }).text)
+            .join('\n');
 
           // Add tool result to conversation - Ollama uses tool_name, not tool_call_id
           conversationMessages.push({
             role: 'tool',
             tool_name: toolCall.name,
-            content: result,
+            content: textContent,
           });
         } catch (error) {
           const errorMessage = `Error executing tool: ${error instanceof Error ? error.message : String(error)}`;
-          
+
           yield {
             type: 'tool_use_complete',
             toolName: toolCall.name,

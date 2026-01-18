@@ -15,11 +15,14 @@ import type {
 
 // No hardcoded model context windows - all context windows must be fetched from API
 
+import type { ToolExecutionResult } from '../core/tool-executor.js';
+
 // Tool Executor Type - function that executes tools on your system
+// Returns ToolExecutionResult with display text and content blocks (including images)
 export type ToolExecutor = (
   toolName: string,
   toolInput: Record<string, any>,
-) => Promise<string>;
+) => Promise<ToolExecutionResult>;
 
 // Cost Report API Types
 export interface CostReportParams {
@@ -545,10 +548,11 @@ export class AnthropicProvider implements ModelProvider {
         }
 
         // Step 5: Execute tools and collect results
+        // Anthropic tool_result content can be string or array of content blocks
         const toolResults: Array<{
           type: 'tool_result';
           tool_use_id: string;
-          content: string;
+          content: string | Array<{ type: string; [key: string]: any }>;
         }> = [];
 
         for (const toolUseBlock of toolUseBlocks) {
@@ -559,21 +563,52 @@ export class AnthropicProvider implements ModelProvider {
             const toolInput = toolUseBlock.input as Record<string, any>;
             const result = await toolExecutor(toolUseBlock.name, toolInput);
 
-            // Yield the result so caller can see what happened
+            // Yield the result so caller can see what happened (use displayText for CLI)
             yield {
               type: 'tool_use_complete',
               toolName: toolUseBlock.name,
               toolUseId: toolUseBlock.id,
               toolInput: toolInput,
-              result: result,
+              result: result.displayText,
+              hasImages: result.hasImages,
             };
 
-            // Collect result for sending back to Anthropic
-            toolResults.push({
-              type: 'tool_result',
-              tool_use_id: toolUseBlock.id,
-              content: result,
-            });
+            // Convert content blocks to Anthropic format for tool_result
+            // Anthropic expects: { type: 'text', text: string } or
+            // { type: 'image', source: { type: 'base64', media_type: string, data: string } }
+            if (result.hasImages) {
+              const anthropicContent = result.contentBlocks.map((block) => {
+                if (block.type === 'text') {
+                  return { type: 'text', text: block.text };
+                } else if (block.type === 'image') {
+                  return {
+                    type: 'image',
+                    source: {
+                      type: 'base64',
+                      media_type: block.mimeType,
+                      data: block.data,
+                    },
+                  };
+                }
+                return { type: 'text', text: '[Unknown content]' };
+              });
+              toolResults.push({
+                type: 'tool_result',
+                tool_use_id: toolUseBlock.id,
+                content: anthropicContent,
+              });
+            } else {
+              // No images, use simple string format (more efficient)
+              const textContent = result.contentBlocks
+                .filter((b) => b.type === 'text')
+                .map((b) => (b as { type: 'text'; text: string }).text)
+                .join('\n');
+              toolResults.push({
+                type: 'tool_result',
+                tool_use_id: toolUseBlock.id,
+                content: textContent,
+              });
+            }
           } catch (error) {
             // If tool execution fails, send error back to Anthropic
             const errorMessage = `Error executing tool: ${error instanceof Error ? error.message : String(error)}`;

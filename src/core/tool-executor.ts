@@ -9,6 +9,35 @@ import type { PreferencesManager } from '../managers/preferences-manager.js';
 import { formatToolCall, formatJSON } from '../utils/formatting.js';
 
 /**
+ * Content block types from MCP tool results.
+ * Images are base64 encoded with mimeType.
+ */
+export interface TextContentBlock {
+  type: 'text';
+  text: string;
+}
+
+export interface ImageContentBlock {
+  type: 'image';
+  data: string; // base64 encoded
+  mimeType: string;
+}
+
+export type ContentBlock = TextContentBlock | ImageContentBlock;
+
+/**
+ * Result from tool execution containing both display text and full content.
+ */
+export interface ToolExecutionResult {
+  /** Text to display in CLI (images shown as placeholders) */
+  displayText: string;
+  /** Full content blocks including images for LLM */
+  contentBlocks: ContentBlock[];
+  /** Whether this result contains images */
+  hasImages: boolean;
+}
+
+/**
  * Represents a connection to an MCP server.
  */
 interface ServerConnection {
@@ -151,13 +180,13 @@ export class MCPToolExecutor {
    * @param toolName - The prefixed tool name (server-name__tool-name)
    * @param toolInput - The arguments to pass to the tool
    * @param fromIPC - Whether this call came from IPC (skip logging if true)
-   * @returns The tool result as a formatted string
+   * @returns The tool result with display text and full content blocks
    */
   async executeMCPTool(
     toolName: string,
     toolInput: Record<string, any>,
     fromIPC: boolean = false,
-  ): Promise<string> {
+  ): Promise<ToolExecutionResult> {
     const servers = this.callbacks.getServers();
     const preferencesManager = this.callbacks.getPreferencesManager();
 
@@ -240,20 +269,43 @@ export class MCPToolExecutor {
         }
       }
 
-      // Extract text content from MCP response
-      const textContent = toolResult.content
-        .filter((c: any) => c.type === 'text')
-        .map((c: any) => c.text)
-        .join('');
+      // Extract all content blocks from MCP response (text and images)
+      const contentBlocks: ContentBlock[] = [];
+      const displayParts: string[] = [];
+      let hasImages = false;
 
-      // Try to parse if it's JSON, otherwise return as-is
+      for (const block of toolResult.content) {
+        if (block.type === 'text') {
+          contentBlocks.push({ type: 'text', text: block.text });
+          displayParts.push(block.text);
+        } else if (block.type === 'image') {
+          hasImages = true;
+          // Preserve full image data for LLM
+          contentBlocks.push({
+            type: 'image',
+            data: block.data,
+            mimeType: block.mimeType || 'image/jpeg',
+          });
+          // Show placeholder in CLI instead of base64
+          displayParts.push(`[Image: ${block.mimeType || 'image/jpeg'}]`);
+        }
+      }
+
+      // Build display text for CLI
+      const textContent = displayParts.join('\n');
+      let displayText: string;
       try {
         const parsed = JSON.parse(textContent);
-        return formatJSON(JSON.stringify(parsed));
+        displayText = formatJSON(JSON.stringify(parsed));
       } catch {
-        // Not JSON, return formatted text
-        return formatJSON(JSON.stringify([textContent]));
+        displayText = formatJSON(JSON.stringify([textContent]));
       }
+
+      return {
+        displayText,
+        contentBlocks,
+        hasImages,
+      };
     } catch (toolError) {
       const errorMessage = `Error executing tool "${toolName}": ${
         toolError instanceof Error ? toolError.message : String(toolError)
@@ -274,15 +326,16 @@ export class MCPToolExecutor {
           `\nReturning force stop error to agent (context preserved)\n`,
           { type: 'warning' },
         );
-        return formatJSON(
-          JSON.stringify([
-            {
-              error: 'force_stopped',
-              message: forceStopMessage,
-              details: errorMessage,
-            },
-          ]),
-        );
+        const errorText = JSON.stringify({
+          error: 'force_stopped',
+          message: forceStopMessage,
+          details: errorMessage,
+        });
+        return {
+          displayText: formatJSON(errorText),
+          contentBlocks: [{ type: 'text', text: errorText }],
+          hasImages: false,
+        };
       }
 
       // Check if this is a timeout error
@@ -300,15 +353,16 @@ export class MCPToolExecutor {
           `\n⚠️ Returning timeout error to agent (context preserved)\n`,
           { type: 'warning' },
         );
-        return formatJSON(
-          JSON.stringify([
-            {
-              error: 'timeout',
-              message: timeoutMessage,
-              details: errorMessage,
-            },
-          ]),
-        );
+        const errorText = JSON.stringify({
+          error: 'timeout',
+          message: timeoutMessage,
+          details: errorMessage,
+        });
+        return {
+          displayText: formatJSON(errorText),
+          contentBlocks: [{ type: 'text', text: errorText }],
+          hasImages: false,
+        };
       }
 
       // For other errors, throw to maintain existing behavior

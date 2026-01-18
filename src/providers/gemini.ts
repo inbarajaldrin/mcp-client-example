@@ -11,11 +11,14 @@ import type {
   ModelInfo,
 } from '../model-provider.js';
 
+import type { ToolExecutionResult, ContentBlock } from '../core/tool-executor.js';
+
 // Tool Executor Type - function that executes tools on your system
+// Returns ToolExecutionResult with display text and content blocks (including images)
 export type ToolExecutor = (
   toolName: string,
   toolInput: Record<string, any>,
-) => Promise<string>;
+) => Promise<ToolExecutionResult>;
 
 // Gemini model context window limits (in tokens)
 const GEMINI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
@@ -154,37 +157,61 @@ export class GeminiProvider implements ModelProvider {
   }
 
   // Convert our generic Message format to Gemini Content format
-  private convertMessagesToGeminiFormat(messages: Message[]): any[] {
+  // Set skipImagesInFunctionResponses to true to disable images in tool results
+  // (for models that don't support multimodal function responses)
+  private convertMessagesToGeminiFormat(
+    messages: Message[],
+    skipImagesInFunctionResponses: boolean = false,
+  ): any[] {
     const contents: any[] = [];
 
     for (const msg of messages) {
       if (msg.role === 'tool') {
         // Tool results in Gemini are sent as function_response parts in user messages
+        // Build functionResponse object with optional multimodal parts
+        const functionResponse: any = {
+          name: msg.tool_name || 'unknown',
+          response: {
+            content: msg.content,
+          },
+        };
+
+        // Add multimodal parts (images) if content_blocks exist and not skipped
+        if (
+          !skipImagesInFunctionResponses &&
+          msg.content_blocks &&
+          Array.isArray(msg.content_blocks)
+        ) {
+          const parts: any[] = [];
+
+          for (const block of msg.content_blocks) {
+            if (block.type === 'image') {
+              // Convert image block to Gemini inlineData format
+              parts.push({
+                inlineData: {
+                  mimeType: block.mimeType || 'image/jpeg',
+                  data: block.data,
+                },
+              });
+            }
+            // Text blocks are already in response.content, skip here
+          }
+
+          // Only add parts if we have multimodal content (images)
+          if (parts.length > 0) {
+            functionResponse.parts = parts;
+          }
+        }
+
         const lastContent = contents[contents.length - 1];
         if (lastContent && lastContent.role === 'user') {
           // Append to existing user message
-          lastContent.parts.push({
-            functionResponse: {
-              name: msg.tool_name || 'unknown',
-              response: {
-                content: msg.content,
-              },
-            },
-          });
+          lastContent.parts.push({ functionResponse });
         } else {
           // Create new user message with function response
           contents.push({
             role: 'user',
-            parts: [
-              {
-                functionResponse: {
-                  name: msg.tool_name || 'unknown',
-                  response: {
-                    content: msg.content,
-                  },
-                },
-              },
-            ],
+            parts: [{ functionResponse }],
           });
         }
       } else if (msg.role === 'assistant') {
@@ -195,12 +222,18 @@ export class GeminiProvider implements ModelProvider {
           // Use raw content blocks if available (preserves function calls)
           for (const block of msg.content_blocks) {
             if (block.type === 'function_call') {
-              parts.push({
+              // Build part with functionCall
+              const part: any = {
                 functionCall: {
                   name: block.name,
                   args: block.args || {},
                 },
-              });
+              };
+              // Include thought signature if present (required for Gemini 3 models, e.g. gemini-3-pro)
+              if (block.thoughtSignature) {
+                part.thoughtSignature = block.thoughtSignature;
+              }
+              parts.push(part);
             } else if (block.type === 'text' && block.text) {
               parts.push({ text: block.text });
             }
@@ -349,6 +382,8 @@ export class GeminiProvider implements ModelProvider {
     let conversationMessages = [...messages];
     let iterations = 0;
     let hasPendingToolResults = false;
+    // Track if this model doesn't support multimodal function responses
+    let skipImagesInFunctionResponses = false;
 
     while (true) {
       // Check for cancellation
@@ -360,7 +395,11 @@ export class GeminiProvider implements ModelProvider {
 
       iterations++;
 
-      const contents = this.convertMessagesToGeminiFormat(conversationMessages);
+      // Convert messages, optionally skipping images in function responses
+      const contents = this.convertMessagesToGeminiFormat(
+        conversationMessages,
+        skipImagesInFunctionResponses,
+      );
 
       // Step 1: Stream request to Gemini
       const generateConfig: any = {
@@ -380,7 +419,7 @@ export class GeminiProvider implements ModelProvider {
             mode: 'AUTO', // Let Gemini decide when to call functions
           },
         };
-        
+
         // Debug: log tool count
         if (process.env.VERBOSE_LOGGING) {
           const toolCount = geminiTools[0]?.functionDeclarations?.length || 0;
@@ -391,10 +430,48 @@ export class GeminiProvider implements ModelProvider {
         }
       }
 
-      const stream = await this.geminiClient.models.generateContentStream(generateConfig);
+      // Try to make the API call, with fallback for multimodal errors
+      let stream;
+      try {
+        stream = await this.geminiClient.models.generateContentStream(generateConfig);
+      } catch (error: any) {
+        // Check if this is a multimodal function response not supported error
+        const errorMessage = error?.message || String(error);
+        if (
+          errorMessage.includes('Multimodal function responses are not supported') &&
+          !skipImagesInFunctionResponses
+        ) {
+          // This model doesn't support images in function responses
+          // Retry without images
+          skipImagesInFunctionResponses = true;
 
-      // Track function calls and content
-      const functionCalls: Array<{ name: string; args: any; id: string }> = [];
+          // Yield a client info event so the CLI can display it with proper styling
+          yield {
+            type: 'client_info',
+            message: `Model ${model} does not support multimodal function responses. Retrying without images.`,
+            provider: 'gemini',
+          } as MessageStreamEvent;
+
+          // Re-convert messages without images and retry
+          const contentsWithoutImages = this.convertMessagesToGeminiFormat(
+            conversationMessages,
+            true, // skip images
+          );
+          generateConfig.contents = contentsWithoutImages;
+          stream = await this.geminiClient.models.generateContentStream(generateConfig);
+        } else {
+          // Re-throw other errors
+          throw error;
+        }
+      }
+
+      // Track function calls and content (including thought signatures - required for Gemini 3, optional for 2.5)
+      const functionCalls: Array<{
+        name: string;
+        args: any;
+        id: string;
+        thoughtSignature?: string;
+      }> = [];
       let assistantContent = '';
       let messageStarted = false;
       let finalUsage: { promptTokenCount?: number; candidatesTokenCount?: number } | null = null;
@@ -435,10 +512,14 @@ export class GeminiProvider implements ModelProvider {
                   messageStarted = true;
                 }
                 const callId = `call_${Date.now()}_${functionCalls.length}`;
+                // Capture thought signature (required for Gemini 3, optional for 2.5)
+                // The signature is at the part level, not inside functionCall
+                const thoughtSignature = (part as any).thoughtSignature;
                 functionCalls.push({
                   name: part.functionCall.name || 'unknown',
                   args: part.functionCall.args || {},
                   id: callId,
+                  thoughtSignature: thoughtSignature,
                 });
                 yield {
                   type: 'content_block_start',
@@ -485,6 +566,8 @@ export class GeminiProvider implements ModelProvider {
           name: call.name,
           args: call.args,
           id: call.id,
+          // Preserve thought signature (required for Gemini 3, optional for 2.5)
+          thoughtSignature: call.thoughtSignature,
         });
       }
 
@@ -508,27 +591,45 @@ export class GeminiProvider implements ModelProvider {
       }
 
       // Step 3: Execute tools
-      const toolResults: Array<{ name: string; content: string }> = [];
+      const toolResults: Array<{
+        name: string;
+        content: string;
+        contentBlocks: ContentBlock[];
+        hasImages: boolean;
+      }> = [];
       for (const call of functionCalls) {
         try {
           const result = await toolExecutor(call.name, call.args);
+
+          // Extract text content for structured response
+          const textContent = result.contentBlocks
+            .filter((b) => b.type === 'text')
+            .map((b) => (b as { type: 'text'; text: string }).text)
+            .join('\n');
+
+          // Store full content blocks for multimodal response
           toolResults.push({
             name: call.name,
-            content: result,
+            content: textContent,
+            contentBlocks: result.contentBlocks,
+            hasImages: result.hasImages,
           });
 
-          // Notify about tool completion
+          // Notify about tool completion (use displayText for CLI)
           yield {
             type: 'tool_use_complete',
             toolName: call.name,
             toolInput: call.args,
-            result,
+            result: result.displayText,
+            hasImages: result.hasImages,
           };
         } catch (error: any) {
           const errorResult = `Error executing tool ${call.name}: ${error.message}`;
           toolResults.push({
             name: call.name,
             content: errorResult,
+            contentBlocks: [{ type: 'text', text: errorResult }],
+            hasImages: false,
           });
 
           yield {
@@ -540,12 +641,13 @@ export class GeminiProvider implements ModelProvider {
         }
       }
 
-      // Step 4: Add tool results to conversation
+      // Step 4: Add tool results to conversation (preserve content_blocks for images)
       for (const result of toolResults) {
         conversationMessages.push({
           role: 'tool',
           content: result.content,
           tool_name: result.name,
+          content_blocks: result.contentBlocks,
         });
       }
 

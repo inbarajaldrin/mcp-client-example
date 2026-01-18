@@ -11,11 +11,14 @@ import type {
   ModelInfo,
 } from '../model-provider.js';
 
+import type { ToolExecutionResult } from '../core/tool-executor.js';
+
 // Tool Executor Type - function that executes tools on your system
+// Returns ToolExecutionResult with display text and content blocks (including images)
 export type ToolExecutor = (
   toolName: string,
   toolInput: Record<string, any>,
-) => Promise<string>;
+) => Promise<ToolExecutionResult>;
 
 // OpenAI model context window limits (in tokens)
 const OPENAI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
@@ -660,21 +663,27 @@ export class OpenAIProvider implements ModelProvider {
           const toolInput = JSON.parse(functionCall.arguments);
           const result = await toolExecutor(functionCall.name, toolInput);
 
-          // Yield the result so caller can see what happened
+          // Yield the result so caller can see what happened (use displayText for CLI)
           yield {
             type: 'tool_use_complete',
             toolName: functionCall.name,
             toolCallId: toolCall.id,
             toolInput: toolInput,
-            result: result,
+            result: result.displayText,
+            hasImages: result.hasImages,
           };
 
           // Collect result for sending back to OpenAI
+          // OpenAI doesn't support images in tool results, use text content only
+          const textContent = result.contentBlocks
+            .filter((b) => b.type === 'text')
+            .map((b) => (b as { type: 'text'; text: string }).text)
+            .join('\n');
           toolResults.push({
             tool_call_id: toolCall.id,
             role: 'tool',
             name: functionCall.name,
-            content: result,
+            content: textContent,
           });
         } catch (error) {
           // Handle both function and custom tool call types for error message
