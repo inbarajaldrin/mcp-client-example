@@ -14,8 +14,8 @@ export interface ChatHistoryCLICallbacks {
   getReadline: () => readline.Interface | null;
   /** Get messages array to modify for restoreChat */
   getMessages: () => any[];
-  /** Get token counter for restoreChat */
-  getTokenCounter: () => { countMessageTokens: (msg: any) => number };
+  /** Get token counter for restoreChat (may be null if not initialized) */
+  getTokenCounter: () => { countMessageTokens: (msg: any) => number } | null;
   /** Get current token count */
   getCurrentTokenCount: () => number;
   /** Set current token count */
@@ -275,11 +275,13 @@ export class ChatHistoryCLI {
 
       // Update token count (approximate)
       const tokenCounter = this.callbacks.getTokenCounter();
-      let currentTokenCount = this.callbacks.getCurrentTokenCount();
-      for (const msg of newMessages) {
-        currentTokenCount += tokenCounter.countMessageTokens(msg);
+      if (tokenCounter) {
+        let currentTokenCount = this.callbacks.getCurrentTokenCount();
+        for (const msg of newMessages) {
+          currentTokenCount += tokenCounter.countMessageTokens(msg);
+        }
+        this.callbacks.setCurrentTokenCount(currentTokenCount);
       }
-      this.callbacks.setCurrentTokenCount(currentTokenCount);
 
       this.logger.log(
         `\n✓ Restored ${restoredCount} messages from chat session ${selectedChat.sessionId}\n`,

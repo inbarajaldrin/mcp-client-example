@@ -97,7 +97,7 @@ export class MCPClientCLI {
       {
         getReadline: () => this.rl,
         getMessages: () => (this.client as any).messages,
-        getTokenCounter: () => (this.client as any).tokenCounter,
+        getTokenCounter: () => (this.client as any).tokenManager.getTokenCounter(),
         getCurrentTokenCount: () => (this.client as any).currentTokenCount,
         setCurrentTokenCount: (count) => {
           (this.client as any).currentTokenCount = count;
@@ -107,7 +107,7 @@ export class MCPClientCLI {
     this.promptCLI = new PromptCLI(this.client, this.logger, {
       getReadline: () => this.rl,
       getMessages: () => (this.client as any).messages,
-      getTokenCounter: () => (this.client as any).tokenCounter,
+      getTokenCounter: () => (this.client as any).tokenManager.getTokenCounter(),
       getCurrentTokenCount: () => (this.client as any).currentTokenCount,
       setCurrentTokenCount: (count) => {
         (this.client as any).currentTokenCount = count;
@@ -217,8 +217,8 @@ export class MCPClientCLI {
       });
 
       // Set force stop callback to prompt user when tool calls take too long after abort
-      this.client.setForceStopCallback(async (toolName, elapsedSeconds) => {
-        return this.askForceStopPrompt(toolName, elapsedSeconds);
+      this.client.setForceStopCallback(async (toolName, elapsedSeconds, abortSignal) => {
+        return this.askForceStopPrompt(toolName, elapsedSeconds, abortSignal);
       });
 
       await this.chat_loop();
@@ -258,8 +258,14 @@ export class MCPClientCLI {
   /**
    * Prompt user to force stop a long-running tool call.
    * Returns true if user wants to force stop, false to continue waiting.
+   * If abortSignal is triggered (tool completed), returns false immediately.
    */
-  private async askForceStopPrompt(toolName: string, elapsedSeconds: number): Promise<boolean> {
+  private async askForceStopPrompt(toolName: string, elapsedSeconds: number, abortSignal?: AbortSignal): Promise<boolean> {
+    // If already aborted (tool completed), return immediately
+    if (abortSignal?.aborted) {
+      return false;
+    }
+
     // Stop keyboard monitoring to allow readline to work
     const wasMonitoring = this.keyboardMonitor.isMonitoring;
     if (wasMonitoring) {
@@ -283,15 +289,49 @@ export class MCPClientCLI {
 
     try {
       console.log(`\nTool "${toolName}" has been running for ${elapsedSeconds} seconds.`);
-      console.log('Do you want to force stop this tool call? (y/n)');
+      console.log('Do you want to force stop this tool call? (y/n, Enter to skip)');
 
-      const response = await rlToUse.question('> ');
+      // Race between user input and tool completion (abort signal)
+      const response = await new Promise<string>((resolve) => {
+        let resolved = false;
+
+        // Listen for abort signal (tool completed)
+        const onAbort = () => {
+          if (!resolved) {
+            resolved = true;
+            // Clear the prompt line and show message
+            process.stdout.write('\r\x1b[K'); // Clear current line
+            console.log('(Tool completed, prompt dismissed)');
+            resolve(''); // Treat as "no"
+          }
+        };
+
+        if (abortSignal) {
+          abortSignal.addEventListener('abort', onAbort, { once: true });
+        }
+
+        // Wait for user input
+        rlToUse!.question('> ').then((answer) => {
+          if (!resolved) {
+            resolved = true;
+            if (abortSignal) {
+              abortSignal.removeEventListener('abort', onAbort);
+            }
+            resolve(answer);
+          }
+        });
+      });
+
       const answer = response.trim().toLowerCase();
 
+      // Empty input or anything other than y/yes means continue waiting
       const shouldStop = answer === 'y' || answer === 'yes';
 
       if (shouldStop) {
         this.logger.log('\nForce stopping tool call...\n', { type: 'warning' });
+      } else if (answer === '') {
+        // User pressed Enter without input or tool completed - return control silently
+        // (message already shown if tool completed)
       } else {
         this.logger.log('\nContinuing to wait for tool result...\n', { type: 'info' });
       }

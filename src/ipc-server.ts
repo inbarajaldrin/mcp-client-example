@@ -88,26 +88,24 @@ export class OrchestratorIPCServer extends EventEmitter {
         // Route to the executeMCPTool method (same as what the LLM uses)
         // The tool name format is "server-name__tool-name"
         // Pass fromIPC=true to skip duplicate logging (IPC listener already logs this)
-        const result = await (this.client as any).executeMCPTool(
+        const toolResult = await this.client.executeMCPTool(
           prefixedToolName,
           args,
           true  // fromIPC
         );
 
-        // Parse result if it's a JSON string (for mcp-tools-orchestrator to get proper objects)
-        let parsedResult = result;
-        if (typeof result === 'string') {
-          try {
-            // Strip ANSI color codes before parsing (formatJSON adds these)
-            // Pattern matches: \x1b[...m or \u001b[...m (e.g., \x1b[34m for blue)
-            const cleanedResult = result
-              .replace(/\x1b\[[0-9;]*m/g, '')
-              .replace(/\u001b\[[0-9;]*m/g, '');
-            parsedResult = JSON.parse(cleanedResult);
-          } catch {
-            // Not valid JSON, keep as string
-            parsedResult = result;
-          }
+        // Extract displayText from the ToolExecutionResult and parse if JSON
+        let parsedResult: any = toolResult.displayText;
+        try {
+          // Strip ANSI color codes before parsing (formatJSON adds these)
+          // Pattern matches: \x1b[...m or \u001b[...m (e.g., \x1b[34m for blue)
+          const cleanedResult = toolResult.displayText
+            .replace(/\x1b\[[0-9;]*m/g, '')
+            .replace(/\u001b\[[0-9;]*m/g, '');
+          parsedResult = JSON.parse(cleanedResult);
+        } catch {
+          // Not valid JSON, keep as string
+          parsedResult = toolResult.displayText;
         }
 
         // Emit event after successful execution

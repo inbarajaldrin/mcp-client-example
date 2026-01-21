@@ -69,8 +69,11 @@ export interface MCPToolExecutorCallbacks {
    * Ask user if they want to force stop a long-running tool call.
    * Returns true if user wants to force stop, false to continue waiting.
    * If not provided, no force stop prompt will be shown.
+   * @param toolName - Name of the tool that's running
+   * @param elapsedSeconds - How long since abort was requested
+   * @param abortSignal - Signal that fires when the tool completes (prompt should dismiss)
    */
-  askForceStop?: (toolName: string, elapsedSeconds: number) => Promise<boolean>;
+  askForceStop?: (toolName: string, elapsedSeconds: number, abortSignal?: AbortSignal) => Promise<boolean>;
 }
 
 /** Force stop timeout in seconds */
@@ -82,6 +85,7 @@ const FORCE_STOP_TIMEOUT_SECONDS = 10;
 export class MCPToolExecutor {
   private logger: Logger;
   private callbacks: MCPToolExecutorCallbacks;
+  private forceStopPromptActive: boolean = false; // Mutex to prevent multiple concurrent prompts
 
   constructor(logger: Logger, callbacks: MCPToolExecutorCallbacks) {
     this.logger = logger;
@@ -110,17 +114,22 @@ export class MCPToolExecutor {
       let abortDetected = false;
       let elapsedSecondsAfterAbort = 0;
 
+      // AbortController to signal the prompt to dismiss when tool completes
+      const promptAbortController = new AbortController();
+
       // Handle tool completion
       toolPromise
         .then((result) => {
           if (!isCompleted) {
             isCompleted = true;
+            promptAbortController.abort(); // Dismiss any active prompt
             resolve(result);
           }
         })
         .catch((error) => {
           if (!isCompleted) {
             isCompleted = true;
+            promptAbortController.abort(); // Dismiss any active prompt
             reject(error);
           }
         });
@@ -143,8 +152,18 @@ export class MCPToolExecutor {
 
           // Check if we've waited long enough after abort
           if (elapsedSecondsAfterAbort >= FORCE_STOP_TIMEOUT_SECONDS) {
+            // Skip if another prompt is already showing (mutex)
+            if (this.forceStopPromptActive) {
+              // Don't reset timer, just wait for the other prompt to finish
+              setTimeout(checkAbortAndTimeout, pollInterval);
+              return;
+            }
+
             try {
-              const shouldForceStop = await askForceStop(toolName, Math.floor(elapsedSecondsAfterAbort));
+              this.forceStopPromptActive = true;
+              const shouldForceStop = await askForceStop(toolName, Math.floor(elapsedSecondsAfterAbort), promptAbortController.signal);
+              this.forceStopPromptActive = false;
+
               if (shouldForceStop && !isCompleted) {
                 isCompleted = true;
                 reject(new Error(`Tool "${toolName}" force stopped by user after ${Math.floor(elapsedSecondsAfterAbort)} seconds`));
@@ -154,6 +173,7 @@ export class MCPToolExecutor {
                 elapsedSecondsAfterAbort = 0;
               }
             } catch (promptError) {
+              this.forceStopPromptActive = false;
               // If prompting fails, reset the timer and continue
               if (!isCompleted) {
                 elapsedSecondsAfterAbort = 0;

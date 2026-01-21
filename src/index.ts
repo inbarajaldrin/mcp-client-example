@@ -86,7 +86,7 @@ export class MCPClient {
   private toolInputTimes: Map<string, string> = new Map(); // Track tool input times by tool name/id
   private elicitationHandler: ElicitationHandler;
   private toolExecutor: MCPToolExecutor;
-  private forceStopCallback?: (toolName: string, elapsedSeconds: number) => Promise<boolean>;
+  private forceStopCallback?: (toolName: string, elapsedSeconds: number, abortSignal?: AbortSignal) => Promise<boolean>;
   private isAbortRequestedCallback?: () => boolean;
 
   constructor(
@@ -157,9 +157,9 @@ export class MCPClient {
         }
         return false; // Default: not aborted
       },
-      askForceStop: (toolName, elapsedSeconds) => {
+      askForceStop: (toolName, elapsedSeconds, abortSignal) => {
         if (this.forceStopCallback) {
-          return this.forceStopCallback(toolName, elapsedSeconds);
+          return this.forceStopCallback(toolName, elapsedSeconds, abortSignal);
         }
         return Promise.resolve(false); // Default: don't force stop
       },
@@ -236,9 +236,9 @@ export class MCPClient {
         }
         return false; // Default: not aborted
       },
-      askForceStop: (toolName, elapsedSeconds) => {
+      askForceStop: (toolName, elapsedSeconds, abortSignal) => {
         if (client.forceStopCallback) {
-          return client.forceStopCallback(toolName, elapsedSeconds);
+          return client.forceStopCallback(toolName, elapsedSeconds, abortSignal);
         }
         return Promise.resolve(false); // Default: don't force stop
       },
@@ -442,6 +442,23 @@ export class MCPClient {
     );
     await Promise.all(closePromises);
     this.servers.clear();
+  }
+
+  /**
+   * Execute an MCP tool by name.
+   * This is the public interface for tool execution, used by IPC server and other callers.
+   *
+   * @param toolName - The prefixed tool name (server-name__tool-name)
+   * @param toolInput - The arguments to pass to the tool
+   * @param fromIPC - Whether this call came from IPC (skip logging if true)
+   * @returns The tool result with display text and full content blocks
+   */
+  async executeMCPTool(
+    toolName: string,
+    toolInput: Record<string, any>,
+    fromIPC: boolean = false,
+  ) {
+    return await this.toolExecutor.executeMCPTool(toolName, toolInput, fromIPC);
   }
 
   async refreshServers() {
@@ -936,8 +953,9 @@ export class MCPClient {
    * Set callback for force stop prompts.
    * Called when a tool call exceeds the force stop timeout (10 seconds after abort is requested).
    * The callback should prompt the user and return true to force stop, false to continue waiting.
+   * @param callback - Receives toolName, elapsedSeconds, and optional abortSignal (fires when tool completes)
    */
-  setForceStopCallback(callback: (toolName: string, elapsedSeconds: number) => Promise<boolean>): void {
+  setForceStopCallback(callback: (toolName: string, elapsedSeconds: number, abortSignal?: AbortSignal) => Promise<boolean>): void {
     this.forceStopCallback = callback;
   }
 
