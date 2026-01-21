@@ -20,6 +20,8 @@ export interface PromptCLICallbacks {
   getCurrentTokenCount: () => number;
   /** Set current token count */
   setCurrentTokenCount: (count: number) => void;
+  /** Notify that prompts were added to context */
+  onPromptsAdded?: () => void;
 }
 
 /**
@@ -297,6 +299,11 @@ export class PromptCLI {
       `\n✓ Prompt selection complete. ${totalMessages} message(s) in context.\n`,
       { type: 'info' },
     );
+
+    // Notify that prompts were added to context
+    if (this.callbacks.onPromptsAdded) {
+      this.callbacks.onPromptsAdded();
+    }
   }
 
   /**

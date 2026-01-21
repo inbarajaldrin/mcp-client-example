@@ -207,8 +207,27 @@ export class MCPToolExecutor {
     toolInput: Record<string, any>,
     fromIPC: boolean = false,
   ): Promise<ToolExecutionResult> {
+    // Check if abort was requested before executing tool
+    // This prevents tool execution after shutdown has started
+    if (this.callbacks.isAbortRequested?.()) {
+      return {
+        displayText: '[Tool execution cancelled - abort requested]',
+        contentBlocks: [{ type: 'text', text: '[Tool execution cancelled - abort requested]' }],
+        hasImages: false,
+      };
+    }
+
     const servers = this.callbacks.getServers();
     const preferencesManager = this.callbacks.getPreferencesManager();
+
+    // Check if session is still active (servers not empty)
+    if (!servers || servers.size === 0) {
+      return {
+        displayText: '[Tool execution failed - no active session]',
+        contentBlocks: [{ type: 'text', text: '[Tool execution failed - no active session]' }],
+        hasImages: false,
+      };
+    }
 
     // Extract server name and actual tool name from prefixed name
     // Format: "server-name__tool-name"

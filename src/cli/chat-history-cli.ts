@@ -433,29 +433,12 @@ export class ChatHistoryCLI {
     // Ask if user wants to move to a parent folder (using shared function)
     const parentFolderName = await this.selectParentFolder();
 
-    // Ask user about attachments
-    const attachmentsAction = (
-      await rl.question('\nAttachments: Copy, Move, or Skip? (c/m/s, default: s): ')
-    )
-      .trim()
-      .toLowerCase();
-    let copyAttachments: boolean | null = null;
-    if (
-      !attachmentsAction ||
-      attachmentsAction === 's' ||
-      attachmentsAction === 'skip' ||
-      attachmentsAction === 'n' ||
-      attachmentsAction === 'none'
-    ) {
-      copyAttachments = null; // Skip (default)
-    } else {
-      copyAttachments =
-        attachmentsAction !== 'm' && attachmentsAction !== 'move';
-    }
+    // Automatically copy attachments that are part of this chat
+    const copyAttachments: boolean = true;
 
     // Ask user about outputs
     const outputsAction = (
-      await rl.question('Outputs: Copy, Move, or Skip? (c/m/s, default: s): ')
+      await rl.question('\nOutputs: Copy, Move, or Skip? (c/m/s, default: s): ')
     )
       .trim()
       .toLowerCase();
@@ -628,31 +611,12 @@ export class ChatHistoryCLI {
       // Ask if user wants to move to a parent folder (using shared function)
       const folderName = await this.selectParentFolder();
 
-      // Ask user about attachments
-      const attachmentsAction = (
-        await rl.question(
-          '\nAttachments: Copy, Move, or Skip? (c/m/s, default: s): ',
-        )
-      )
-        .trim()
-        .toLowerCase();
-      let copyAttachments: boolean | null = null;
-      if (
-        !attachmentsAction ||
-        attachmentsAction === 's' ||
-        attachmentsAction === 'skip' ||
-        attachmentsAction === 'n' ||
-        attachmentsAction === 'none'
-      ) {
-        copyAttachments = null; // Skip (default)
-      } else {
-        copyAttachments =
-          attachmentsAction !== 'm' && attachmentsAction !== 'move';
-      }
+      // Automatically copy attachments that are part of this chat
+      const copyAttachments: boolean = true;
 
       // Ask user about outputs
       const outputsAction = (
-        await rl.question('Outputs: Copy, Move, or Skip? (c/m/s, default: s): ')
+        await rl.question('\nOutputs: Copy, Move, or Skip? (c/m/s, default: s): ')
       )
         .trim()
         .toLowerCase();

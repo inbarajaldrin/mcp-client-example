@@ -558,6 +558,18 @@ export class AnthropicProvider implements ModelProvider {
         for (const toolUseBlock of toolUseBlocks) {
           if (toolUseBlock.type !== 'tool_use') continue;
 
+          // Check for cancellation before executing each tool
+          // This prevents queued tools from executing after abort is requested
+          if (cancellationCheck && cancellationCheck()) {
+            // Add a placeholder result for skipped tools so conversation stays valid
+            toolResults.push({
+              type: 'tool_result',
+              tool_use_id: toolUseBlock.id,
+              content: '[Tool execution cancelled by user]',
+            });
+            continue;
+          }
+
           try {
             // Execute the tool
             const toolInput = toolUseBlock.input as Record<string, any>;

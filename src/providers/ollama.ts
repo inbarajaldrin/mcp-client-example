@@ -875,6 +875,17 @@ export class OllamaProvider implements ModelProvider {
 
       // Execute tools
       for (const toolCall of toolCalls) {
+        // Check for cancellation before executing each tool
+        // This prevents queued tools from executing after abort is requested
+        if (cancellationCheck && cancellationCheck()) {
+          conversationMessages.push({
+            role: 'tool',
+            tool_name: toolCall.name,
+            content: '[Tool execution cancelled by user]',
+          });
+          continue;
+        }
+
         try {
           const toolInput = typeof toolCall.arguments === 'string'
             ? JSON.parse(toolCall.arguments)

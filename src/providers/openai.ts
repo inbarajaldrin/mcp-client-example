@@ -652,6 +652,21 @@ export class OpenAIProvider implements ModelProvider {
       }> = [];
 
       for (const toolCall of assistantMessage.tool_calls) {
+        // Check for cancellation before executing each tool
+        // This prevents queued tools from executing after abort is requested
+        if (cancellationCheck && cancellationCheck()) {
+          // Handle both function and custom tool call types for cancelled message
+          const functionCall = 'function' in toolCall ? toolCall.function : null;
+          const toolName = functionCall?.name || 'unknown';
+          toolResults.push({
+            tool_call_id: toolCall.id,
+            role: 'tool',
+            name: toolName,
+            content: '[Tool execution cancelled by user]',
+          });
+          continue;
+        }
+
         try {
           // Handle both function and custom tool call types
           const functionCall = 'function' in toolCall ? toolCall.function : null;

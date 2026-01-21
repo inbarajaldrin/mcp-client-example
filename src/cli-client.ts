@@ -39,6 +39,7 @@ export class MCPClientCLI {
   private preferencesManager: PreferencesManager;
   private ablationManager: AblationManager;
   private pendingAttachments: AttachmentInfo[] = [];
+  private pendingContextAdded = false; // Track if prompts were added via /add-prompt
   private keyboardMonitor: KeyboardMonitor;
   private toolCLI: ToolCLI;
   private attachmentCLI: AttachmentCLI;
@@ -79,6 +80,7 @@ export class MCPClientCLI {
         this.client.setReadlineInterface(rl);
       },
       getIPCServer: () => this.client.getOrchestratorIPCServer(),
+      getCompleter: () => this.completer.bind(this),
     });
 
     // Set up CLI modules
@@ -111,6 +113,9 @@ export class MCPClientCLI {
       getCurrentTokenCount: () => (this.client as any).currentTokenCount,
       setCurrentTokenCount: (count) => {
         (this.client as any).currentTokenCount = count;
+      },
+      onPromptsAdded: () => {
+        this.pendingContextAdded = true;
       },
     });
     this.ablationCLI = new AblationCLI(
@@ -310,7 +315,7 @@ export class MCPClientCLI {
           abortSignal.addEventListener('abort', onAbort, { once: true });
         }
 
-        // Wait for user input
+        // Wait for user input - handle Ctrl+C gracefully
         rlToUse!.question('> ').then((answer) => {
           if (!resolved) {
             resolved = true;
@@ -318,6 +323,16 @@ export class MCPClientCLI {
               abortSignal.removeEventListener('abort', onAbort);
             }
             resolve(answer);
+          }
+        }).catch(() => {
+          // Handle Ctrl+C (AbortError) during readline prompt
+          if (!resolved) {
+            resolved = true;
+            if (abortSignal) {
+              abortSignal.removeEventListener('abort', onAbort);
+            }
+            // Return empty to signal no action (cleanup will handle shutdown)
+            resolve('');
           }
         });
       });
@@ -616,9 +631,35 @@ export class MCPClientCLI {
           }
         }
         
-        // Skip empty queries
+        // Handle empty queries - check for pending context
         if (!query) {
-          continue;
+          const hasPendingAttachments = this.pendingAttachments.length > 0;
+          const hasPendingContext = this.pendingContextAdded;
+
+          if (hasPendingAttachments || hasPendingContext) {
+            // Build description of pending items
+            const pendingItems: string[] = [];
+            if (hasPendingAttachments) {
+              pendingItems.push(`${this.pendingAttachments.length} attachment(s)`);
+            }
+            if (hasPendingContext) {
+              pendingItems.push('prompt(s) added to context');
+            }
+
+            console.log(`\nYou have ${pendingItems.join(' and ')} pending.`);
+            const response = (await this.rl!.question('Send without additional input? (Y/n): ')).trim().toLowerCase();
+
+            if (response === '' || response === 'y' || response === 'yes') {
+              // User confirmed - proceed with empty query to send pending context
+              query = ' '; // Use a space so the query passes through, will be trimmed later
+            } else {
+              // User declined - continue loop to let them type more
+              continue;
+            }
+          } else {
+            // No pending context, just skip empty queries
+            continue;
+          }
         }
         
         // Check for exit command (trim and lowercase to handle any edge cases)
@@ -1207,8 +1248,9 @@ export class MCPClientCLI {
           }
         }
         
-        // Clear pending attachments after they've been used
+        // Clear pending attachments and context flag after they've been used
         this.pendingAttachments = [];
+        this.pendingContextAdded = false;
         
         this.logger.log('\n' + consoleStyles.separator + '\n');
       } catch (error: any) {

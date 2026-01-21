@@ -18,6 +18,8 @@ export interface KeyboardMonitorCallbacks {
   setReadline: (rl: readline.Interface | null) => void;
   /** Get IPC server to signal abort */
   getIPCServer: () => { setAborted: (value: boolean) => void } | null;
+  /** Get completer function for tab autocomplete (optional) */
+  getCompleter?: () => ((line: string) => [string[], string]) | undefined;
 }
 
 /**
@@ -190,9 +192,13 @@ export class KeyboardMonitor {
         const savedHistory = [...(currentRl as any).history];
 
         currentRl.close();
+
+        // Get completer if available to preserve tab autocomplete
+        const completer = this.callbacks.getCompleter?.();
         const newRl = readline.createInterface({
           input: process.stdin,
           output: process.stdout,
+          ...(completer && { completer }),
         });
 
         // Set the new readline interface

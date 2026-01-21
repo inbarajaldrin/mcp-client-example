@@ -598,6 +598,19 @@ export class GeminiProvider implements ModelProvider {
         hasImages: boolean;
       }> = [];
       for (const call of functionCalls) {
+        // Check for cancellation before executing each tool
+        // This prevents queued tools from executing after abort is requested
+        if (cancellationCheck && cancellationCheck()) {
+          const cancelledResult = '[Tool execution cancelled by user]';
+          toolResults.push({
+            name: call.name,
+            content: cancelledResult,
+            contentBlocks: [{ type: 'text', text: cancelledResult }],
+            hasImages: false,
+          });
+          continue;
+        }
+
         try {
           const result = await toolExecutor(call.name, call.args);
 
