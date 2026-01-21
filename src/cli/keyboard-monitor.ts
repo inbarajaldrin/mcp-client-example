@@ -23,7 +23,7 @@ export interface KeyboardMonitorCallbacks {
 }
 
 /**
- * Monitors keyboard input for 'a' key to abort current query.
+ * Monitors keyboard input for Ctrl+A to abort current query.
  * Handles raw mode switching and readline management.
  */
 export class KeyboardMonitor {
@@ -75,7 +75,7 @@ export class KeyboardMonitor {
   }
 
   /**
-   * Start monitoring keyboard input for 'a' key to abort current query.
+   * Start monitoring keyboard input for Ctrl+A to abort current query.
    */
   start(): void {
     if (!process.stdin.isTTY) {
@@ -112,14 +112,13 @@ export class KeyboardMonitor {
       }
 
       // Handle special keys
-      const keyLower = key.toLowerCase();
 
-      // 'a' triggers abort only if not already aborted
-      if (keyLower === 'a' && !this._abortRequested) {
+      // Ctrl+A ('\x01') triggers abort only if not already aborted
+      if (key === '\x01' && !this._abortRequested) {
         this.logger.log(
           '\n' +
             chalk.bold.red(
-              '🛑 Abort requested - will finish current response then stop...',
+              '🛑 Abort requested (Ctrl+A) - will finish current response then stop...',
             ) +
             '\n',
           { type: 'error' },

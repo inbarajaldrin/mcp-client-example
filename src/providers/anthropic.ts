@@ -561,11 +561,21 @@ export class AnthropicProvider implements ModelProvider {
           // Check for cancellation before executing each tool
           // This prevents queued tools from executing after abort is requested
           if (cancellationCheck && cancellationCheck()) {
+            const cancelMessage = '[Tool execution cancelled by user]';
+            // Yield cancelled tool event so client can track it in pendingToolResults
+            yield {
+              type: 'tool_use_complete',
+              toolName: toolUseBlock.name,
+              toolUseId: toolUseBlock.id,
+              toolInput: toolUseBlock.input as Record<string, any>,
+              result: cancelMessage,
+              hasImages: false,
+            };
             // Add a placeholder result for skipped tools so conversation stays valid
             toolResults.push({
               type: 'tool_result',
               tool_use_id: toolUseBlock.id,
-              content: '[Tool execution cancelled by user]',
+              content: cancelMessage,
             });
             continue;
           }

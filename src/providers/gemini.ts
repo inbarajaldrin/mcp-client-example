@@ -602,6 +602,14 @@ export class GeminiProvider implements ModelProvider {
         // This prevents queued tools from executing after abort is requested
         if (cancellationCheck && cancellationCheck()) {
           const cancelledResult = '[Tool execution cancelled by user]';
+          // Yield cancelled tool event so client can track it
+          yield {
+            type: 'tool_use_complete',
+            toolName: call.name,
+            toolInput: call.args,
+            result: cancelledResult,
+            hasImages: false,
+          };
           toolResults.push({
             name: call.name,
             content: cancelledResult,

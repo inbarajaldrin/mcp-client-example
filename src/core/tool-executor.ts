@@ -346,36 +346,23 @@ export class MCPToolExecutor {
         hasImages,
       };
     } catch (toolError) {
-      const errorMessage = `Error executing tool "${toolName}": ${
-        toolError instanceof Error ? toolError.message : String(toolError)
-      }`;
-
-      this.logger.log(`\n⚠️ ${errorMessage}\n`, { type: 'error' });
-
-      // Check if this is a force stop error (user aborted)
+      // Check if this is a force stop error (user aborted) - handle first before logging
       const isForceStop =
         toolError instanceof Error &&
         toolError.message.includes('force stopped by user');
 
       if (isForceStop) {
-        // For force stop, return an error message to the agent instead of throwing
-        // This allows the agent to continue with other tasks
-        const forceStopMessage = `Tool execution was force stopped by the user. The tool "${toolName}" was taking too long and the user chose to abort. You should continue with other tasks or try a different approach.`;
-        this.logger.log(
-          `\nReturning force stop error to agent (context preserved)\n`,
-          { type: 'warning' },
-        );
-        const errorText = JSON.stringify({
-          error: 'force_stopped',
-          message: forceStopMessage,
-          details: errorMessage,
-        });
-        return {
-          displayText: formatJSON(errorText),
-          contentBlocks: [{ type: 'text', text: errorText }],
-          hasImages: false,
-        };
+        // For force stop, throw an error to stop the agent completely
+        // This gives control back to the user instead of letting the agent continue
+        const forceStopMessage = `Tool execution was force stopped by the user. The tool "${toolName}" was taking too long and the user chose to abort.`;
+        throw new Error(forceStopMessage);
       }
+
+      const errorMessage = `Error executing tool "${toolName}": ${
+        toolError instanceof Error ? toolError.message : String(toolError)
+      }`;
+
+      this.logger.log(`\n⚠️ ${errorMessage}\n`, { type: 'error' });
 
       // Check if this is a timeout error
       const isTimeout =

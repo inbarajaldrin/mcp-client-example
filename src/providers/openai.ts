@@ -658,11 +658,21 @@ export class OpenAIProvider implements ModelProvider {
           // Handle both function and custom tool call types for cancelled message
           const functionCall = 'function' in toolCall ? toolCall.function : null;
           const toolName = functionCall?.name || 'unknown';
+          const cancelMessage = '[Tool execution cancelled by user]';
+          // Yield cancelled tool event so client can track it in pendingToolResults
+          yield {
+            type: 'tool_use_complete',
+            toolName: toolName,
+            toolCallId: toolCall.id,
+            toolInput: functionCall?.arguments ? JSON.parse(functionCall.arguments) : {},
+            result: cancelMessage,
+            hasImages: false,
+          };
           toolResults.push({
             tool_call_id: toolCall.id,
             role: 'tool',
             name: toolName,
-            content: '[Tool execution cancelled by user]',
+            content: cancelMessage,
           });
           continue;
         }

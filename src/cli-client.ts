@@ -177,7 +177,7 @@ export class MCPClientCLI {
         type: 'info',
       });
       this.logger.log(
-        `💡 Tip: Press 'a' during agent execution to abort the current query without exiting\n`,
+        `💡 Tip: Press Ctrl+A during agent execution to abort the current query without exiting\n`,
         { type: 'info' },
       );
       this.logger.log(
@@ -216,7 +216,7 @@ export class MCPClientCLI {
         }
       );
 
-      // Set abort check callback to detect when user presses 'a' to abort
+      // Set abort check callback to detect when user presses Ctrl+A to abort
       this.client.setAbortRequestedCallback(() => {
         return this.keyboardMonitor.abortRequested;
       });
@@ -272,7 +272,9 @@ export class MCPClientCLI {
     }
 
     // Stop keyboard monitoring to allow readline to work
+    // Save abort state since start() will reset it
     const wasMonitoring = this.keyboardMonitor.isMonitoring;
+    const wasAbortRequested = this.keyboardMonitor.abortRequested;
     if (wasMonitoring) {
       this.keyboardMonitor.stop();
     }
@@ -361,6 +363,10 @@ export class MCPClientCLI {
       // Restart keyboard monitoring if it was active
       if (wasMonitoring) {
         this.keyboardMonitor.start();
+        // Restore abort state (start() resets it to false)
+        if (wasAbortRequested) {
+          this.keyboardMonitor.abortRequested = true;
+        }
       }
     }
   }
