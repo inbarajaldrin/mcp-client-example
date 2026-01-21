@@ -88,7 +88,8 @@ export interface ChatSession {
     };
   }>;
   metadata: {
-    totalTokens?: number;
+    cumulativeTokens?: number; // Total tokens billed across all API calls (input + output summed)
+    peakContextTokens?: number; // Maximum context size reached (input + output after each API call)
     messageCount: number;
     toolUseCount: number; // Tool calls made by agent (excludes IPC calls)
     ipcCallCount: number; // IPC calls made automatically
@@ -304,7 +305,7 @@ export class ChatHistoryManager {
    */
   setTokenCount(tokens: number): void {
     if (!this.currentSession) return;
-    this.currentSession.metadata.totalTokens = tokens;
+    this.currentSession.metadata.cumulativeTokens = tokens;
   }
 
   /**
@@ -401,11 +402,17 @@ export class ChatHistoryManager {
       this.currentSession.metadata.totalCost += estimatedCost;
     }
 
-    // Update total tokens
-    if (!this.currentSession.metadata.totalTokens) {
-      this.currentSession.metadata.totalTokens = 0;
+    // Update cumulative tokens (total billed across all API calls)
+    if (!this.currentSession.metadata.cumulativeTokens) {
+      this.currentSession.metadata.cumulativeTokens = 0;
     }
-    this.currentSession.metadata.totalTokens += totalTokens;
+    this.currentSession.metadata.cumulativeTokens += totalTokens;
+
+    // Update peak context tokens (max context size reached after any API call)
+    const contextAfterCall = inputTokens + outputTokens;
+    if (!this.currentSession.metadata.peakContextTokens || contextAfterCall > this.currentSession.metadata.peakContextTokens) {
+      this.currentSession.metadata.peakContextTokens = contextAfterCall;
+    }
 
     this.currentSession.tokenUsagePerCallback.push({
       timestamp: new Date().toISOString(),
@@ -560,9 +567,14 @@ export class ChatHistoryManager {
       md += `**IPC Calls (Automatic):** ${session.metadata.ipcCallCount}\n`;
     }
 
-    // Display total tokens
-    if (session.metadata.totalTokens !== undefined && session.metadata.totalTokens > 0) {
-      md += `**Total Tokens:** ${session.metadata.totalTokens.toLocaleString()}\n`;
+    // Display peak context (max conversation size)
+    if (session.metadata.peakContextTokens !== undefined && session.metadata.peakContextTokens > 0) {
+      md += `**Peak Context:** ${session.metadata.peakContextTokens.toLocaleString()} tokens\n`;
+    }
+
+    // Display cumulative tokens (total billed)
+    if (session.metadata.cumulativeTokens !== undefined && session.metadata.cumulativeTokens > 0) {
+      md += `**Cumulative Tokens:** ${session.metadata.cumulativeTokens.toLocaleString()}\n`;
     }
 
     // Display total estimated cost
