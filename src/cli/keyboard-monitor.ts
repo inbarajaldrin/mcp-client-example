@@ -136,8 +136,9 @@ export class KeyboardMonitor {
         return;
       }
 
-      // Handle Ctrl+C (exit)
+      // Handle Ctrl+C (exit) - emit SIGINT since raw mode prevents normal signal
       if (key === '\x03') {
+        process.emit('SIGINT', 'SIGINT');
         return;
       }
 
