@@ -250,10 +250,47 @@ export class GeminiProvider implements ModelProvider {
           });
         }
       } else if (msg.role === 'user') {
-        contents.push({
-          role: 'user',
-          parts: [{ text: msg.content }],
-        });
+        // Handle user messages with content_blocks (for attachments like images)
+        const parts: any[] = [];
+        
+        if (msg.content_blocks && Array.isArray(msg.content_blocks)) {
+          // Process content blocks (images, text, etc.)
+          for (const block of msg.content_blocks) {
+            if (block.type === 'image') {
+              // Convert image block to Gemini inlineData format
+              // User message images use source.data and source.media_type
+              const imageData = (block as any).source?.data || (block as any).data;
+              const mimeType = (block as any).source?.media_type || (block as any).mimeType || 'image/jpeg';
+              
+              if (imageData) {
+                parts.push({
+                  inlineData: {
+                    mimeType,
+                    data: imageData,
+                  },
+                });
+              }
+            } else if (block.type === 'text' && (block as any).text) {
+              // Text blocks
+              parts.push({ text: (block as any).text });
+            }
+            // Note: document blocks (PDFs) are not supported by Gemini API
+            // They would need to be converted to images or text first
+          }
+        }
+        
+        // If no content blocks or no parts were added, use the text content
+        if (parts.length === 0 && msg.content) {
+          parts.push({ text: msg.content });
+        }
+        
+        // Only add if we have parts
+        if (parts.length > 0) {
+          contents.push({
+            role: 'user',
+            parts,
+          });
+        }
       }
     }
 
