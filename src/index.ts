@@ -1606,6 +1606,10 @@ export class MCPClient {
     }> = [];
     const isAnthropic = this.modelProvider.getProviderName() === 'anthropic';
 
+    // Track pending tool calls for OpenAI (to build tool_calls array for assistant message)
+    // OpenAI requires assistant messages to have tool_calls before tool role messages
+    const pendingToolCalls = new Map<string, { id: string; name: string; arguments: string }>();
+
     // Track token usage per callback
     let tokenCountBeforeCallback = initialTokenCount !== undefined ? initialTokenCount : this.currentTokenCount;
     let lastTokenUsage: {
@@ -1662,17 +1666,22 @@ export class MCPClient {
         hasOutputContent = true;
         
         // Track tool result to add to messages
-        // Tool results will be added when we see the next assistant message or end_turn
+        // For Anthropic: Tool results will be added when we see the next assistant message or end_turn
+        // For OpenAI: Add tool message immediately (assistant message with tool_calls was already added at message_stop)
         if (isAnthropic && chunk.toolUseId) {
           pendingToolResults.push({
             toolUseId: chunk.toolUseId,
             content: chunk.result || '',
           });
         } else if (!isAnthropic && chunk.toolCallId) {
-          pendingToolResults.push({
-            toolCallId: chunk.toolCallId,
+          // OpenAI: add tool message immediately after tool_use_complete
+          // The assistant message with tool_calls was already added at message_stop
+          const toolMessage: Message = {
+            role: 'tool',
+            tool_call_id: chunk.toolCallId,
             content: chunk.result || '',
-          });
+          };
+          this.messages.push(toolMessage);
         }
         // Pretty-print JSON if applicable
         if (chunk.result) {
@@ -1755,6 +1764,16 @@ export class MCPClient {
         if (chunk.content_block?.type === 'tool_use' && chunk.content_block?.id) {
           const toolId = chunk.content_block.id;
           this.toolInputTimes.set(toolId, new Date().toISOString());
+
+          // For OpenAI: track tool calls to include in assistant message
+          // OpenAI requires assistant messages to have tool_calls before tool role messages
+          if (!isAnthropic) {
+            pendingToolCalls.set(toolId, {
+              id: toolId,
+              name: chunk.content_block.name || '',
+              arguments: '',
+            });
+          }
         }
         continue;
       }
@@ -1768,6 +1787,21 @@ export class MCPClient {
         }
         this.logger.log(chunk.delta.text);
         hasOutputContent = true;
+        continue;
+      }
+
+      // Handle tool argument deltas for OpenAI
+      if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'input_json_delta') {
+        // For OpenAI: accumulate tool arguments
+        // The tool_call_id comes from the content_block_start event
+        // Find the most recently added pending tool call and append arguments
+        if (!isAnthropic && pendingToolCalls.size > 0) {
+          // Get the last added tool call (Map maintains insertion order)
+          const lastToolCall = Array.from(pendingToolCalls.values()).pop();
+          if (lastToolCall) {
+            lastToolCall.arguments += chunk.delta.partial_json || '';
+          }
+        }
         continue;
       }
 
@@ -1813,27 +1847,35 @@ export class MCPClient {
         // For Anthropic: Skip creating message here UNLESS we're aborting
         // When aborting, we need to save currentMessage because complete response might not arrive
         // For OpenAI: Always create the message since there's no separate complete response
+        // Also create message if there are pending tool calls (assistant may call tools without text)
         const isAborting = cancellationCheck && cancellationCheck();
-        if (currentMessage.trim() && (!isAnthropic || isAborting)) {
+        const hasToolCalls = !isAnthropic && pendingToolCalls.size > 0;
+        if ((currentMessage.trim() || hasToolCalls) && (!isAnthropic || isAborting)) {
+          // Build tool_calls array for OpenAI from pending tool calls
+          const toolCallsArray = hasToolCalls
+            ? Array.from(pendingToolCalls.values()).map(tc => ({
+                id: tc.id,
+                name: tc.name,
+                arguments: tc.arguments,
+              }))
+            : undefined;
+
           const assistantMessage: Message = {
             role: 'assistant',
             content: currentMessage,
+            // Include tool_calls for OpenAI (required before tool role messages)
+            tool_calls: toolCallsArray,
           };
           this.messages.push(assistantMessage);
-          
-          // Add any pending tool results (for OpenAI, tools complete after message_stop)
-          if (pendingToolResults.length > 0 && !isAnthropic) {
-            for (const tr of pendingToolResults) {
-              const toolMessage: Message = {
-                role: 'tool',
-                tool_call_id: tr.toolCallId!,
-                content: tr.content,
-              };
-              this.messages.push(toolMessage);
-            }
-            pendingToolResults.length = 0;
+
+          // Clear pending tool calls after adding to message
+          if (hasToolCalls) {
+            pendingToolCalls.clear();
           }
-          
+
+          // Note: For OpenAI, tool results are added immediately at tool_use_complete events
+          // (tools execute AFTER message_stop, so pendingToolResults would be empty here)
+
           // Use official token counting for accurate counts
           if (this.modelProvider.getProviderName() === 'anthropic') {
             const provider = this.modelProvider as any;
@@ -1975,16 +2017,28 @@ export class MCPClient {
               }
             }
           } else {
-            // OpenAI: add tool role messages
-            for (const tr of pendingToolResults) {
-              if (tr.toolCallId) {
-                const toolMessage: Message = {
-                  role: 'tool',
-                  tool_call_id: tr.toolCallId,
-                  content: tr.content,
-                };
-                this.messages.push(toolMessage);
+            // OpenAI: add tool role messages (must follow assistant message with matching tool_calls)
+            // Find the last assistant message with tool_calls
+            let lastAssistantIdx = this.messages.length - 1;
+            while (lastAssistantIdx >= 0) {
+              const msg = this.messages[lastAssistantIdx];
+              if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+                const toolCallIds = new Set(msg.tool_calls.map((tc: any) => tc.id));
+                const validToolResults = pendingToolResults.filter(tr =>
+                  tr.toolCallId && toolCallIds.has(tr.toolCallId)
+                );
+
+                for (const tr of validToolResults) {
+                  const toolMessage: Message = {
+                    role: 'tool',
+                    tool_call_id: tr.toolCallId!,
+                    content: tr.content,
+                  };
+                  this.messages.push(toolMessage);
+                }
+                break;
               }
+              lastAssistantIdx--;
             }
             // Clear pending results after adding them
             pendingToolResults.length = 0;
@@ -2089,15 +2143,27 @@ export class MCPClient {
                 lastAssistantIndex--;
               }
             } else {
-              for (const tr of pendingToolResults) {
-                if (tr.toolCallId) {
-                  const toolMessage: Message = {
-                    role: 'tool',
-                    tool_call_id: tr.toolCallId,
-                    content: tr.content,
-                  };
-                  this.messages.push(toolMessage);
+              // OpenAI: add tool role messages (must follow assistant message with matching tool_calls)
+              let lastAssistantIdx = this.messages.length - 1;
+              while (lastAssistantIdx >= 0) {
+                const msg = this.messages[lastAssistantIdx];
+                if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+                  const toolCallIds = new Set(msg.tool_calls.map((tc: any) => tc.id));
+                  const validToolResults = pendingToolResults.filter(tr =>
+                    tr.toolCallId && toolCallIds.has(tr.toolCallId)
+                  );
+
+                  for (const tr of validToolResults) {
+                    const toolMessage: Message = {
+                      role: 'tool',
+                      tool_call_id: tr.toolCallId!,
+                      content: tr.content,
+                    };
+                    this.messages.push(toolMessage);
+                  }
+                  break;
                 }
+                lastAssistantIdx--;
               }
             }
             pendingToolResults.length = 0;
@@ -2251,22 +2317,72 @@ export class MCPClient {
             lastAssistantIndex--;
           }
         } else {
-          // OpenAI: add tool role messages
-          for (const tr of pendingToolResults) {
-            if (tr.toolCallId) {
-              const toolMessage: Message = {
-                role: 'tool',
-                tool_call_id: tr.toolCallId,
-                content: tr.content,
-              };
-              this.messages.push(toolMessage);
+          // OpenAI: add tool role messages (must follow assistant message with matching tool_calls)
+          // Find the last assistant message with tool_calls
+          let lastAssistantIndex = this.messages.length - 1;
+          while (lastAssistantIndex >= 0) {
+            const msg = this.messages[lastAssistantIndex];
+            if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+              // Verify that pending tool results have matching tool_call_ids
+              const toolCallIds = new Set(msg.tool_calls.map((tc: any) => tc.id));
+              const validToolResults = pendingToolResults.filter(tr =>
+                tr.toolCallId && toolCallIds.has(tr.toolCallId)
+              );
+
+              if (validToolResults.length > 0) {
+                // Add tool messages after this assistant message
+                for (const tr of validToolResults) {
+                  const toolMessage: Message = {
+                    role: 'tool',
+                    tool_call_id: tr.toolCallId!,
+                    content: tr.content,
+                  };
+                  this.messages.push(toolMessage);
+                }
+              }
+              break;
             }
+            lastAssistantIndex--;
           }
         }
       }
       
       // Check if query was cancelled - messages are kept visible even when aborted
       if (cancellationCheck && cancellationCheck()) {
+        // SAFETY CHECK for OpenAI: Ensure all tool_calls have corresponding tool messages
+        // This prevents "tool_call_id did not have response messages" errors on the next query
+        if (this.modelProvider.getProviderName() === 'openai') {
+          for (let i = 0; i < this.messages.length; i++) {
+            const msg = this.messages[i];
+            if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+              // Find all tool_call_ids in this assistant message
+              const toolCallIds = new Set(msg.tool_calls.map((tc: any) => tc.id));
+
+              // Check subsequent messages for tool responses
+              for (let j = i + 1; j < this.messages.length; j++) {
+                const nextMsg = this.messages[j];
+                if (nextMsg.role === 'tool' && nextMsg.tool_call_id) {
+                  toolCallIds.delete(nextMsg.tool_call_id);
+                } else if (nextMsg.role === 'assistant') {
+                  // Reached next assistant message, stop searching
+                  break;
+                }
+              }
+
+              // Add placeholder tool messages for any missing tool_call_ids
+              for (const missingId of toolCallIds) {
+                const toolMessage: Message = {
+                  role: 'tool',
+                  tool_call_id: missingId,
+                  content: '[Tool execution cancelled - abort requested]',
+                };
+                // Insert after the assistant message
+                this.messages.splice(i + 1, 0, toolMessage);
+              }
+            }
+          }
+        }
+
         // Keep messages and token count as-is so user can see the partial response
         // Note: IPC server already logs abort message when orchestrator mode is active
         return this.messages;
@@ -2421,15 +2537,27 @@ export class MCPClient {
                 lastAssistantIndex--;
               }
             } else {
-              for (const tr of continuePendingToolResults) {
-                if (tr.toolCallId) {
-                  const toolMessage: Message = {
-                    role: 'tool',
-                    tool_call_id: tr.toolCallId,
-                    content: tr.content,
-                  };
-                  this.messages.push(toolMessage);
+              // OpenAI: add tool role messages (must follow assistant message with matching tool_calls)
+              let lastAssistantIdx = this.messages.length - 1;
+              while (lastAssistantIdx >= 0) {
+                const msg = this.messages[lastAssistantIdx];
+                if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+                  const toolCallIds = new Set(msg.tool_calls.map((tc: any) => tc.id));
+                  const validToolResults = continuePendingToolResults.filter(tr =>
+                    tr.toolCallId && toolCallIds.has(tr.toolCallId)
+                  );
+
+                  for (const tr of validToolResults) {
+                    const toolMessage: Message = {
+                      role: 'tool',
+                      tool_call_id: tr.toolCallId!,
+                      content: tr.content,
+                    };
+                    this.messages.push(toolMessage);
+                  }
+                  break;
                 }
+                lastAssistantIdx--;
               }
             }
           }
