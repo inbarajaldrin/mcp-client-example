@@ -234,40 +234,101 @@ export class ChatHistoryCLI {
       const newMessages: any[] = [];
       let restoredCount = 0;
 
-      // Restore messages in reverse order (oldest first) so they appear in correct order when prepended
+      // Build a map of tool_use_id -> assistant message index for proper ordering
+      // This handles cases where tool messages appear before their assistant message in saved order
+      const toolUseIdToAssistantIndex = new Map<string, number>();
+      for (let i = 0; i < fullChat.messages.length; i++) {
+        const msg = fullChat.messages[i];
+        if (msg.role === 'assistant' && msg.content_blocks) {
+          for (const block of msg.content_blocks) {
+            if (block.type === 'tool_use' && block.id) {
+              toolUseIdToAssistantIndex.set(block.id, i);
+            }
+          }
+        }
+      }
+
+      // Collect tool results by their matching assistant message index
+      const toolResultsByAssistantIndex = new Map<number, Array<{ tool_use_id: string; content: string }>>();
+      const orphanedToolResults: Array<{ tool_use_id: string; content: string }> = [];
+
       for (const msg of fullChat.messages) {
-        if (msg.role === 'user' || msg.role === 'assistant') {
+        if (msg.role === 'tool' && msg.tool_use_id && msg.toolName && msg.toolOutput !== undefined) {
+          const assistantIndex = toolUseIdToAssistantIndex.get(msg.tool_use_id);
+          if (assistantIndex !== undefined) {
+            if (!toolResultsByAssistantIndex.has(assistantIndex)) {
+              toolResultsByAssistantIndex.set(assistantIndex, []);
+            }
+            toolResultsByAssistantIndex.get(assistantIndex)!.push({
+              tool_use_id: msg.tool_use_id,
+              content: msg.toolOutput,
+            });
+          } else {
+            // No matching tool_use found - this is an orphaned result (from old format)
+            orphanedToolResults.push({
+              tool_use_id: msg.tool_use_id,
+              content: msg.toolOutput,
+            });
+          }
+
+          // Save to history manager regardless
+          this.historyManager.addToolExecution(
+            msg.toolName,
+            msg.toolInput || {},
+            msg.toolOutput,
+            msg.orchestratorMode || false,
+            msg.isIPCCall || false,
+            msg.toolInputTime,
+            msg.tool_use_id,
+          );
+          restoredCount++;
+        }
+      }
+
+      // Now restore messages in proper order
+      for (let i = 0; i < fullChat.messages.length; i++) {
+        const msg = fullChat.messages[i];
+
+        if (msg.role === 'user') {
           const messageObj = {
             role: msg.role,
             content: msg.content,
           };
           newMessages.push(messageObj);
-
-          // Also add to ChatHistoryManager so they're saved with the current session
-          if (msg.role === 'user') {
-            this.historyManager.addUserMessage(msg.content);
-          } else if (msg.role === 'assistant') {
-            this.historyManager.addAssistantMessage(msg.content);
-          }
+          this.historyManager.addUserMessage(msg.content);
           restoredCount++;
-        } else if (msg.role === 'tool') {
-          // Also restore tool executions
-          if (
-            msg.toolName &&
-            msg.toolInput !== undefined &&
-            msg.toolOutput !== undefined
-          ) {
-            this.historyManager.addToolExecution(
-              msg.toolName,
-              msg.toolInput,
-              msg.toolOutput,
-              msg.orchestratorMode || false,
-              msg.isIPCCall || false,
-              msg.toolInputTime, // Preserve original input time if available
-            );
-            restoredCount++;
+        } else if (msg.role === 'assistant') {
+          // Restore assistant message with content_blocks if present
+          const messageObj: any = {
+            role: 'assistant',
+            content: msg.content,
+          };
+
+          // Preserve content_blocks with tool_use blocks for proper model context
+          if (msg.content_blocks && msg.content_blocks.length > 0) {
+            messageObj.content_blocks = msg.content_blocks;
+          }
+
+          newMessages.push(messageObj);
+          this.historyManager.addAssistantMessage(msg.content, msg.content_blocks);
+          restoredCount++;
+
+          // Add tool results that belong to this assistant message (AFTER the assistant message)
+          const matchingToolResults = toolResultsByAssistantIndex.get(i);
+          if (matchingToolResults && matchingToolResults.length > 0) {
+            const toolResultsMessage = {
+              role: 'user',
+              content: '',
+              tool_results: matchingToolResults.map(tr => ({
+                type: 'tool_result',
+                tool_use_id: tr.tool_use_id,
+                content: tr.content,
+              })),
+            };
+            newMessages.push(toolResultsMessage);
           }
         }
+        // Skip 'tool' messages here - they're handled via toolResultsByAssistantIndex
       }
 
       // Prepend restored messages to current conversation (for the model context)

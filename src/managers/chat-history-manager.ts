@@ -53,6 +53,10 @@ export interface ChatSession {
     timestamp: string;
     role: 'user' | 'assistant' | 'tool' | 'client';
     content: string;
+    // For assistant messages with tool_use blocks (preserves full structure for restore)
+    content_blocks?: Array<{ type: string; [key: string]: any }>;
+    // For tool result messages (preserves tool_use_id for proper pairing on restore)
+    tool_use_id?: string;
     attachments?: Array<{
       fileName: string;
       ext: string;
@@ -238,7 +242,7 @@ export class ChatHistoryManager {
   /**
    * Add an assistant message to current session
    */
-  addAssistantMessage(content: string): void {
+  addAssistantMessage(content: string, contentBlocks?: Array<{ type: string; [key: string]: any }>): void {
     if (!this.currentSession) {
       this.logger.log('No active session. Call startSession() first.\n', {
         type: 'warning',
@@ -246,12 +250,18 @@ export class ChatHistoryManager {
       return;
     }
 
-    this.currentSession.messages.push({
+    const message: any = {
       timestamp: new Date().toISOString(),
       role: 'assistant',
       content,
-    });
+    };
 
+    // Preserve content_blocks if present (for tool_use blocks)
+    if (contentBlocks && contentBlocks.length > 0) {
+      message.content_blocks = contentBlocks;
+    }
+
+    this.currentSession.messages.push(message);
     this.currentSession.metadata.messageCount++;
   }
 
@@ -265,6 +275,7 @@ export class ChatHistoryManager {
     orchestratorMode: boolean = false,
     isIPCCall: boolean = false,
     toolInputTime?: string, // Optional ISO timestamp when tool input was sent
+    toolUseId?: string, // Optional tool_use_id for pairing with assistant's tool_use block
   ): void {
     if (!this.currentSession) {
       this.logger.log('No active session. Call startSession() first.\n', {
@@ -276,7 +287,7 @@ export class ChatHistoryManager {
     const toolOutputTime = new Date().toISOString();
     const timestamp = toolInputTime || toolOutputTime; // Use input time if available, otherwise output time
 
-    this.currentSession.messages.push({
+    const message: any = {
       timestamp,
       role: 'tool',
       content: toolOutput,
@@ -287,7 +298,14 @@ export class ChatHistoryManager {
       toolOutputTime,
       orchestratorMode,
       isIPCCall,
-    });
+    };
+
+    // Store tool_use_id if provided (needed for proper restore)
+    if (toolUseId) {
+      message.tool_use_id = toolUseId;
+    }
+
+    this.currentSession.messages.push(message);
 
     this.currentSession.metadata.messageCount++;
 

@@ -1734,6 +1734,7 @@ export class MCPClient {
           this.orchestratorModeEnabled, // Track if tool was called in orchestrator mode
           false, // isIPCCall - regular tool calls
           toolInputTime, // Pass the input time
+          toolId, // Pass the tool_use_id for pairing with assistant's tool_use block
         );
         continue;
       }
@@ -1936,6 +1937,9 @@ export class MCPClient {
           content_blocks: chunk.content, // Preserve full content including tool_use blocks
         };
         this.messages.push(assistantMessage);
+
+        // Save assistant message to chat history (preserving content_blocks for proper restore)
+        this.chatHistoryManager.addAssistantMessage(textContent, chunk.content);
         
         // If we have pending tool results, add them now (after the assistant message with tool_use blocks)
         if (pendingToolResults.length > 0) {
@@ -2442,8 +2446,11 @@ export class MCPClient {
             .filter((msg: any) => msg.role === 'assistant');
           if (assistantMessagesAfterReminder.length > 0) {
             const lastAssistantMessage = assistantMessagesAfterReminder[assistantMessagesAfterReminder.length - 1];
-            if (lastAssistantMessage.content) {
-              this.chatHistoryManager.addAssistantMessage(lastAssistantMessage.content);
+            if (lastAssistantMessage.content || lastAssistantMessage.content_blocks) {
+              this.chatHistoryManager.addAssistantMessage(
+                lastAssistantMessage.content || '',
+                lastAssistantMessage.content_blocks
+              );
             }
           }
 
