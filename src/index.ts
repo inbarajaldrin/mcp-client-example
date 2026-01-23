@@ -1929,8 +1929,18 @@ export class MCPClient {
             );
             lastTokenUsage = null; // Reset after logging
             tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
+          } else if (this.modelProvider.getProviderName() === 'gemini' && lastTokenUsage) {
+            // Gemini: use exact counts from API
+            const totalTokens = lastTokenUsage.inputTokens + lastTokenUsage.outputTokens;
+            this.chatHistoryManager.addTokenUsagePerCallback(
+              lastTokenUsage.inputTokens,
+              lastTokenUsage.outputTokens,
+              totalTokens
+            );
+            lastTokenUsage = null; // Reset after logging
+            tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
           }
-          
+
           // Add newline after assistant message to ensure tool execution logs appear on new line
           if (currentMessage && !currentMessage.endsWith('\n')) {
             this.logger.log('\n');

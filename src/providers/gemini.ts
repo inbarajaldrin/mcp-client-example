@@ -583,10 +583,10 @@ export class GeminiProvider implements ModelProvider {
         }
       }
 
-      // Emit token usage
+      // Emit token usage (use 'token_usage' type to match handler in processToolUseStream)
       if (finalUsage) {
         yield {
-          type: 'usage',
+          type: 'token_usage',
           input_tokens: finalUsage.promptTokenCount || 0,
           output_tokens: finalUsage.candidatesTokenCount || 0,
         } as MessageStreamEvent;
@@ -643,6 +643,7 @@ export class GeminiProvider implements ModelProvider {
           yield {
             type: 'tool_use_complete',
             toolName: call.name,
+            toolCallId: call.id,
             toolInput: call.args,
             result: cancelledResult,
             hasImages: false,
@@ -677,6 +678,7 @@ export class GeminiProvider implements ModelProvider {
           yield {
             type: 'tool_use_complete',
             toolName: call.name,
+            toolCallId: call.id,
             toolInput: call.args,
             result: result.displayText,
             hasImages: result.hasImages,
@@ -693,6 +695,7 @@ export class GeminiProvider implements ModelProvider {
           yield {
             type: 'tool_use_complete',
             toolName: call.name,
+            toolCallId: call.id,
             toolInput: call.args,
             result: errorResult,
           };
