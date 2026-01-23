@@ -214,8 +214,13 @@ export class AttachmentManager {
         } as ImageBlock);
         this.logger.log(`✓ Added image: ${attachment.fileName}\n`, { type: 'success' });
       }
-      else if (attachment.mediaType.startsWith('text/')) {
-        // Text: Read and include as text content
+      else if (attachment.mediaType.startsWith('text/') || 
+               attachment.mediaType === 'application/json' ||
+               attachment.mediaType === 'application/xml' ||
+               attachment.mediaType === 'application/javascript' ||
+               attachment.mediaType === 'application/typescript') {
+        // Text-based files: Read and include as text content
+        // Includes text/*, JSON, XML, and JavaScript/TypeScript files
         try {
           const textContent = fs.readFileSync(attachment.path, 'utf-8');
           contentBlocks.push({
