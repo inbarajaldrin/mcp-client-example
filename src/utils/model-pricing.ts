@@ -1,12 +1,16 @@
 /**
  * Model pricing data for LLM cost calculations.
  *
+ * NOTE: This file is a FALLBACK. The primary pricing source is @pydantic/genai-prices,
+ * a community-maintained package with up-to-date pricing for 700+ models across 29 providers.
+ * This hardcoded data is only used when the package doesn't have pricing for a model.
+ *
  * Prices are in USD per 1 million tokens.
  *
  * Sources:
- * - Anthropic: https://www.anthropic.com/pricing (updated April 2025)
- * - OpenAI: https://platform.openai.com/docs/models (updated December 2025)
- * - Google Gemini: https://ai.google.dev/gemini-api/docs/pricing (updated January 2025)
+ * - Anthropic: https://www.anthropic.com/pricing (updated January 2026)
+ * - OpenAI: https://platform.openai.com/docs/models (updated January 2026)
+ * - Google Gemini: https://ai.google.dev/gemini-api/docs/pricing (updated January 2026)
  *
  * Note: Pricing may vary by context window size (e.g., >200K tokens for Sonnet 4.5, >128K for Gemini 1.5)
  * Cache pricing: Anthropic uses 10% of input price (90% discount), OpenAI varies by model
@@ -37,10 +41,10 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   'claude-3-5-sonnet-20240620': { input: 3.00, output: 15.00, cachedInput: 0.30 },
   'claude-3-5-sonnet-latest': { input: 3.00, output: 15.00, cachedInput: 0.30 },
 
-  // Claude 3.5 Haiku
-  'claude-haiku-4-5-20251001': { input: 0.80, output: 4.00, cachedInput: 0.08 },
-  'claude-3-5-haiku-20241022': { input: 0.80, output: 4.00, cachedInput: 0.08 },
-  'claude-3-5-haiku-latest': { input: 0.80, output: 4.00, cachedInput: 0.08 },
+  // Claude Haiku 4.5 (updated January 2026)
+  'claude-haiku-4-5-20251001': { input: 1.00, output: 5.00, cachedInput: 0.10 },
+  'claude-3-5-haiku-20241022': { input: 1.00, output: 5.00, cachedInput: 0.10 },
+  'claude-3-5-haiku-latest': { input: 1.00, output: 5.00, cachedInput: 0.10 },
 
   // Claude 3 Opus (legacy)
   'claude-3-opus-20240229': { input: 15.00, output: 75.00, cachedInput: 1.50 },
@@ -69,9 +73,9 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   'gpt-4o-2024-08-06': { input: 2.50, output: 10.00 },
   'gpt-4o-2024-05-13': { input: 2.50, output: 10.00 },
 
-  // GPT-4o mini
-  'gpt-4o-mini': { input: 0.15, output: 0.60 },
-  'gpt-4o-mini-2024-07-18': { input: 0.15, output: 0.60 },
+  // GPT-4o mini (added cached input pricing January 2026)
+  'gpt-4o-mini': { input: 0.15, output: 0.60, cachedInput: 0.075 }, // 50% discount
+  'gpt-4o-mini-2024-07-18': { input: 0.15, output: 0.60, cachedInput: 0.075 },
 
   // GPT-4o mini Realtime
   'gpt-4o-mini-realtime-preview': { input: 0.60, output: 2.40, cachedInput: 0.30 }, // 50% discount
@@ -88,7 +92,10 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
   'o1-preview': { input: 15.00, output: 60.00, cachedInput: 7.50 }, // 50% discount
   'o1-mini': { input: 3.00, output: 12.00, cachedInput: 1.50 }, // 50% discount
   'o1-pro': { input: 15.00, output: 60.00, cachedInput: 7.50 },
-  'o3': { input: 15.00, output: 60.00, cachedInput: 7.50 },
+
+  // o3 series (updated January 2026 - significantly cheaper than o1)
+  'o3': { input: 2.00, output: 8.00, cachedInput: 0.50 }, // 25% discount on cache
+  'o3-mini': { input: 1.10, output: 4.40, cachedInput: 0.275 },
 
   // GPT-3.5 Turbo
   'gpt-3.5-turbo': { input: 0.50, output: 1.50 },

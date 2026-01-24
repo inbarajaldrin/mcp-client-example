@@ -6,6 +6,7 @@ import type { Message } from '../model-provider.js';
 import { MODEL_PRICING } from '../utils/model-pricing.js';
 import { sanitizeFolderName } from '../utils/path-utils.js';
 import { directoryHasFiles, copyDirectoryRecursive, moveDirectoryRecursive } from '../utils/file-ops.js';
+import { calcPrice, type Usage, type PriceCalculationResult } from '@pydantic/genai-prices';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -327,9 +328,33 @@ export class ChatHistoryManager {
   }
 
   /**
-   * Calculate estimated cost for a callback
-   * Uses Context7-sourced pricing data (updated December 2025)
-   * Supports long context pricing for models like Sonnet 4.5 (>200K tokens)
+   * Detect provider ID from model name for @pydantic/genai-prices
+   */
+  private detectProviderId(model: string): string | undefined {
+    const modelLower = model.toLowerCase();
+    if (modelLower.includes('claude') || modelLower.includes('anthropic')) {
+      return 'anthropic';
+    }
+    if (modelLower.includes('gpt') || modelLower.includes('o1') || modelLower.includes('o3') || modelLower.includes('chatgpt')) {
+      return 'openai';
+    }
+    if (modelLower.includes('gemini')) {
+      return 'google';
+    }
+    // For other models, let the package try to auto-detect
+    return undefined;
+  }
+
+  /**
+   * Calculate estimated cost for a callback using @pydantic/genai-prices
+   * Falls back to hardcoded MODEL_PRICING if the package doesn't have pricing for the model
+   *
+   * @pydantic/genai-prices is a community-maintained package with up-to-date pricing
+   * for 700+ models across 29 providers. It supports:
+   * - Tiered pricing for long contexts (e.g., Gemini >128K)
+   * - Cache read/write pricing
+   * - Historic price tracking
+   * - Variable daily prices (e.g., DeepSeek off-peak)
    */
   private calculateCost(
     model: string,
@@ -339,6 +364,29 @@ export class ChatHistoryManager {
     outputTokens: number,
     totalInputTokens?: number // Total input tokens to determine if long context pricing applies
   ): number {
+    // Try @pydantic/genai-prices first (community-maintained, up-to-date pricing)
+    try {
+      // The package expects input_tokens to be the TOTAL input count.
+      // cache_write_tokens and cache_read_tokens are SUBSETS of input_tokens
+      // that get charged at their respective rates (the remainder is charged at regular input rate).
+      const usage: Usage = {
+        input_tokens: regularInputTokens + cacheCreationTokens + cacheReadTokens, // TOTAL input
+        output_tokens: outputTokens,
+        cache_read_tokens: cacheReadTokens,   // Subset charged at cache_read rate
+        cache_write_tokens: cacheCreationTokens, // Subset charged at cache_write rate
+      };
+
+      const providerId = this.detectProviderId(model);
+      const result: PriceCalculationResult = calcPrice(usage, model, { providerId });
+
+      if (result && result.total_price !== undefined) {
+        return result.total_price;
+      }
+    } catch {
+      // Silently fall back to hardcoded pricing if genai-prices fails
+    }
+
+    // Fallback to hardcoded MODEL_PRICING
     const pricing = MODEL_PRICING[model];
     if (!pricing) {
       // Unknown model, return 0
@@ -349,9 +397,9 @@ export class ChatHistoryManager {
     // Default threshold is 200K tokens (for Sonnet 4.5, Gemini 2.5 Pro)
     // Gemini 1.5 models use 128K threshold
     const threshold = pricing.longContextThreshold || 200_000;
-    const useLongContextPricing = totalInputTokens && totalInputTokens > threshold && 
+    const useLongContextPricing = totalInputTokens && totalInputTokens > threshold &&
                                    pricing.inputLongContext && pricing.outputLongContext;
-    
+
     const inputPrice = useLongContextPricing ? pricing.inputLongContext! : pricing.input;
     const outputPrice = useLongContextPricing ? pricing.outputLongContext! : pricing.output;
 
