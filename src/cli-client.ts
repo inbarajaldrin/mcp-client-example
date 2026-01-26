@@ -690,6 +690,42 @@ export class MCPClientCLI {
           process.exit(0);
         }
 
+        // Handle incomplete/unknown commands - detect partial command matches
+        if (query.startsWith('/')) {
+          const lowerQuery = query.toLowerCase();
+          const baseCommand = lowerQuery.split(' ')[0]; // Get just the command part, not arguments
+
+          // Check if this is an exact match for any known command (including commands with args)
+          const isExactMatch = CLI_COMMANDS.some(cmd =>
+            lowerQuery === cmd || lowerQuery.startsWith(cmd + ' ')
+          );
+
+          if (!isExactMatch) {
+            // Find commands that start with what the user typed
+            const suggestions = CLI_COMMANDS.filter(cmd => cmd.startsWith(baseCommand));
+
+            if (suggestions.length > 0) {
+              // Partial match - show suggestions and re-prompt with their input pre-filled
+              console.log(`\nDid you mean one of these commands?`);
+              suggestions.forEach(cmd => console.log(`  ${cmd}`));
+              console.log('');
+
+              // Pre-fill the next prompt with their partial input
+              setImmediate(() => {
+                if (this.rl) {
+                  this.rl.write(query);
+                }
+              });
+              continue;
+            } else {
+              // Unknown command - not a prefix of any known command
+              console.log(`\nUnknown command: ${baseCommand}`);
+              console.log('Type /help for a list of available commands.\n');
+              continue;
+            }
+          }
+        }
+
         // Handle help command
         if (query.toLowerCase() === '/help') {
           this.displayHelp();
