@@ -1819,6 +1819,12 @@ export class MCPClient {
           lastTokenUsage.regularInputTokens = breakdown.input_tokens || 0;
           lastTokenUsage.cacheCreationTokens = breakdown.cache_creation_input_tokens || 0;
           lastTokenUsage.cacheReadTokens = breakdown.cache_read_input_tokens || 0;
+        } else if (this.modelProvider.getProviderName() === 'gemini') {
+          // Gemini doesn't provide cache token breakdown - treat all input as regular tokens
+          // This enables cost calculation for Gemini models
+          lastTokenUsage.regularInputTokens = chunk.input_tokens;
+          lastTokenUsage.cacheCreationTokens = 0;
+          lastTokenUsage.cacheReadTokens = 0;
         }
 
         // Extract Ollama-specific metrics if available
