@@ -97,10 +97,16 @@ export class MCPToolExecutor {
    * The timer only starts AFTER the user presses abort.
    * After FORCE_STOP_TIMEOUT_SECONDS from abort, prompts the user if they want to force stop.
    * If user approves, rejects the promise. Otherwise, continues waiting.
+   *
+   * @param toolName - Name of the tool for error messages
+   * @param toolPromise - The promise to wrap
+   * @param autoStopOnAbort - If true, automatically stop when abort is detected (no prompt).
+   *                          Used for IPC child tools where the parent orchestrator handles prompting.
    */
   private async withForceStopPrompt<T>(
     toolName: string,
     toolPromise: Promise<T>,
+    autoStopOnAbort: boolean = false,
   ): Promise<T> {
     const askForceStop = this.callbacks.askForceStop;
     const isAbortRequested = this.callbacks.isAbortRequested;
@@ -150,8 +156,25 @@ export class MCPToolExecutor {
         if (abortDetected) {
           elapsedSecondsAfterAbort += pollInterval / 1000;
 
-          // Check if we've waited long enough after abort
-          if (elapsedSecondsAfterAbort >= FORCE_STOP_TIMEOUT_SECONDS) {
+          // For IPC child tools: auto-stop immediately when abort is detected
+          // and the parent orchestrator's force-stop prompt has been answered (mutex released)
+          // This ensures child tools stop when the user force-stops the orchestrator
+          if (autoStopOnAbort && elapsedSecondsAfterAbort >= FORCE_STOP_TIMEOUT_SECONDS) {
+            // Wait for any active prompt (the orchestrator's) to complete
+            if (this.forceStopPromptActive) {
+              setTimeout(checkAbortAndTimeout, pollInterval);
+              return;
+            }
+            // Auto-stop without prompting - parent orchestrator was force-stopped
+            if (!isCompleted) {
+              isCompleted = true;
+              reject(new Error(`Tool "${toolName}" stopped - parent operation was cancelled`));
+              return;
+            }
+          }
+
+          // For regular tools: show prompt after timeout
+          if (!autoStopOnAbort && elapsedSecondsAfterAbort >= FORCE_STOP_TIMEOUT_SECONDS) {
             // Skip if another prompt is already showing (mutex)
             if (this.forceStopPromptActive) {
               // Don't reset timer, just wait for the other prompt to finish
@@ -265,8 +288,10 @@ export class MCPToolExecutor {
             })(),
           },
         );
-        // Wrap with force stop prompt (asks user after 30 seconds if they want to abort)
-        toolResult = await this.withForceStopPrompt(toolName, toolPromise);
+        // Wrap with force stop prompt (asks user after timeout if they want to abort)
+        // For IPC calls: use autoStopOnAbort=true so they stop automatically when the
+        // parent orchestrator is force-stopped, without showing their own prompt
+        toolResult = await this.withForceStopPrompt(toolName, toolPromise, fromIPC);
       } else {
         // Fallback: try to find the tool in any server (backward compatibility)
         let found = false;
@@ -297,8 +322,9 @@ export class MCPToolExecutor {
                 })(),
               },
             );
-            // Wrap with force stop prompt (asks user after 30 seconds if they want to abort)
-            toolResult = await this.withForceStopPrompt(toolName, toolPromise);
+            // Wrap with force stop prompt (asks user after timeout if they want to abort)
+            // For IPC calls: use autoStopOnAbort=true so they stop when parent is force-stopped
+            toolResult = await this.withForceStopPrompt(toolName, toolPromise, fromIPC);
             found = true;
             break;
           }
