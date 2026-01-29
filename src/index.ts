@@ -1674,11 +1674,12 @@ export class MCPClient {
             content: chunk.result || '',
           });
         } else if (!isAnthropic && chunk.toolCallId) {
-          // OpenAI: add tool message immediately after tool_use_complete
+          // Non-Anthropic: add tool message immediately after tool_use_complete
           // The assistant message with tool_calls was already added at message_stop
           const toolMessage: Message = {
             role: 'tool',
             tool_call_id: chunk.toolCallId,
+            tool_name: chunk.toolName, // Include tool_name for Gemini (uses name-based matching)
             content: chunk.result || '',
           };
           this.messages.push(toolMessage);
@@ -1765,13 +1766,17 @@ export class MCPClient {
           const toolId = chunk.content_block.id;
           this.toolInputTimes.set(toolId, new Date().toISOString());
 
-          // For OpenAI: track tool calls to include in assistant message
+          // For non-Anthropic providers: track tool calls to include in assistant message
           // OpenAI requires assistant messages to have tool_calls before tool role messages
+          // Gemini provides args upfront in content_block_start (not via streaming deltas)
           if (!isAnthropic) {
+            const inputArgs = chunk.content_block.input;
             pendingToolCalls.set(toolId, {
               id: toolId,
               name: chunk.content_block.name || '',
-              arguments: '',
+              arguments: inputArgs
+                ? (typeof inputArgs === 'string' ? inputArgs : JSON.stringify(inputArgs))
+                : '',
             });
           }
         }
@@ -1866,23 +1871,15 @@ export class MCPClient {
               }))
             : undefined;
 
-          const assistantMessage: Message = {
-            role: 'assistant',
-            content: currentMessage,
-            // Include tool_calls for OpenAI (required before tool role messages)
-            tool_calls: toolCallsArray,
-          };
-          this.messages.push(assistantMessage);
-
-          // Save assistant messages with tool calls to chat history
-          // For non-Anthropic providers, this is the only place tool call info gets persisted
-          // (Anthropic saves via the complete response handler at chunk.content path below)
-          if (!isAnthropic && hasToolCalls && toolCallsArray) {
-            // Convert tool_calls to canonical content_blocks format for storage
-            const contentBlocks: Array<{ type: string; [key: string]: any }> = [];
+          // Build content_blocks for providers that need them (Gemini uses function_call format)
+          // This also serves as the canonical format for chat history storage
+          let contentBlocks: Array<{ type: string; [key: string]: any }> | undefined;
+          if (hasToolCalls && toolCallsArray) {
+            contentBlocks = [];
             if (currentMessage.trim()) {
               contentBlocks.push({ type: 'text', text: currentMessage });
             }
+            const isGemini = this.modelProvider.getProviderName() === 'gemini';
             for (const tc of toolCallsArray) {
               let parsedInput: any = {};
               if (typeof tc.arguments === 'string' && tc.arguments.trim()) {
@@ -1895,13 +1892,30 @@ export class MCPClient {
               } else if (typeof tc.arguments === 'object') {
                 parsedInput = tc.arguments;
               }
-              contentBlocks.push({
-                type: 'tool_use',
-                id: tc.id,
-                name: tc.name,
-                input: parsedInput,
-              });
+              // Use function_call type for Gemini (matches convertMessagesToGeminiFormat),
+              // tool_use type for others (canonical format)
+              contentBlocks.push(isGemini
+                ? { type: 'function_call', name: tc.name, args: parsedInput, id: tc.id }
+                : { type: 'tool_use', id: tc.id, name: tc.name, input: parsedInput }
+              );
             }
+          }
+
+          const assistantMessage: Message = {
+            role: 'assistant',
+            content: currentMessage,
+            // Include tool_calls for OpenAI (required before tool role messages)
+            tool_calls: toolCallsArray,
+            // Include content_blocks for Gemini (convertMessagesToGeminiFormat reads function_call blocks)
+            // and for general context preservation across turns
+            content_blocks: contentBlocks,
+          };
+          this.messages.push(assistantMessage);
+
+          // Save assistant messages with tool calls to chat history
+          // For non-Anthropic providers, this is the only place tool call info gets persisted
+          // (Anthropic saves via the complete response handler at chunk.content path below)
+          if (!isAnthropic && hasToolCalls && contentBlocks) {
             this.chatHistoryManager.addAssistantMessage(currentMessage, contentBlocks);
           }
 

@@ -234,9 +234,37 @@ export class GeminiProvider implements ModelProvider {
                 part.thoughtSignature = block.thoughtSignature;
               }
               parts.push(part);
+            } else if (block.type === 'tool_use') {
+              // Handle tool_use blocks (canonical/Anthropic format - from chat restore or cross-provider)
+              const args = block.input || {};
+              parts.push({
+                functionCall: {
+                  name: block.name,
+                  args: typeof args === 'string' ? JSON.parse(args) : args,
+                },
+              });
             } else if (block.type === 'text' && block.text) {
               parts.push({ text: block.text });
             }
+          }
+        } else if (msg.tool_calls && msg.tool_calls.length > 0) {
+          // Fallback: handle OpenAI-format tool_calls (from cross-provider messages)
+          if (msg.content) {
+            parts.push({ text: msg.content });
+          }
+          for (const tc of msg.tool_calls) {
+            let args: any = {};
+            if (typeof tc.arguments === 'string' && tc.arguments.trim()) {
+              try { args = JSON.parse(tc.arguments); } catch { args = {}; }
+            } else if (typeof tc.arguments === 'object') {
+              args = tc.arguments;
+            }
+            parts.push({
+              functionCall: {
+                name: tc.name,
+                args,
+              },
+            });
           }
         } else if (msg.content) {
           // Regular text content
@@ -589,6 +617,7 @@ export class GeminiProvider implements ModelProvider {
                     type: 'tool_use',
                     name: part.functionCall.name,
                     id: callId,
+                    input: part.functionCall.args || {},
                   },
                 } as MessageStreamEvent;
               }
