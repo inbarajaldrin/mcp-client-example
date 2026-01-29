@@ -17,6 +17,7 @@ export interface Message {
   tool_results?: Array<{ // For Anthropic tool result messages
     type: 'tool_result';
     tool_use_id: string;
+    tool_name?: string; // Optional tool name for Gemini compatibility
     content: string | Array<{ type: string; [key: string]: any }>; // String or content blocks (for images)
   }>;
   // For Anthropic: store raw content blocks to preserve tool_use blocks

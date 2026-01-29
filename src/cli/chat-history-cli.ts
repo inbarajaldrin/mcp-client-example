@@ -20,6 +20,8 @@ export interface ChatHistoryCLICallbacks {
   getCurrentTokenCount: () => number;
   /** Set current token count */
   setCurrentTokenCount: (count: number) => void;
+  /** Get current provider name for format conversion */
+  getProviderName: () => string;
 }
 
 /**
@@ -38,6 +40,256 @@ export class ChatHistoryCLI {
     this.historyManager = historyManager;
     this.logger = logger;
     this.callbacks = callbacks;
+  }
+
+  /**
+   * Convert messages from canonical (Anthropic) format to provider-specific format.
+   * This enables cross-provider chat history restore.
+   */
+  private convertMessagesForProvider(messages: any[], providerName: string): any[] {
+    switch (providerName) {
+      case 'openai':
+        return this.convertToOpenAIFormat(messages);
+      case 'gemini':
+        return this.convertToGeminiFormat(messages);
+      case 'ollama':
+        return this.convertToOllamaFormat(messages);
+      case 'anthropic':
+        return this.convertToAnthropicFormat(messages);
+      default:
+        return messages;
+    }
+  }
+
+  /**
+   * Convert messages to Anthropic format.
+   *
+   * The canonical storage format is close to Anthropic, but may contain extra fields
+   * that Anthropic's strict API rejects (e.g., tool_name in tool_results).
+   * Also converts non-Anthropic content_blocks (e.g., Gemini's function_call) to tool_use.
+   */
+  private convertToAnthropicFormat(messages: any[]): any[] {
+    const result: any[] = [];
+
+    for (const msg of messages) {
+      // Clean tool_results: Anthropic rejects extra fields like tool_name
+      if (msg.role === 'user' && msg.tool_results && Array.isArray(msg.tool_results) && msg.tool_results.length > 0) {
+        result.push({
+          role: 'user',
+          content: msg.content || '',
+          tool_results: msg.tool_results.map((tr: any) => ({
+            type: 'tool_result',
+            tool_use_id: tr.tool_use_id,
+            content: tr.content,
+            // Explicitly omit tool_name — Anthropic rejects it
+          })),
+        });
+        continue;
+      }
+
+      // Convert assistant content_blocks: ensure all tool call blocks use Anthropic's tool_use format
+      if (msg.role === 'assistant' && msg.content_blocks && msg.content_blocks.length > 0) {
+        const convertedBlocks = msg.content_blocks.map((block: any) => {
+          // Convert Gemini's function_call to Anthropic's tool_use
+          if (block.type === 'function_call') {
+            return {
+              type: 'tool_use',
+              id: block.id,
+              name: block.name,
+              input: block.args || {},
+            };
+          }
+          return block;
+        });
+        result.push({
+          role: 'assistant',
+          content: msg.content,
+          content_blocks: convertedBlocks,
+        });
+        continue;
+      }
+
+      // Pass through other messages unchanged
+      result.push(msg);
+    }
+
+    return result;
+  }
+
+  /**
+   * Convert messages to OpenAI format.
+   *
+   * Key differences from Anthropic format:
+   * - Tool results use 'tool' role with tool_call_id (not user role with tool_results array)
+   * - Assistant tool calls use tool_calls array with JSON string arguments
+   */
+  private convertToOpenAIFormat(messages: any[]): any[] {
+    const result: any[] = [];
+
+    for (const msg of messages) {
+      // Convert user messages with tool_results to separate tool role messages
+      if (msg.role === 'user' && msg.tool_results && Array.isArray(msg.tool_results) && msg.tool_results.length > 0) {
+        for (const tr of msg.tool_results) {
+          result.push({
+            role: 'tool',
+            tool_call_id: tr.tool_use_id,
+            content: typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content),
+          });
+        }
+        continue;
+      }
+
+      // Convert assistant messages with content_blocks containing tool_use
+      if (msg.role === 'assistant' && msg.content_blocks && msg.content_blocks.length > 0) {
+        const toolUseBlocks = msg.content_blocks.filter((b: any) => b.type === 'tool_use');
+
+        if (toolUseBlocks.length > 0) {
+          result.push({
+            role: 'assistant',
+            content: msg.content || null,
+            tool_calls: toolUseBlocks.map((block: any) => ({
+              id: block.id,
+              name: block.name,
+              arguments: typeof block.input === 'string' ? block.input : JSON.stringify(block.input || {}),
+            })),
+          });
+          continue;
+        }
+      }
+
+      // Pass through other messages unchanged
+      result.push({
+        role: msg.role,
+        content: msg.content || '',
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Convert messages to Gemini format.
+   *
+   * Key differences from Anthropic format:
+   * - Uses 'model' role instead of 'assistant'
+   * - Tool calls use function_call format with args object
+   * - Tool results use functionResponse in user messages with tool_name
+   */
+  private convertToGeminiFormat(messages: any[]): any[] {
+    const result: any[] = [];
+
+    for (const msg of messages) {
+      // Convert user messages with tool_results - Gemini expects tool_name
+      if (msg.role === 'user' && msg.tool_results && Array.isArray(msg.tool_results) && msg.tool_results.length > 0) {
+        // For Gemini, we keep the structure but ensure tool_name is present
+        result.push({
+          role: 'user',
+          content: msg.content || '',
+          tool_results: msg.tool_results.map((tr: any) => ({
+            type: 'tool_result',
+            tool_use_id: tr.tool_use_id,
+            tool_name: tr.tool_name || 'unknown', // Gemini uses name-based matching
+            content: tr.content,
+          })),
+        });
+        continue;
+      }
+
+      // Convert assistant messages with content_blocks containing tool_use to function_call format
+      if (msg.role === 'assistant' && msg.content_blocks && msg.content_blocks.length > 0) {
+        const newContentBlocks: any[] = [];
+
+        for (const block of msg.content_blocks) {
+          if (block.type === 'tool_use') {
+            // Convert tool_use to function_call format for Gemini
+            newContentBlocks.push({
+              type: 'function_call',
+              name: block.name,
+              args: block.input || {},
+              id: block.id,
+            });
+          } else if (block.type === 'text') {
+            newContentBlocks.push(block);
+          }
+        }
+
+        result.push({
+          role: 'assistant', // Will be converted to 'model' by Gemini provider
+          content: msg.content || '',
+          content_blocks: newContentBlocks,
+        });
+        continue;
+      }
+
+      // Pass through other messages unchanged
+      result.push({
+        role: msg.role,
+        content: msg.content || '',
+        ...(msg.content_blocks && { content_blocks: msg.content_blocks }),
+      });
+    }
+
+    return result;
+  }
+
+  /**
+   * Convert messages to Ollama format.
+   *
+   * Key differences from Anthropic format:
+   * - Tool results use 'tool' role with tool_name (not tool_call_id)
+   * - Tool calls use tool_calls array with arguments as object (not JSON string)
+   */
+  private convertToOllamaFormat(messages: any[]): any[] {
+    const result: any[] = [];
+
+    for (const msg of messages) {
+      // Convert user messages with tool_results to separate tool role messages
+      if (msg.role === 'user' && msg.tool_results && Array.isArray(msg.tool_results) && msg.tool_results.length > 0) {
+        for (const tr of msg.tool_results) {
+          result.push({
+            role: 'tool',
+            tool_name: tr.tool_name || 'unknown', // Ollama uses tool_name, not tool_call_id
+            content: typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content),
+          });
+        }
+        continue;
+      }
+
+      // Convert assistant messages with content_blocks containing tool_use
+      if (msg.role === 'assistant' && msg.content_blocks && msg.content_blocks.length > 0) {
+        const toolUseBlocks = msg.content_blocks.filter((b: any) => b.type === 'tool_use');
+
+        if (toolUseBlocks.length > 0) {
+          result.push({
+            role: 'assistant',
+            content: msg.content || '',
+            tool_calls: toolUseBlocks.map((block: any) => {
+              let args: any = {};
+              if (typeof block.input === 'string' && block.input.trim()) {
+                try { args = JSON.parse(block.input); } catch { args = {}; }
+              } else if (typeof block.input === 'object') {
+                args = block.input || {};
+              }
+              return {
+                id: block.id,
+                name: block.name,
+                // Ollama expects arguments as object, not JSON string
+                arguments: args,
+              };
+            }),
+          });
+          continue;
+        }
+      }
+
+      // Pass through other messages unchanged
+      result.push({
+        role: msg.role,
+        content: msg.content || '',
+      });
+    }
+
+    return result;
   }
 
   /**
@@ -236,21 +488,32 @@ export class ChatHistoryCLI {
 
       // Build a map of tool_use_id -> assistant message index for proper ordering
       // This handles cases where tool messages appear before their assistant message in saved order
+      // Check both content_blocks (canonical/Anthropic) and tool_calls (OpenAI/Gemini/Ollama) formats
       const toolUseIdToAssistantIndex = new Map<string, number>();
       for (let i = 0; i < fullChat.messages.length; i++) {
         const msg = fullChat.messages[i];
-        if (msg.role === 'assistant' && msg.content_blocks) {
-          for (const block of msg.content_blocks) {
-            if (block.type === 'tool_use' && block.id) {
-              toolUseIdToAssistantIndex.set(block.id, i);
+        if (msg.role === 'assistant') {
+          // Check content_blocks for tool_use entries (canonical/Anthropic format)
+          if (msg.content_blocks) {
+            for (const block of msg.content_blocks) {
+              if ((block.type === 'tool_use' || block.type === 'function_call') && block.id) {
+                toolUseIdToAssistantIndex.set(block.id, i);
+              }
+            }
+          }
+          // Also check tool_calls (OpenAI/Gemini/Ollama format, may exist in older saved chats)
+          if ((msg as any).tool_calls) {
+            for (const tc of (msg as any).tool_calls) {
+              if (tc.id) {
+                toolUseIdToAssistantIndex.set(tc.id, i);
+              }
             }
           }
         }
       }
 
       // Collect tool results by their matching assistant message index
-      const toolResultsByAssistantIndex = new Map<number, Array<{ tool_use_id: string; content: string }>>();
-      const orphanedToolResults: Array<{ tool_use_id: string; content: string }> = [];
+      const toolResultsByAssistantIndex = new Map<number, Array<{ tool_use_id: string; tool_name: string; content: string }>>();
 
       for (const msg of fullChat.messages) {
         if (msg.role === 'tool' && msg.tool_use_id && msg.toolName && msg.toolOutput !== undefined) {
@@ -261,15 +524,11 @@ export class ChatHistoryCLI {
             }
             toolResultsByAssistantIndex.get(assistantIndex)!.push({
               tool_use_id: msg.tool_use_id,
-              content: msg.toolOutput,
-            });
-          } else {
-            // No matching tool_use found - this is an orphaned result (from old format)
-            orphanedToolResults.push({
-              tool_use_id: msg.tool_use_id,
+              tool_name: msg.toolName,
               content: msg.toolOutput,
             });
           }
+          // Skip orphaned tool results - they don't have matching tool_use blocks
 
           // Save to history manager regardless
           this.historyManager.addToolExecution(
@@ -285,11 +544,42 @@ export class ChatHistoryCLI {
         }
       }
 
+      // Build set of matched tool_use_ids (those with content_blocks in an assistant message)
+      const matchedToolUseIds = new Set<string>(toolUseIdToAssistantIndex.keys());
+
       // Now restore messages in proper order
+      // Collect consecutive orphaned tool results to batch them into a single context message
+      let pendingOrphanedToolResults: Array<{ toolName: string; toolInput: any; toolOutput: string }> = [];
+
+      const flushOrphanedToolResults = () => {
+        if (pendingOrphanedToolResults.length === 0) return;
+
+        // Format orphaned tool results as a text-based context message
+        // so the model can see the tool execution history even without content_blocks
+        const lines: string[] = ['[Restored Tool Execution Context]'];
+        for (const tr of pendingOrphanedToolResults) {
+          lines.push(`\nTool: ${tr.toolName}`);
+          if (tr.toolInput && Object.keys(tr.toolInput).length > 0) {
+            lines.push(`Input: ${JSON.stringify(tr.toolInput)}`);
+          }
+          lines.push(`Output: ${tr.toolOutput}`);
+        }
+
+        newMessages.push({
+          role: 'user',
+          content: lines.join('\n'),
+        });
+
+        pendingOrphanedToolResults = [];
+      };
+
       for (let i = 0; i < fullChat.messages.length; i++) {
         const msg = fullChat.messages[i];
 
         if (msg.role === 'user') {
+          // Flush any pending orphaned tool results before a user message
+          flushOrphanedToolResults();
+
           const messageObj = {
             role: msg.role,
             content: msg.content,
@@ -298,6 +588,9 @@ export class ChatHistoryCLI {
           this.historyManager.addUserMessage(msg.content);
           restoredCount++;
         } else if (msg.role === 'assistant') {
+          // Flush any pending orphaned tool results before an assistant message
+          flushOrphanedToolResults();
+
           // Restore assistant message with content_blocks if present
           const messageObj: any = {
             role: 'assistant',
@@ -305,8 +598,35 @@ export class ChatHistoryCLI {
           };
 
           // Preserve content_blocks with tool_use blocks for proper model context
+          // But handle dangling tool_use blocks (session ended before tool returned)
           if (msg.content_blocks && msg.content_blocks.length > 0) {
-            messageObj.content_blocks = msg.content_blocks;
+            const matchingToolResults = toolResultsByAssistantIndex.get(i);
+            const hasMatchingResults = matchingToolResults && matchingToolResults.length > 0;
+
+            if (hasMatchingResults) {
+              // All tool_use blocks have matching results - keep content_blocks as-is
+              messageObj.content_blocks = msg.content_blocks;
+            } else {
+              // Check if any tool_use blocks lack results (dangling)
+              const toolUseBlocks = msg.content_blocks.filter(
+                (b: any) => b.type === 'tool_use' || b.type === 'function_call'
+              );
+              const nonToolBlocks = msg.content_blocks.filter(
+                (b: any) => b.type !== 'tool_use' && b.type !== 'function_call'
+              );
+
+              if (toolUseBlocks.length > 0) {
+                // Strip dangling tool_use blocks - session was interrupted before tool returned
+                // Keep only text blocks to avoid provider API errors
+                if (nonToolBlocks.length > 0) {
+                  messageObj.content_blocks = nonToolBlocks;
+                }
+                // If no non-tool blocks remain, omit content_blocks entirely
+              } else {
+                // No tool_use blocks - preserve content_blocks (e.g., text blocks)
+                messageObj.content_blocks = msg.content_blocks;
+              }
+            }
           }
 
           newMessages.push(messageObj);
@@ -322,17 +642,38 @@ export class ChatHistoryCLI {
               tool_results: matchingToolResults.map(tr => ({
                 type: 'tool_result',
                 tool_use_id: tr.tool_use_id,
+                tool_name: tr.tool_name, // Include tool name for Gemini compatibility
                 content: tr.content,
               })),
             };
             newMessages.push(toolResultsMessage);
           }
+        } else if (msg.role === 'tool' && msg.tool_use_id && !matchedToolUseIds.has(msg.tool_use_id)) {
+          // Orphaned tool result - no matching content_blocks in any assistant message
+          // (common with orchestrator IPC calls or Gemini sessions)
+          // Collect and batch into a text context message
+          pendingOrphanedToolResults.push({
+            toolName: msg.toolName || 'unknown',
+            toolInput: msg.toolInput || {},
+            toolOutput: msg.toolOutput || '',
+          });
         }
-        // Skip 'tool' messages here - they're handled via toolResultsByAssistantIndex
+        // Matched tool messages are handled via toolResultsByAssistantIndex above
       }
 
+      // Flush any remaining orphaned tool results at the end
+      flushOrphanedToolResults();
+
+      // Convert messages to provider-specific format before adding to context
+      const providerName = this.callbacks.getProviderName();
+      const convertedMessages = this.convertMessagesForProvider(newMessages, providerName);
+      this.logger.log(
+        `  (Converted ${newMessages.length} messages to ${providerName} format)\n`,
+        { type: 'info' },
+      );
+
       // Prepend restored messages to current conversation (for the model context)
-      messages.unshift(...newMessages);
+      messages.unshift(...convertedMessages);
 
       // Update token count (approximate)
       const tokenCounter = this.callbacks.getTokenCounter();

@@ -104,6 +104,7 @@ export class MCPClientCLI {
         setCurrentTokenCount: (count) => {
           (this.client as any).currentTokenCount = count;
         },
+        getProviderName: () => this.client.getProviderName(),
       },
     );
     this.promptCLI = new PromptCLI(this.client, this.logger, {

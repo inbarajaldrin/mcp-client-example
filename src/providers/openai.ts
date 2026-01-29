@@ -825,6 +825,20 @@ export class OpenAIProvider implements ModelProvider {
         };
       }
       
+      // Handle user messages with tool_results (Anthropic format - from chat restore)
+      // Convert to OpenAI tool role format
+      if (msg.role === 'user' && msg.tool_results && Array.isArray(msg.tool_results) && msg.tool_results.length > 0) {
+        // For OpenAI, we need to return multiple tool messages, but map() returns one message per input
+        // So we'll just use the first tool result here - OpenAI doesn't support Anthropic's tool_results format
+        // A proper fix would require changing the overall message structure
+        const tr = msg.tool_results[0];
+        return {
+          role: 'tool' as const,
+          tool_call_id: tr.tool_use_id, // Use tool_use_id as tool_call_id
+          content: typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content),
+        };
+      }
+
       // Handle user messages (standard text)
       if (msg.role === 'user') {
         return {

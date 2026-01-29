@@ -250,6 +250,31 @@ export class GeminiProvider implements ModelProvider {
           });
         }
       } else if (msg.role === 'user') {
+        // Handle user messages with tool_results (Anthropic format - from chat restore)
+        if (msg.tool_results && Array.isArray(msg.tool_results) && msg.tool_results.length > 0) {
+          for (const tr of msg.tool_results) {
+            const functionResponse: any = {
+              name: (tr as any).tool_name || 'unknown', // Use tool_name if available
+              response: {
+                content: typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content),
+              },
+            };
+
+            const lastContent = contents[contents.length - 1];
+            if (lastContent && lastContent.role === 'user') {
+              // Append to existing user message
+              lastContent.parts.push({ functionResponse });
+            } else {
+              // Create new user message with function response
+              contents.push({
+                role: 'user',
+                parts: [{ functionResponse }],
+              });
+            }
+          }
+          continue; // Skip regular user message processing
+        }
+
         // Handle user messages with content_blocks (for attachments like images)
         const parts: any[] = [];
         

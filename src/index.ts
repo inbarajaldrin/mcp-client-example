@@ -1874,6 +1874,37 @@ export class MCPClient {
           };
           this.messages.push(assistantMessage);
 
+          // Save assistant messages with tool calls to chat history
+          // For non-Anthropic providers, this is the only place tool call info gets persisted
+          // (Anthropic saves via the complete response handler at chunk.content path below)
+          if (!isAnthropic && hasToolCalls && toolCallsArray) {
+            // Convert tool_calls to canonical content_blocks format for storage
+            const contentBlocks: Array<{ type: string; [key: string]: any }> = [];
+            if (currentMessage.trim()) {
+              contentBlocks.push({ type: 'text', text: currentMessage });
+            }
+            for (const tc of toolCallsArray) {
+              let parsedInput: any = {};
+              if (typeof tc.arguments === 'string' && tc.arguments.trim()) {
+                try {
+                  parsedInput = JSON.parse(tc.arguments);
+                } catch {
+                  // Arguments may be incomplete or malformed during streaming
+                  parsedInput = { _raw: tc.arguments };
+                }
+              } else if (typeof tc.arguments === 'object') {
+                parsedInput = tc.arguments;
+              }
+              contentBlocks.push({
+                type: 'tool_use',
+                id: tc.id,
+                name: tc.name,
+                input: parsedInput,
+              });
+            }
+            this.chatHistoryManager.addAssistantMessage(currentMessage, contentBlocks);
+          }
+
           // Clear pending tool calls after adding to message
           if (hasToolCalls) {
             pendingToolCalls.clear();
