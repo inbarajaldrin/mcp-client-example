@@ -105,6 +105,7 @@ export class MCPClientCLI {
           (this.client as any).currentTokenCount = count;
         },
         getProviderName: () => this.client.getProviderName(),
+        getAttachmentManager: () => this.attachmentManager,
       },
     );
     this.promptCLI = new PromptCLI(this.client, this.logger, {

@@ -22,6 +22,11 @@ export interface ChatHistoryCLICallbacks {
   setCurrentTokenCount: (count: number) => void;
   /** Get current provider name for format conversion */
   getProviderName: () => string;
+  /** Get attachment manager for restoring attachment content blocks */
+  getAttachmentManager: () => {
+    getAttachmentInfo(fileName: string): { path: string; fileName: string; ext: string; mediaType: string } | null;
+    createContentBlocks(attachments: Array<{ path: string; fileName: string; ext: string; mediaType: string }>, text?: string): Array<{ type: string; [key: string]: any }>;
+  } | null;
 }
 
 /**
@@ -40,6 +45,35 @@ export class ChatHistoryCLI {
     this.historyManager = historyManager;
     this.logger = logger;
     this.callbacks = callbacks;
+  }
+
+  /**
+   * Check if an attachment media type is supported by the given provider.
+   * Text-based and image types are supported by all providers.
+   * PDFs are only supported by Anthropic.
+   */
+  private isAttachmentSupportedByProvider(mediaType: string, providerName: string): boolean {
+    // Text-based types → all providers
+    if (mediaType.startsWith('text/') ||
+        mediaType === 'application/json' ||
+        mediaType === 'application/xml' ||
+        mediaType === 'application/javascript' ||
+        mediaType === 'application/typescript') {
+      return true;
+    }
+
+    // Images → all providers
+    if (mediaType.startsWith('image/')) {
+      return true;
+    }
+
+    // PDFs → only anthropic
+    if (mediaType === 'application/pdf') {
+      return providerName === 'anthropic';
+    }
+
+    // Unknown → allow (let provider handle it)
+    return true;
   }
 
   /**
@@ -161,6 +195,7 @@ export class ChatHistoryCLI {
       result.push({
         role: msg.role,
         content: msg.content || '',
+        ...(msg.content_blocks && { content_blocks: msg.content_blocks }),
       });
     }
 
@@ -286,6 +321,7 @@ export class ChatHistoryCLI {
       result.push({
         role: msg.role,
         content: msg.content || '',
+        ...(msg.content_blocks && { content_blocks: msg.content_blocks }),
       });
     }
 
@@ -580,12 +616,69 @@ export class ChatHistoryCLI {
           // Flush any pending orphaned tool results before a user message
           flushOrphanedToolResults();
 
-          const messageObj = {
+          const messageObj: any = {
             role: msg.role,
             content: msg.content,
           };
+
+          // Restore attachment content blocks if this message had attachments
+          if (msg.attachments && Array.isArray(msg.attachments) && msg.attachments.length > 0) {
+            const attachmentManager = this.callbacks.getAttachmentManager();
+            if (attachmentManager) {
+              const providerName = this.callbacks.getProviderName();
+              const foundAttachments: Array<{ path: string; fileName: string; ext: string; mediaType: string }> = [];
+              const missingAttachments: string[] = [];
+              const unsupportedAttachments: Array<{ fileName: string; mediaType: string }> = [];
+
+              for (const att of msg.attachments) {
+                const info = attachmentManager.getAttachmentInfo(att.fileName);
+                if (!info) {
+                  missingAttachments.push(att.fileName);
+                } else if (!this.isAttachmentSupportedByProvider(info.mediaType, providerName)) {
+                  unsupportedAttachments.push({ fileName: info.fileName, mediaType: info.mediaType });
+                } else {
+                  foundAttachments.push(info);
+                }
+              }
+
+              // Create content blocks from found attachments
+              if (foundAttachments.length > 0) {
+                try {
+                  const contentBlocks = attachmentManager.createContentBlocks(foundAttachments);
+                  if (contentBlocks.length > 0) {
+                    messageObj.content_blocks = contentBlocks;
+                  }
+                } catch (error) {
+                  this.logger.log(
+                    `  ⚠ Failed to create content blocks for attachments: ${error}\n`,
+                    { type: 'warning' },
+                  );
+                }
+              }
+
+              // Log warnings for missing attachments
+              if (missingAttachments.length > 0) {
+                this.logger.log(
+                  `  ⚠ Missing attachment file(s): ${missingAttachments.join(', ')}\n`,
+                  { type: 'warning' },
+                );
+              }
+
+              // Log warnings for unsupported attachments
+              if (unsupportedAttachments.length > 0) {
+                const details = unsupportedAttachments
+                  .map(a => `${a.fileName} (${a.mediaType})`)
+                  .join(', ');
+                this.logger.log(
+                  `  ⚠ Unsupported by ${providerName}: ${details}\n`,
+                  { type: 'warning' },
+                );
+              }
+            }
+          }
+
           newMessages.push(messageObj);
-          this.historyManager.addUserMessage(msg.content);
+          this.historyManager.addUserMessage(msg.content, msg.attachments);
           restoredCount++;
         } else if (msg.role === 'assistant') {
           // Flush any pending orphaned tool results before an assistant message
