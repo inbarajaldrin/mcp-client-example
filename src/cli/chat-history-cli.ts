@@ -180,7 +180,7 @@ export class ChatHistoryCLI {
         if (toolUseBlocks.length > 0) {
           result.push({
             role: 'assistant',
-            content: msg.content || null,
+            content: msg.content || '',
             tool_calls: toolUseBlocks.map((block: any) => ({
               id: block.id,
               name: block.name,

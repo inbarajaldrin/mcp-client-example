@@ -256,7 +256,7 @@ export class OpenAIProvider implements ModelProvider {
       if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
         return {
           role: 'assistant' as const,
-          content: msg.content || null,
+          content: msg.content || '',
           tool_calls: msg.tool_calls.map((tc: any) => ({
             id: tc.id,
             type: 'function' as const,
@@ -860,7 +860,7 @@ export class OpenAIProvider implements ModelProvider {
       if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
         return {
           role: 'assistant' as const,
-          content: msg.content || null,
+          content: msg.content || '',
           tool_calls: msg.tool_calls.map((tc) => ({
             id: tc.id,
             type: 'function' as const,
@@ -875,7 +875,7 @@ export class OpenAIProvider implements ModelProvider {
       // Assistant messages without tool_calls
       return {
         role: 'assistant' as const,
-        content: msg.content || null,
+        content: msg.content || '',
       };
     });
   }
