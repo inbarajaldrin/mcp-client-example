@@ -83,6 +83,7 @@ export class MCPClient {
   private orchestratorIPCServer: OrchestratorIPCServer | null = null;
   private enableOrchestratorIPC: boolean = false;
   private ipcListenersSetup: boolean = false; // Track if IPC listeners are already set up
+  private _disableHistoryRecording: boolean = false; // Flag to disable chat history recording (for replay mode)
   private toolInputTimes: Map<string, string> = new Map(); // Track tool input times by tool name/id
   private elicitationHandler: ElicitationHandler;
   private toolExecutor: MCPToolExecutor;
@@ -968,6 +969,14 @@ export class MCPClient {
   }
 
   /**
+   * Set whether to disable chat history recording.
+   * Used during tool replay mode to prevent IPC calls from being recorded.
+   */
+  setDisableHistoryRecording(disable: boolean): void {
+    this._disableHistoryRecording = disable;
+  }
+
+  /**
    * Save current chat state (messages and session) for later restoration
    * Used by ablation to preserve the original chat while running tests
    */
@@ -1380,14 +1389,17 @@ export class MCPClient {
       }
 
       // Log to chat history (use stringified result to avoid [object Object])
-      this.chatHistoryManager.addToolExecution(
-        event.toolName,
-        event.args || {},
-        event.error || resultStr || '',
-        true, // orchestratorMode - IPC calls are in orchestrator mode
-        true, // isIPCCall - this is an automatic IPC call
-        toolInputTime, // Pass the input time
-      );
+      // Skip recording if history recording is disabled (e.g., during tool replay)
+      if (!this._disableHistoryRecording) {
+        this.chatHistoryManager.addToolExecution(
+          event.toolName,
+          event.args || {},
+          event.error || resultStr || '',
+          true, // orchestratorMode - IPC calls are in orchestrator mode
+          true, // isIPCCall - this is an automatic IPC call
+          toolInputTime, // Pass the input time
+        );
+      }
     });
 
     // Mark listeners as set up

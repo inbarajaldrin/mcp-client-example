@@ -320,6 +320,30 @@ export class ChatHistoryManager {
   }
 
   /**
+   * Get replayable tool calls from current session (excludes IPC calls).
+   * Returns most recent first.
+   */
+  getReplayableToolCalls(): Array<{
+    toolName: string;
+    toolInput: Record<string, any>;
+    toolOutput: string;
+    timestamp: string;
+    orchestratorMode: boolean;
+  }> {
+    if (!this.currentSession) return [];
+    return this.currentSession.messages
+      .filter(msg => msg.role === 'tool' && msg.isIPCCall !== true)
+      .map(msg => ({
+        toolName: msg.toolName!,
+        toolInput: msg.toolInput!,
+        toolOutput: msg.toolOutput || '',
+        timestamp: msg.timestamp,
+        orchestratorMode: msg.orchestratorMode || false,
+      }))
+      .reverse();
+  }
+
+  /**
    * Set total token count for session
    */
   setTokenCount(tokens: number): void {

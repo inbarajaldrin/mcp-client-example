@@ -13,6 +13,7 @@ import { AttachmentCLI } from './cli/attachment-cli.js';
 import { ChatHistoryCLI } from './cli/chat-history-cli.js';
 import { PromptCLI } from './cli/prompt-cli.js';
 import { AblationCLI } from './cli/ablation-cli.js';
+import { ToolReplayCLI } from './cli/tool-replay-cli.js';
 
 // Command list for tab autocomplete
 const CLI_COMMANDS = [
@@ -27,6 +28,7 @@ const CLI_COMMANDS = [
   '/attachment-upload', '/attachment-list', '/attachment-insert', '/attachment-rename', '/attachment-clear',
   '/chat-list', '/chat-search', '/chat-restore', '/chat-export', '/chat-rename', '/chat-clear',
   '/ablation-create', '/ablation-list', '/ablation-edit', '/ablation-run', '/ablation-delete', '/ablation-results',
+  '/tool-replay',
 ];
 
 export class MCPClientCLI {
@@ -46,6 +48,7 @@ export class MCPClientCLI {
   private chatHistoryCLI: ChatHistoryCLI;
   private promptCLI: PromptCLI;
   private ablationCLI: AblationCLI;
+  private toolReplayCLI: ToolReplayCLI;
 
   constructor(
     serverConfig: StdioServerParameters | Array<{ name: string; config: StdioServerParameters }>,
@@ -139,6 +142,31 @@ export class MCPClientCLI {
         displaySettings: () => this.displaySettings(),
       },
     );
+
+    this.toolReplayCLI = new ToolReplayCLI(this.logger, {
+      getReadline: () => this.rl,
+      setReadline: (rl) => {
+        this.rl = rl;
+        this.client.setReadlineInterface(rl);
+      },
+      getReplayableToolCalls: () => this.client.getChatHistoryManager().getReplayableToolCalls(),
+      executeTool: (toolName, toolInput) => this.client.executeMCPTool(toolName, toolInput),
+      startKeyboardMonitor: () => this.keyboardMonitor.start(),
+      stopKeyboardMonitor: () => this.keyboardMonitor.stop(),
+      resetAbortState: () => {
+        this.keyboardMonitor.abortRequested = false;
+        this.keyboardMonitor.clearPendingInput();
+        // Also reset IPC server abort flag if running
+        const ipcServer = this.client.getOrchestratorIPCServer();
+        if (ipcServer) {
+          ipcServer.setAborted(false);
+        }
+      },
+      setDisableHistoryRecording: (disable) => {
+        this.client.setDisableHistoryRecording(disable);
+      },
+      getCompleter: () => this.completer.bind(this),
+    });
 
     // Set up signal handlers for graceful shutdown
     this.signalHandler = new SignalHandler(this.logger, async () => {
@@ -581,6 +609,9 @@ export class MCPClientCLI {
       `  /chat-export - Export a chat to file\n` +
       `  /chat-rename - Move a chat session to a folder (named folder will be created)\n` +
       `  /chat-clear - Delete a chat session\n` +
+      `\n` +
+      `Tool Replay:\n` +
+      `  /tool-replay - Browse and re-execute past tool calls (results not sent to agent)\n` +
       `\n` +
       `Ablation Studies:\n` +
       `  /ablation-create - Create a new ablation study (interactive wizard)\n` +
@@ -1061,6 +1092,19 @@ export class MCPClientCLI {
           } catch (error) {
             this.logger.log(
               `\nFailed to clear chat: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        // Tool replay
+        if (query.toLowerCase() === '/tool-replay') {
+          try {
+            await this.toolReplayCLI.enterReplayMode();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to enter tool replay mode: ${error}\n`,
               { type: 'error' },
             );
           }

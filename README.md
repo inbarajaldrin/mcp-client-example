@@ -565,6 +565,55 @@ Tool states are stored in `.mcp-client-data/preferences.json`:
 
 **Note:** Tool states persist across all launch modes. If you disable tools using `--all` mode, those same tools will be disabled when you launch with `--servers` or single server mode.
 
+### Tool Replay Mode
+
+Browse and re-execute past tool calls from the current session. Results are displayed to you but never affect the agent's conversation context - useful for debugging, testing, or re-running operations without restarting the conversation.
+
+**Command:**
+- `/tool-replay` - Enter tool replay mode
+
+**Features:**
+- **Interactive browser**: Navigate through past tool calls with arrow keys
+- **Visual distinction**: Orchestrator calls shown in magenta, direct calls in cyan
+- **Full details**: View tool name, timestamp, mode, and complete input JSON
+- **Live execution**: Re-run any tool with the same parameters
+- **Formatted output**: Results displayed with pretty-printed JSON (same as regular mode)
+- **Abort support**: Ctrl+A works during replay execution, with force-stop prompt after timeout
+- **Works with restored chats**: Tool calls from `/chat-restore` are available for replay
+
+**Usage:**
+
+```bash
+You: /tool-replay
+
+Tool Replay Mode - Browse and re-execute past tool calls
+  Up/Down: navigate  |  Enter: replay  |  q/Esc: exit
+
+> ros-mcp-server__control_gripper {"command":"open"} 9:23:27 PM
+  ros-mcp-server__control_gripper {"command":"close"} 9:23:25 PM
+  ros-mcp-server__move_home {} 9:23:20 PM
+
+Selected Tool Details:
+────────────────────────────────────────────────────────────
+Name: ros-mcp-server__control_gripper
+Time: 2026-02-03T04:23:27.918Z
+Mode: Direct
+Input:
+  {
+    "command": "open"
+  }
+
+[1/3]
+```
+
+**Controls:**
+- **Up/Down arrows**: Navigate through tool calls (most recent first)
+- **Enter**: Replay the selected tool
+- **q or Esc**: Exit replay mode and return to chat
+- **Ctrl+C**: Exit the application (normal shutdown)
+
+**Note:** IPC sub-calls (automatic calls made by the orchestrator) are filtered out from the list. Only agent-initiated tool calls are shown. Orchestrator calls themselves are shown and can be replayed - when replayed, their IPC sub-calls execute and display results as usual.
+
 ### Prompt Management
 
 Selectively enable or disable prompts from all connected servers and add enabled prompts to your conversation context.
