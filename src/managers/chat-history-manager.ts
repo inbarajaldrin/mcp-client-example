@@ -365,6 +365,9 @@ export class ChatHistoryManager {
     if (modelLower.includes('gemini')) {
       return 'google';
     }
+    if (modelLower.includes('grok')) {
+      return 'xai';
+    }
     // For other models, let the package try to auto-detect
     return undefined;
   }

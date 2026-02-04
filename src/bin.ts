@@ -11,6 +11,7 @@ import { AnthropicProvider } from './providers/anthropic.js';
 import { OpenAIProvider } from './providers/openai.js';
 import { OllamaProvider } from './providers/ollama.js';
 import { GeminiProvider } from './providers/gemini.js';
+import { GrokProvider } from './providers/grok.js';
 import type { ModelProvider, ModelInfo } from './model-provider.js';
 
 // Load .env file from mcp-client directory
@@ -267,6 +268,7 @@ async function selectProvider(): Promise<ModelProvider> {
       { name: 'anthropic', label: 'Anthropic (Claude)', defaultModel: 'claude-haiku-4-5-20251001' },
       { name: 'openai', label: 'OpenAI (GPT)', defaultModel: 'gpt-5-mini' },
       { name: 'gemini', label: 'Google Gemini', defaultModel: 'gemini-2.5-flash' },
+      { name: 'grok', label: 'xAI (Grok)', defaultModel: 'grok-4-fast' },
       { name: 'ollama', label: 'Ollama (Local LLMs)', defaultModel: 'llama3.2:3b' },
     ];
 
@@ -278,7 +280,7 @@ async function selectProvider(): Promise<ModelProvider> {
     });
 
     while (true) {
-      const answer = await question('Select a provider (1-4): ');
+      const answer = await question('Select a provider (1-5): ');
       const trimmed = answer.trim();
       
       const num = parseInt(trimmed, 10);
@@ -422,11 +424,20 @@ function checkRequiredEnvVars(provider?: string) {
       console.error('  export GEMINI_API_KEY=your_key_here');
       process.exit(1);
     }
+  } else if (providerName === 'grok') {
+    if (!process.env.XAI_API_KEY) {
+      console.error(
+        '\x1b[31mError: XAI_API_KEY environment variable is required for Grok provider\x1b[0m',
+      );
+      console.error('Please set it before running the CLI:');
+      console.error('  export XAI_API_KEY=your_key_here');
+      process.exit(1);
+    }
   } else if (providerName === 'ollama') {
     // Ollama doesn't require an API key - it's local
     // We'll check if the server is running later
   } else {
-    console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai, gemini, ollama`);
+    console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai, gemini, grok, ollama`);
     process.exit(1);
   }
 }
@@ -445,11 +456,13 @@ function createProvider(providerName?: string): ModelProvider | undefined {
       return new OpenAIProvider();
     case 'gemini':
       return new GeminiProvider();
+    case 'grok':
+      return new GrokProvider();
     case 'ollama':
       // Use OLLAMA_HOST env var or default to localhost:11434
       return new OllamaProvider(process.env.OLLAMA_HOST);
     default:
-      console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai, gemini, ollama`);
+      console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai, gemini, grok, ollama`);
       process.exit(1);
   }
 }

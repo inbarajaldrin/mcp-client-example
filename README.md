@@ -11,9 +11,10 @@ This is a CLI client that can be used to interact with any MCP server and its to
 - **ANTHROPIC_API_KEY** - Get one from [Anthropic](https://console.anthropic.com/) (required for Anthropic provider)
 - **OPENAI_API_KEY** - Get one from [OpenAI](https://platform.openai.com/api-keys) (required for OpenAI provider)
 - **GEMINI_API_KEY** - Get one from [Google AI Studio](https://aistudio.google.com/apikey) (required for Gemini provider)
+- **XAI_API_KEY** - Get one from [xAI Console](https://console.x.ai/) (required for Grok provider)
 - **Ollama** - Install from [ollama.ai](https://ollama.ai/) (required for Ollama provider - local LLMs, no API key needed)
 
-> **Note:** The client works with any MCP server (Python, Node.js, or other). You only need API keys for cloud providers (Anthropic, OpenAI, or Gemini). For local LLMs, use the Ollama provider with no API key required.
+> **Note:** The client works with any MCP server (Python, Node.js, or other). You only need API keys for cloud providers (Anthropic, OpenAI, Gemini, or xAI). For local LLMs, use the Ollama provider with no API key required.
 
 ## How to use
 
@@ -26,8 +27,8 @@ This is a CLI client that can be used to interact with any MCP server and its to
 - `--list-servers` - List all configured servers
 
 **Model Selection:**
-- `--provider <name>` - Select AI provider (`anthropic`, `openai`, `gemini`, or `ollama`, default: `anthropic`)
-- `--model <model-id>` - Specify a specific model (e.g., `gpt-4o`, `claude-sonnet-4-20250514`, `gemini-2.5-flash`, `qwen2.5:7b`)
+- `--provider <name>` - Select AI provider (`anthropic`, `openai`, `gemini`, `grok`, or `ollama`, default: `anthropic`)
+- `--model <model-id>` - Specify a specific model (e.g., `gpt-4o`, `claude-sonnet-4-20250514`, `gemini-2.5-flash`, `grok-4-fast`, `qwen2.5:7b`)
 - `--select-model` - Interactive model selection
 - `--list-models` - List available models for a provider
 
@@ -47,6 +48,9 @@ npx mcp-client --server="my-server" --provider=openai --model="gpt-4o"
 
 # Use Gemini for AI inference
 npx mcp-client --all --provider=gemini --model=gemini-2.5-flash
+
+# Use Grok for AI inference
+npx mcp-client --all --provider=grok --model=grok-4-fast
 
 # Use Ollama for local LLM inference
 npx mcp-client --all --provider=ollama --model=qwen2.5:7b
@@ -856,7 +860,7 @@ settings:
   maxIterations: 50
 ```
 
-**Note:** Ablation studies require the respective API keys for each provider you include. Ensure `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY` are set as needed, or have Ollama running for local models.
+**Note:** Ablation studies require the respective API keys for each provider you include. Ensure `ANTHROPIC_API_KEY`, `OPENAI_API_KEY`, `GEMINI_API_KEY`, `XAI_API_KEY` are set as needed, or have Ollama running for local models.
 
 ### Model Providers
 
@@ -901,6 +905,19 @@ export OPENAI_API_KEY=your_openai_key_here
 export GEMINI_API_KEY=your_gemini_key_here
 ```
 
+#### Grok Provider (xAI)
+
+- **Provider name:** `grok`
+- **Default model:** `grok-4-fast`
+- **Context window:** Varies by model (grok-4: 128K, grok-4-fast: 2M tokens)
+- **Tool format:** Uses OpenAI-compatible function calling format
+- **Tool results:** Uses `tool` role messages with `tool_call_id`
+
+**Environment Variable:**
+```bash
+export XAI_API_KEY=your_xai_key_here
+```
+
 **Usage:**
 ```bash
 # Use OpenAI with default model (gpt-5) - all enabled servers
@@ -915,6 +932,12 @@ npx mcp-client --all --provider=gemini
 # Use Gemini with a specific model
 npx mcp-client --server="my-server" --provider=gemini --model="gemini-2.5-pro"
 
+# Use Grok with default model (grok-4-fast)
+npx mcp-client --all --provider=grok
+
+# Use Grok with a specific model
+npx mcp-client --server="my-server" --provider=grok --model="grok-4"
+
 # Use Anthropic with a specific model
 npx mcp-client --server="my-server" --provider=anthropic --model="claude-sonnet-4-20250514"
 ```
@@ -927,7 +950,7 @@ npx mcp-client --server="my-server" --provider=anthropic --model="claude-sonnet-
 2. Copy `.env.example` to `.env` and fill in your API keys:
    ```bash
    cp .env.example .env
-   # Edit .env and add your ANTHROPIC_API_KEY, OPENAI_API_KEY, and/or GEMINI_API_KEY
+   # Edit .env and add your ANTHROPIC_API_KEY, OPENAI_API_KEY, GEMINI_API_KEY, and/or XAI_API_KEY
    ```
 3. Run `npm install`
 4. Run `npm run build` to build the project

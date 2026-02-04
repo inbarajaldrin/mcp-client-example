@@ -11,6 +11,7 @@
  * - Anthropic: https://www.anthropic.com/pricing (updated January 2026)
  * - OpenAI: https://platform.openai.com/docs/models (updated January 2026)
  * - Google Gemini: https://ai.google.dev/gemini-api/docs/pricing (updated January 2026)
+ * - xAI Grok: https://docs.x.ai/docs/models (updated February 2026)
  *
  * Note: Pricing may vary by context window size (e.g., >200K tokens for Sonnet 4.5, >128K for Gemini 1.5)
  * Cache pricing: Anthropic uses 10% of input price (90% discount), OpenAI varies by model
@@ -119,4 +120,11 @@ export const MODEL_PRICING: Record<string, ModelPricing> = {
 
   // Gemini Robotics ER 1.5 Preview (flat pricing, no tiered pricing)
   'gemini-robotics-er-1.5-preview': { input: 0.30, output: 2.50 },
+
+  // ========== xAI Grok Models ==========
+  // Grok 4
+  'grok-4': { input: 3.00, output: 15.00, cachedInput: 0.75 },
+
+  // Grok 4 Fast (2M context)
+  'grok-4-fast': { input: 0.20, output: 0.50, cachedInput: 0.05 },
 };
