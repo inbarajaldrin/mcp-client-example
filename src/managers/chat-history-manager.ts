@@ -531,6 +531,13 @@ export class ChatHistoryManager {
       return null;
     }
 
+    // Don't save if no actual API calls were made during this session
+    // (e.g., only added attachments, used tool replay, or restored chat without new interaction)
+    if (!this.currentSession.tokenUsagePerCallback || this.currentSession.tokenUsagePerCallback.length === 0) {
+      this.logger.log('Chat not saved: no API calls were made during this session\n', { type: 'info' });
+      return null;
+    }
+
     // Check if already saved (exists in index)
     if (this.index.has(this.currentSession.sessionId)) {
       return this.index.get(this.currentSession.sessionId)!;
