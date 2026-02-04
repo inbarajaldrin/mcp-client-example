@@ -395,7 +395,7 @@ export class MCPClient {
     // Start chat session after servers are connected
     const serverNames = Array.from(this.servers.keys());
     // Get enabled tools for the session
-    const enabledTools = this.tools.map(tool => ({ name: tool.name, description: tool.description }));
+    const enabledTools = this.tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.input_schema }));
     this.chatHistoryManager.startSession(this.model, serverNames, enabledTools);
 
     // Log connected servers (only enabled servers should be connected now)
@@ -1093,6 +1093,7 @@ export class MCPClient {
     const enabledTools = this.toolManager.getEnabledTools(this.tools).map(t => ({
       name: t.name,
       description: t.description || '',
+      input_schema: t.input_schema,
     }));
     this.chatHistoryManager.startSession(this.model, serverNames, enabledTools);
   }
@@ -1204,6 +1205,7 @@ export class MCPClient {
     const enabledTools = this.toolManager.getEnabledTools(this.tools).map(t => ({
       name: t.name,
       description: t.description || '',
+      input_schema: t.input_schema,
     }));
     this.chatHistoryManager.startSession(this.model, serverNames, enabledTools);
 

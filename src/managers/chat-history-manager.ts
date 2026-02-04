@@ -49,6 +49,11 @@ export interface ChatSession {
   tools?: Array<{
     name: string;
     description: string;
+    input_schema?: {
+      type: 'object';
+      properties?: Record<string, any>;
+      required?: string[];
+    };
   }>;
   messages: Array<{
     timestamp: string;
@@ -174,7 +179,7 @@ export class ChatHistoryManager {
   /**
    * Start a new chat session
    */
-  startSession(model: string, servers: string[], tools?: Array<{ name: string; description: string }>): string {
+  startSession(model: string, servers: string[], tools?: Array<{ name: string; description: string; input_schema?: { type: 'object'; properties?: Record<string, any>; required?: string[] } }>): string {
     const sessionId = this.generateSessionId();
     const now = new Date();
 
@@ -183,7 +188,7 @@ export class ChatHistoryManager {
       startTime: now.toISOString(),
       model,
       servers,
-      tools: tools?.map(tool => ({ name: tool.name, description: tool.description })),
+      tools: tools?.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.input_schema })),
       messages: [],
       metadata: {
         messageCount: 0,
