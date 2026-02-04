@@ -325,7 +325,10 @@ export class MCPClientCLI {
     }
 
     try {
+      // Extract server name from tool name (format: "server-name__tool-name")
+      const serverName = toolName.includes('__') ? toolName.split('__')[0] : 'the server';
       console.log(`\nTool "${toolName}" has been running for ${elapsedSeconds} seconds.`);
+      console.log(`⚠️  Force stopping will kill and restart "${serverName}" server.`);
       console.log('Do you want to force stop this tool call? (y/n, Enter to skip)');
 
       // Race between user input and tool completion (abort signal)
@@ -375,7 +378,7 @@ export class MCPClientCLI {
       const shouldStop = answer === 'y' || answer === 'yes';
 
       if (shouldStop) {
-        this.logger.log('\nForce stopping tool call...\n', { type: 'warning' });
+        this.logger.log(`\nForce stopping tool call and restarting "${serverName}" server...\n`, { type: 'warning' });
       } else if (answer === '') {
         // User pressed Enter without input or tool completed - return control silently
         // (message already shown if tool completed)

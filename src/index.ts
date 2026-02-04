@@ -164,6 +164,7 @@ export class MCPClient {
         }
         return Promise.resolve(false); // Default: don't force stop
       },
+      killAndRestartServer: (serverName) => this.killAndRestartServer(serverName),
     });
     
     // Initialize prompt manager
@@ -243,6 +244,7 @@ export class MCPClient {
         }
         return Promise.resolve(false); // Default: don't force stop
       },
+      killAndRestartServer: (serverName) => client.killAndRestartServer(serverName),
     });
     client.promptManager = new PromptManager(client.logger);
     client.chatHistoryManager = new ChatHistoryManager(client.logger);
@@ -419,6 +421,113 @@ export class MCPClient {
         // Ignore errors during cleanup
       }
     }
+  }
+
+  /**
+   * Kill and restart an MCP server to forcefully stop its running operations.
+   * This kills the server process (and its child processes) then reconnects.
+   * @param serverName - Name of the server to restart
+   */
+  async killAndRestartServer(serverName: string): Promise<void> {
+    const connection = this.servers.get(serverName);
+    if (!connection) {
+      throw new Error(`Server "${serverName}" not found`);
+    }
+
+    // Get the server config for reconnection
+    const serverConfig = this.serverConfigs.find(s => s.name === serverName);
+    if (!serverConfig) {
+      throw new Error(`Server config for "${serverName}" not found`);
+    }
+
+    // Get the PID from the transport
+    const pid = connection.transport.pid;
+    if (pid) {
+      this.logger.log(`Killing server process (PID: ${pid})...\n`, { type: 'warning' });
+      try {
+        // Kill the process and its children
+        process.kill(pid, 'SIGTERM');
+        // Give it a moment to terminate
+        await new Promise(resolve => setTimeout(resolve, 500));
+        // Force kill if still running
+        try {
+          process.kill(pid, 0); // Check if process exists
+          process.kill(pid, 'SIGKILL'); // Force kill
+          await new Promise(resolve => setTimeout(resolve, 200));
+        } catch {
+          // Process already terminated
+        }
+      } catch (error) {
+        // Process may have already exited
+        this.logger.log(`Process already terminated or kill failed: ${error}\n`, { type: 'info' });
+      }
+    }
+
+    // Close the client connection
+    try {
+      await connection.client.close();
+    } catch {
+      // Ignore errors during cleanup
+    }
+
+    // Remove from servers map
+    this.servers.delete(serverName);
+
+    // Remove tools from this server
+    this.tools = this.tools.filter(t => !t.name.startsWith(`${serverName}__`));
+
+    // Reconnect to the server
+    this.logger.log(`Reconnecting to "${serverName}"...\n`, { type: 'info' });
+
+    // Inject IPC URL into mcp-tools-orchestrator's environment
+    const config = { ...serverConfig.config };
+    if (serverName === 'mcp-tools-orchestrator' && process.env.MCP_CLIENT_IPC_URL) {
+      config.env = {
+        ...config.env,
+        MCP_CLIENT_IPC_URL: process.env.MCP_CLIENT_IPC_URL,
+      };
+    }
+
+    const client = new Client(
+      { name: 'cli-client', version: '1.0.0' },
+      { capabilities: { elicitation: { form: {} } } },
+    );
+    const transport = new StdioClientTransport(config);
+
+    await client.connect(transport);
+
+    // Register elicitation request handler
+    client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
+      return this.elicitationHandler.handleElicitation(request);
+    });
+
+    // Give the server process a moment to fully initialize
+    await new Promise(resolve => setTimeout(resolve, 500));
+
+    const newConnection: ServerConnection = {
+      name: serverName,
+      client,
+      transport,
+      tools: [],
+      prompts: [],
+    };
+
+    this.servers.set(serverName, newConnection);
+
+    // Refresh tools from this server
+    const toolsResult = await client.listTools();
+    for (const tool of toolsResult.tools) {
+      const prefixedName = `${serverName}__${tool.name}`;
+      const prefixedTool = {
+        name: prefixedName,
+        description: tool.description || '',
+        input_schema: tool.inputSchema,
+      };
+      newConnection.tools.push(prefixedTool);
+      this.tools.push(prefixedTool);
+    }
+
+    this.logger.log(`✓ Server "${serverName}" reconnected with ${newConnection.tools.length} tools\n`, { type: 'info' });
   }
 
   async stop() {
@@ -952,7 +1061,7 @@ export class MCPClient {
 
   /**
    * Set callback for force stop prompts.
-   * Called when a tool call exceeds the force stop timeout (10 seconds after abort is requested).
+   * Called when a tool call exceeds the force stop timeout (15 seconds after abort is requested).
    * The callback should prompt the user and return true to force stop, false to continue waiting.
    * @param callback - Receives toolName, elapsedSeconds, and optional abortSignal (fires when tool completes)
    */

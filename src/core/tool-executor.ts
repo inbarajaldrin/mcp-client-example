@@ -74,10 +74,16 @@ export interface MCPToolExecutorCallbacks {
    * @param abortSignal - Signal that fires when the tool completes (prompt should dismiss)
    */
   askForceStop?: (toolName: string, elapsedSeconds: number, abortSignal?: AbortSignal) => Promise<boolean>;
+  /**
+   * Kill and restart an MCP server to forcefully stop its running operations.
+   * This kills the server process (and its child processes) then reconnects.
+   * @param serverName - Name of the server to restart
+   */
+  killAndRestartServer?: (serverName: string) => Promise<void>;
 }
 
 /** Force stop timeout in seconds */
-const FORCE_STOP_TIMEOUT_SECONDS = 10;
+const FORCE_STOP_TIMEOUT_SECONDS = 15;
 
 /**
  * Executes tools via MCP servers.
@@ -189,6 +195,20 @@ export class MCPToolExecutor {
 
               if (shouldForceStop && !isCompleted) {
                 isCompleted = true;
+
+                // Kill and restart the server to forcefully stop its running operations
+                // Extract server name from tool name (format: "server-name__tool-name")
+                const serverName = toolName.includes('__') ? toolName.split('__')[0] : null;
+                if (serverName && this.callbacks.killAndRestartServer) {
+                  this.logger.log(`\n⚠️ Killing and restarting "${serverName}" server to stop operation...\n`, { type: 'warning' });
+                  try {
+                    await this.callbacks.killAndRestartServer(serverName);
+                    this.logger.log(`✓ Server "${serverName}" restarted successfully\n`, { type: 'info' });
+                  } catch (restartError) {
+                    this.logger.log(`⚠️ Failed to restart server: ${restartError}\n`, { type: 'error' });
+                  }
+                }
+
                 reject(new Error(`Tool "${toolName}" force stopped by user after ${Math.floor(elapsedSecondsAfterAbort)} seconds`));
                 return;
               } else if (!isCompleted) {
@@ -289,9 +309,8 @@ export class MCPToolExecutor {
           },
         );
         // Wrap with force stop prompt (asks user after timeout if they want to abort)
-        // For IPC calls: use autoStopOnAbort=true so they stop automatically when the
-        // parent orchestrator is force-stopped, without showing their own prompt
-        toolResult = await this.withForceStopPrompt(toolName, toolPromise, fromIPC);
+        // Always ask for user approval before stopping - even for IPC calls
+        toolResult = await this.withForceStopPrompt(toolName, toolPromise, false);
       } else {
         // Fallback: try to find the tool in any server (backward compatibility)
         let found = false;
@@ -323,8 +342,8 @@ export class MCPToolExecutor {
               },
             );
             // Wrap with force stop prompt (asks user after timeout if they want to abort)
-            // For IPC calls: use autoStopOnAbort=true so they stop when parent is force-stopped
-            toolResult = await this.withForceStopPrompt(toolName, toolPromise, fromIPC);
+            // Always ask for user approval before stopping - even for IPC calls
+            toolResult = await this.withForceStopPrompt(toolName, toolPromise, false);
             found = true;
             break;
           }
