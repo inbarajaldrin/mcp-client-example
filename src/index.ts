@@ -35,6 +35,14 @@ import { formatToolCall, formatJSON } from './utils/formatting.js';
 import { TokenManager } from './core/token-manager.js';
 import { MCPToolExecutor } from './core/tool-executor.js';
 import readline from 'readline/promises';
+import { existsSync, readFileSync, mkdirSync } from 'fs';
+import { join, dirname } from 'path';
+import { fileURLToPath } from 'url';
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = dirname(__filename);
+const CONFIG_DIR = join(__dirname, '..', '.mcp-client-data');
+const MCP_CONFIG_FILE = join(__dirname, '..', 'mcp_config.json');
 
 type MCPClientOptions = StdioServerParameters & {
   loggerOptions?: LoggerOptions;
@@ -571,11 +579,82 @@ export class MCPClient {
     return await this.toolExecutor.executeMCPTool(toolName, toolInput, fromIPC);
   }
 
+  /**
+   * Merges custom environment variables with default safe environment variables.
+   */
+  private mergeEnvironment(customEnv?: Record<string, string>): Record<string, string> {
+    const defaultEnvVars = process.platform === 'win32'
+      ? ['APPDATA', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'PATH', 'PROCESSOR_ARCHITECTURE', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'USERNAME', 'USERPROFILE']
+      : ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'TERM', 'USER'];
+
+    const mergedEnv: Record<string, string> = {};
+    for (const key of defaultEnvVars) {
+      const value = process.env[key];
+      if (value !== undefined && !value.startsWith('()')) {
+        mergedEnv[key] = value;
+      }
+    }
+
+    // Add MCP_CLIENT_OUTPUT_DIR pointing to .mcp-client-data/outputs
+    const outputsDir = join(CONFIG_DIR, 'outputs');
+    if (!existsSync(outputsDir)) {
+      mkdirSync(outputsDir, { recursive: true });
+    }
+    mergedEnv['MCP_CLIENT_OUTPUT_DIR'] = outputsDir;
+
+    if (customEnv) {
+      Object.assign(mergedEnv, customEnv);
+    }
+
+    return mergedEnv;
+  }
+
+  /**
+   * Reloads the server configuration from mcp_config.json.
+   * Updates this.serverConfigs with fresh values from disk.
+   */
+  private reloadConfigFromDisk(): boolean {
+    if (!existsSync(MCP_CONFIG_FILE)) {
+      this.logger.log('No mcp_config.json found, keeping existing config\n', { type: 'warning' });
+      return false;
+    }
+
+    try {
+      const content = readFileSync(MCP_CONFIG_FILE, 'utf-8');
+      const config = JSON.parse(content);
+
+      if (!config.mcpServers) {
+        this.logger.log('Invalid config format: missing mcpServers\n', { type: 'warning' });
+        return false;
+      }
+
+      // Build new server configs from file
+      const newConfigs: MultiServerConfig[] = [];
+      for (const [name, server] of Object.entries(config.mcpServers) as [string, any][]) {
+        newConfigs.push({
+          name,
+          config: {
+            command: server.command,
+            args: server.args || [],
+            env: this.mergeEnvironment(server.env),
+          },
+          disabledInConfig: server.disabled || false,
+        });
+      }
+
+      this.serverConfigs = newConfigs;
+      this.logger.log(`Reloaded config: ${newConfigs.length} server(s) found\n`, { type: 'info' });
+      return true;
+    } catch (error) {
+      this.logger.log(`Error reading mcp_config.json: ${error}\n`, { type: 'error' });
+      return false;
+    }
+  }
+
   async refreshServers() {
-    // TODO: Reload mcp_config.json to check for updated disabled status
-    // Currently, refreshServers() uses serverConfigs loaded at startup, so manually
-    // editing mcp_config.json to disable a server won't be respected until restart.
-    // Should reload the config file here to check current disabled status.
+    // Reload config from disk to pick up any changes
+    this.reloadConfigFromDisk();
+
     this.logger.log('Refreshing server connections...\n', { type: 'info' });
 
     // Close all existing server connections (keep IPC server running)
