@@ -27,6 +27,8 @@ export interface ToolReplayCLICallbacks {
   resetAbortState: () => void;
   setDisableHistoryRecording: (disable: boolean) => void;
   getCompleter?: () => ((line: string) => [string[], string]) | undefined;
+  /** Re-setup Escape key handler after recreating readline */
+  setupEscapeKeyHandler?: () => void;
 }
 
 const VISIBLE_WINDOW = 15;
@@ -161,6 +163,9 @@ export class ToolReplayCLI {
     if (this.savedHistory.length > 0) {
       (newRl as any).history = [...this.savedHistory];
     }
+
+    // Re-setup Escape key handler for the new readline interface
+    this.callbacks.setupEscapeKeyHandler?.();
   }
 
   /**

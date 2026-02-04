@@ -1,5 +1,6 @@
 import { StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js';
 import readline from 'readline/promises';
+import * as readlineSync from 'readline';
 import { MCPClient } from './index.js';
 import { consoleStyles, Logger } from './logger.js';
 import type { ModelProvider } from './model-provider.js';
@@ -49,6 +50,7 @@ export class MCPClientCLI {
   private promptCLI: PromptCLI;
   private ablationCLI: AblationCLI;
   private toolReplayCLI: ToolReplayCLI;
+  private escapeKeyHandler: ((_str: string, key: { name?: string }) => void) | null = null;
 
   constructor(
     serverConfig: StdioServerParameters | Array<{ name: string; config: StdioServerParameters }>,
@@ -149,6 +151,7 @@ export class MCPClientCLI {
         this.rl = rl;
         this.client.setReadlineInterface(rl);
       },
+      setupEscapeKeyHandler: () => this.setupEscapeKeyHandler(),
       getReplayableToolCalls: () => this.client.getChatHistoryManager().getReplayableToolCalls(),
       executeTool: (toolName, toolInput) => this.client.executeMCPTool(toolName, toolInput),
       startKeyboardMonitor: () => this.keyboardMonitor.start(),
@@ -211,6 +214,10 @@ export class MCPClientCLI {
         { type: 'info' },
       );
       this.logger.log(
+        `💡 Tip: Press Escape to clear your current input and start fresh\n`,
+        { type: 'info' },
+      );
+      this.logger.log(
         `\nTesting commands:\n`,
         { type: 'info' },
       );
@@ -226,6 +233,9 @@ export class MCPClientCLI {
         output: process.stdout,
         completer: this.completer.bind(this),
       });
+
+      // Enable keypress events and handler for Escape key to clear input at the prompt
+      this.setupEscapeKeyHandler();
 
       // Share readline with MCP client for elicitation handling
       this.client.setReadlineInterface(this.rl);
@@ -288,6 +298,41 @@ export class MCPClientCLI {
     } catch (error) {
       // Ignore errors during cleanup
     }
+  }
+
+  /**
+   * Setup Escape key handler for clearing input at the prompt.
+   * This must be called after creating or recreating the readline interface.
+   * It re-adds the keypress listener since tool-replay removes all keypress listeners.
+   */
+  private setupEscapeKeyHandler(): void {
+    if (!this.rl || !process.stdin.isTTY) {
+      return;
+    }
+
+    // Enable keypress events for Escape key handling at the prompt
+    readlineSync.emitKeypressEvents(process.stdin, this.rl as unknown as readlineSync.Interface);
+    if (process.stdin.setRawMode) {
+      process.stdin.setRawMode(true);
+    }
+
+    // Create the handler if not already created
+    if (!this.escapeKeyHandler) {
+      this.escapeKeyHandler = (_str: string, key: { name?: string }) => {
+        // Only handle Escape when not in keyboard monitoring mode (i.e., at the prompt)
+        if (key && key.name === 'escape' && this.rl && !this.keyboardMonitor.isMonitoring) {
+          // Clear the current input line using Ctrl+U simulation
+          // This clears from cursor to start of line
+          this.rl.write(null, { ctrl: true, name: 'u' });
+          // Also clear from cursor to end (in case cursor wasn't at end)
+          this.rl.write(null, { ctrl: true, name: 'k' });
+        }
+      };
+    }
+
+    // Remove existing listener (if any) to avoid duplicates, then add it
+    process.stdin.removeListener('keypress', this.escapeKeyHandler);
+    process.stdin.on('keypress', this.escapeKeyHandler);
   }
 
   /**

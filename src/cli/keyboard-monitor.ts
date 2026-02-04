@@ -150,6 +150,12 @@ export class KeyboardMonitor {
         return;
       }
 
+      // Handle Escape - clear pending input buffer so user can start fresh
+      if (key === '\x1b') {
+        this._pendingInput = '';
+        return;
+      }
+
       // Ignore Enter and other control characters
       if (key === '\r' || key === '\n' || key.charCodeAt(0) < 32) {
         return;
