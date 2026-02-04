@@ -836,6 +836,52 @@ Phase: coding-task
 - **Token tracking**: Total tokens used per run are recorded for cost comparison
 - **Persistent storage**: Ablation definitions (YAML) and run results (JSON) are saved to `.mcp-client-data/ablations/`
 
+**Direct Tool Execution:**
+
+Ablations support direct tool calls that bypass the agent, useful for:
+- Setting up test scenarios (reset scene, initialize state)
+- Executing specific tool sequences for benchmarking
+- Testing with tools that are disabled from the agent's view
+
+Two command prefixes are available:
+- `@tool:` - Execute tool and inject result into agent's conversation context
+- `@tool-exec:` - Execute tool for side effects only (no context injection)
+
+*Interactive wizard:* Type `@tool` or `@tool-exec` (without arguments) to launch a guided wizard that walks you through server selection, tool selection, and parameter configuration using the tool's schema.
+
+*Manual entry:* Specify the tool directly using Python-like or JSON syntax:
+
+```bash
+# Python-like syntax (recommended)
+@tool:ros-mcp-server__move_to_grasp(action='move_to_object', grasp_id=4, mode='sim')
+
+# JSON syntax
+@tool:isaac-sim__play_scene {}
+
+# No arguments
+@tool-exec:isaac-sim__play_scene()
+```
+
+Example ablation with direct tool calls:
+
+```yaml
+phases:
+  - name: disassembly-discovery
+    commands:
+      - '@tool-exec:isaac-sim__assemble_objects(assembly="assembly1")'  # Setup: start with assembled CAD
+      - '@tool-exec:isaac-sim__play_scene()'
+      - 'Disassemble all objects from the base, recording grasp IDs that work'
+
+  - name: assembly-from-random
+    commands:
+      - '@tool-exec:isaac-sim__randomize_object_poses()'  # Scatter objects randomly
+      - '@tool-exec:isaac-sim__play_scene()'
+      - 'Using the grasp IDs discovered during disassembly, assemble all objects onto the base'
+      - '@tool:ros-mcp-server__verify_assembly(object_name="fork_yellow", base_name="base3")'
+```
+
+Note: Direct tool calls work even if the tool is disabled in the tool manager - they bypass agent filtering and execute directly on the MCP server.
+
 **Configuration:**
 
 Ablation definitions are stored as YAML files in `.mcp-client-data/ablations/`:

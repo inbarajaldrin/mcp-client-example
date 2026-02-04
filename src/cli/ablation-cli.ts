@@ -3,6 +3,7 @@
  */
 
 import readline from 'readline/promises';
+import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { MCPClient } from '../index.js';
 import { Logger } from '../logger.js';
 import {
@@ -13,6 +14,157 @@ import {
   type AblationRun,
   type AblationRunResult,
 } from '../managers/ablation-manager.js';
+
+// ==================== Tool Schema Types ====================
+
+interface ToolWithSchema {
+  name: string;
+  server: string;
+  description: string;
+  input_schema: {
+    type: 'object';
+    properties?: Record<string, any>;
+    required?: string[];
+  };
+}
+
+// ==================== Tool Call Parsing ====================
+
+/**
+ * Result of parsing a direct tool call command
+ */
+interface ParsedToolCall {
+  toolName: string;
+  args: Record<string, unknown>;
+  injectResult: boolean;  // Whether to inject result into conversation context
+}
+
+/**
+ * Parse a direct tool call command in either format:
+ * - JSON: `@tool:server__tool_name {"arg": "value"}`
+ * - Python-like: `@tool:server__tool_name(arg='value', num=42)`
+ *
+ * @param command The command string starting with @tool: or @tool-exec:
+ * @returns Parsed tool call or null if invalid
+ */
+function parseDirectToolCall(command: string): ParsedToolCall | null {
+  // Determine if this is @tool: (inject result) or @tool-exec: (no injection)
+  let injectResult = true;
+  let rest: string;
+
+  if (command.startsWith('@tool-exec:')) {
+    injectResult = false;
+    rest = command.slice('@tool-exec:'.length).trim();
+  } else if (command.startsWith('@tool:')) {
+    injectResult = true;
+    rest = command.slice('@tool:'.length).trim();
+  } else {
+    return null;
+  }
+
+  // Try Python-like syntax first: tool_name(arg=val, ...) or tool_name()
+  const pythonMatch = rest.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*\((.*)\)\s*$/);
+  if (pythonMatch) {
+    const toolName = pythonMatch[1];
+    const argsStr = pythonMatch[2].trim();
+    const args = argsStr ? parsePythonArgs(argsStr) : {};
+    return { toolName, args, injectResult };
+  }
+
+  // Try JSON syntax: tool_name {"arg": "value"} or tool_name {}
+  const jsonMatch = rest.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*(\{.*\})?\s*$/);
+  if (jsonMatch) {
+    const toolName = jsonMatch[1];
+    const jsonStr = jsonMatch[2] || '{}';
+    try {
+      const args = JSON.parse(jsonStr);
+      return { toolName, args, injectResult };
+    } catch {
+      return null;
+    }
+  }
+
+  // Simple tool name with no args: tool_name
+  const simpleMatch = rest.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*$/);
+  if (simpleMatch) {
+    return { toolName: simpleMatch[1], args: {}, injectResult };
+  }
+
+  return null;
+}
+
+/**
+ * Parse Python-like function arguments: arg='value', num=42, flag=true
+ * Handles: strings (single/double quotes), numbers, booleans, null
+ */
+function parsePythonArgs(argsStr: string): Record<string, unknown> {
+  const args: Record<string, unknown> = {};
+
+  // State machine to parse arguments
+  let i = 0;
+  while (i < argsStr.length) {
+    // Skip whitespace and commas
+    while (i < argsStr.length && (argsStr[i] === ' ' || argsStr[i] === ',' || argsStr[i] === '\t')) {
+      i++;
+    }
+    if (i >= argsStr.length) break;
+
+    // Parse key
+    const keyStart = i;
+    while (i < argsStr.length && argsStr[i] !== '=' && argsStr[i] !== ' ') {
+      i++;
+    }
+    const key = argsStr.slice(keyStart, i).trim();
+    if (!key) break;
+
+    // Skip to '='
+    while (i < argsStr.length && argsStr[i] === ' ') i++;
+    if (argsStr[i] !== '=') break;
+    i++; // Skip '='
+    while (i < argsStr.length && argsStr[i] === ' ') i++;
+
+    // Parse value
+    let value: unknown;
+
+    if (argsStr[i] === "'" || argsStr[i] === '"') {
+      // String value
+      const quote = argsStr[i];
+      i++;
+      const valueStart = i;
+      while (i < argsStr.length && argsStr[i] !== quote) {
+        if (argsStr[i] === '\\' && i + 1 < argsStr.length) i++; // Skip escaped char
+        i++;
+      }
+      value = argsStr.slice(valueStart, i).replace(/\\(.)/g, '$1');
+      i++; // Skip closing quote
+    } else {
+      // Non-string value (number, boolean, null)
+      const valueStart = i;
+      while (i < argsStr.length && argsStr[i] !== ',' && argsStr[i] !== ')') {
+        i++;
+      }
+      const rawValue = argsStr.slice(valueStart, i).trim();
+
+      // Parse type
+      if (rawValue === 'true' || rawValue === 'True') {
+        value = true;
+      } else if (rawValue === 'false' || rawValue === 'False') {
+        value = false;
+      } else if (rawValue === 'null' || rawValue === 'None') {
+        value = null;
+      } else if (!isNaN(Number(rawValue))) {
+        value = Number(rawValue);
+      } else {
+        // Treat as unquoted string
+        value = rawValue;
+      }
+    }
+
+    args[key] = value;
+  }
+
+  return args;
+}
 import { AttachmentManager, type AttachmentInfo } from '../managers/attachment-manager.js';
 import { PreferencesManager } from '../managers/preferences-manager.js';
 import { AnthropicProvider } from '../providers/anthropic.js';
@@ -158,6 +310,18 @@ export class AblationCLI {
         '  Commands starting with "/" will execute to show their output.\n',
         { type: 'info' },
       );
+      this.logger.log(
+        '  Type "@tool" for interactive tool builder (guided wizard).\n',
+        { type: 'info' },
+      );
+      this.logger.log(
+        '  Or directly: @tool:server__tool(arg=\'value\', num=42)\n',
+        { type: 'info' },
+      );
+      this.logger.log(
+        '  Use @tool-exec for execution without context injection.\n',
+        { type: 'info' },
+      );
       this.logger.log('  Type "done" to finish the phase.\n', { type: 'info' });
       const commands: string[] = [];
       let pendingCommand: string | null = null; // Track commands waiting for an argument
@@ -229,6 +393,19 @@ export class AblationCLI {
             type: 'info',
           });
         } else {
+          // Check for bare @tool or @tool-exec (interactive wizard trigger)
+          if (input === '@tool' || input === '@tool-exec') {
+            const injectResult = input === '@tool';
+            const generatedCommand = await this.buildToolCallInteractively(injectResult);
+            if (generatedCommand) {
+              commands.push(generatedCommand);
+              this.logger.log(`\n    ✓ Recorded: ${generatedCommand}\n`, { type: 'success' });
+            } else {
+              this.logger.log('    ✗ Tool builder cancelled.\n', { type: 'warning' });
+            }
+            continue;
+          }
+
           // Record the input directly
           commands.push(input);
           this.logger.log(`    ✓ Recorded: ${input}\n`, { type: 'success' });
@@ -236,6 +413,15 @@ export class AblationCLI {
           // If it's a command, execute it to show the output
           if (input.startsWith('/')) {
             await this.executeAblationPreviewCommand(input);
+          } else if (input.startsWith('@tool:') || input.startsWith('@tool-exec:')) {
+            // Validate tool call syntax during creation
+            const parsed = parseDirectToolCall(input);
+            if (parsed) {
+              const injectInfo = parsed.injectResult ? ' (result will be injected into context)' : ' (execute only, no context injection)';
+              this.logger.log(`    ℹ️  Tool call: ${parsed.toolName}${injectInfo}\n`, { type: 'info' });
+            } else {
+              this.logger.log(`    ⚠️  Warning: Invalid tool call syntax\n`, { type: 'warning' });
+            }
           }
         }
       }
@@ -643,13 +829,51 @@ export class AblationCLI {
 
   /**
    * Execute a command during ablation run
-   * Handles both slash commands and regular queries to the model
+   * Handles slash commands, direct tool calls (@tool:), and regular queries to the model
    */
   private async executeAblationCommand(
     command: string,
     maxIterations: number,
   ): Promise<void> {
     const trimmedCommand = command.trim();
+
+    // Handle direct tool calls (@tool: or @tool-exec:)
+    if (trimmedCommand.startsWith('@tool:') || trimmedCommand.startsWith('@tool-exec:')) {
+      const parsed = parseDirectToolCall(trimmedCommand);
+      if (!parsed) {
+        throw new Error(`Invalid tool call syntax: ${trimmedCommand}`);
+      }
+
+      this.logger.log(`    Executing tool: ${parsed.toolName}\n`, { type: 'info' });
+
+      try {
+        const result = await this.client.executeMCPTool(
+          parsed.toolName,
+          parsed.args as Record<string, unknown>,
+        );
+
+        // Log the result
+        if (result.displayText) {
+          // Truncate long results for display
+          const displayText = result.displayText.length > 500
+            ? result.displayText.substring(0, 500) + '...'
+            : result.displayText;
+          this.logger.log(`    Tool result: ${displayText}\n`, { type: 'info' });
+        }
+
+        // If injectResult is true, inject the tool result into conversation context
+        if (parsed.injectResult && result.contentBlocks && result.contentBlocks.length > 0) {
+          // Create a synthetic tool use/result pair to inject into conversation
+          await this.client.injectToolResult(parsed.toolName, parsed.args, result);
+          this.logger.log(`    Result injected into conversation context\n`, { type: 'info' });
+        }
+      } catch (error: any) {
+        this.logger.log(`    Tool execution failed: ${error.message}\n`, { type: 'error' });
+        throw error;
+      }
+
+      return;
+    }
 
     // Handle slash commands
     if (trimmedCommand.startsWith('/')) {
@@ -1965,5 +2189,279 @@ export class AblationCLI {
       }
       return [];
     }
+  }
+
+  // ==================== Interactive Tool Builder ====================
+
+  /**
+   * Get all tools from all servers with their full schemas.
+   * Includes both enabled and disabled tools for ablation purposes.
+   */
+  private async getAllToolsWithSchemas(): Promise<ToolWithSchema[]> {
+    const tools: ToolWithSchema[] = [];
+    const servers = (this.client as any).servers as Map<string, any>;
+
+    for (const [serverName, connection] of servers.entries()) {
+      try {
+        const toolsResult = await connection.client.request(
+          { method: 'tools/list' },
+          ListToolsResultSchema,
+        );
+
+        for (const tool of toolsResult.tools) {
+          tools.push({
+            name: tool.name,
+            server: serverName,
+            description: tool.description || '',
+            input_schema: tool.inputSchema as any || { type: 'object', properties: {} },
+          });
+        }
+      } catch (error) {
+        // Skip servers that fail
+        this.logger.log(`    ⚠ Could not fetch tools from ${serverName}\n`, { type: 'warning' });
+      }
+    }
+
+    return tools;
+  }
+
+  /**
+   * Interactive tool builder wizard.
+   * Returns the generated @tool: command string or null if cancelled.
+   */
+  async buildToolCallInteractively(injectResult: boolean = true): Promise<string | null> {
+    const rl = this.callbacks.getReadline();
+    if (!rl) return null;
+
+    // Get all tools
+    const allTools = await this.getAllToolsWithSchemas();
+    if (allTools.length === 0) {
+      this.logger.log('\n    ✗ No tools available from any server.\n', { type: 'error' });
+      return null;
+    }
+
+    // Group tools by server
+    const toolsByServer = new Map<string, ToolWithSchema[]>();
+    for (const tool of allTools) {
+      if (!toolsByServer.has(tool.server)) {
+        toolsByServer.set(tool.server, []);
+      }
+      toolsByServer.get(tool.server)!.push(tool);
+    }
+
+    // Step 1: Select server
+    this.logger.log('\n    📦 Select server:\n', { type: 'info' });
+    const serverList = Array.from(toolsByServer.keys()).sort();
+    for (let i = 0; i < serverList.length; i++) {
+      const serverName = serverList[i];
+      const toolCount = toolsByServer.get(serverName)!.length;
+      this.logger.log(`      ${i + 1}. ${serverName} (${toolCount} tools)\n`, { type: 'info' });
+    }
+
+    const serverInput = (await rl.question('\n    Select server (or "q" to cancel): ')).trim();
+    if (serverInput.toLowerCase() === 'q') return null;
+
+    const serverIndex = parseInt(serverInput) - 1;
+    if (isNaN(serverIndex) || serverIndex < 0 || serverIndex >= serverList.length) {
+      this.logger.log('    ✗ Invalid selection.\n', { type: 'error' });
+      return null;
+    }
+
+    const selectedServer = serverList[serverIndex];
+    const serverTools = toolsByServer.get(selectedServer)!;
+
+    // Step 2: Select tool
+    this.logger.log(`\n    🔧 Select tool from ${selectedServer}:\n`, { type: 'info' });
+    for (let i = 0; i < serverTools.length; i++) {
+      const tool = serverTools[i];
+      const desc = tool.description ? ` - ${tool.description.substring(0, 50)}${tool.description.length > 50 ? '...' : ''}` : '';
+      this.logger.log(`      ${i + 1}. ${tool.name}${desc}\n`, { type: 'info' });
+    }
+
+    const toolInput = (await rl.question('\n    Select tool (or "q" to cancel): ')).trim();
+    if (toolInput.toLowerCase() === 'q') return null;
+
+    const toolIndex = parseInt(toolInput) - 1;
+    if (isNaN(toolIndex) || toolIndex < 0 || toolIndex >= serverTools.length) {
+      this.logger.log('    ✗ Invalid selection.\n', { type: 'error' });
+      return null;
+    }
+
+    const selectedTool = serverTools[toolIndex];
+
+    // Step 3: Configure parameters
+    const args = await this.configureToolParameters(selectedTool);
+    if (args === null) return null;
+
+    // Generate the command
+    const prefix = injectResult ? '@tool' : '@tool-exec';
+    const toolFullName = `${selectedServer}__${selectedTool.name}`;
+
+    // Format args as Python-like syntax for readability
+    const argsStr = this.formatArgsAsPython(args);
+    const command = argsStr ? `${prefix}:${toolFullName}(${argsStr})` : `${prefix}:${toolFullName}()`;
+
+    return command;
+  }
+
+  /**
+   * Configure tool parameters interactively.
+   * Returns the args object or null if cancelled.
+   */
+  private async configureToolParameters(tool: ToolWithSchema): Promise<Record<string, any> | null> {
+    const rl = this.callbacks.getReadline();
+    if (!rl) return null;
+
+    const schema = tool.input_schema;
+    const properties = schema.properties || {};
+    const required = new Set(schema.required || []);
+    const args: Record<string, any> = {};
+
+    const propNames = Object.keys(properties);
+    if (propNames.length === 0) {
+      this.logger.log(`\n    📝 ${tool.name} has no parameters.\n`, { type: 'info' });
+      return args;
+    }
+
+    this.logger.log(`\n    📝 Configure ${tool.name}:\n`, { type: 'info' });
+
+    for (const propName of propNames) {
+      const prop = properties[propName];
+      const isRequired = required.has(propName);
+      const hasDefault = 'default' in prop;
+      const defaultValue = prop.default;
+
+      // Build prompt
+      let typeHint = this.getTypeHint(prop);
+      let reqTag = isRequired ? 'required' : 'optional';
+      let defaultTag = hasDefault ? `, default: ${JSON.stringify(defaultValue)}` : '';
+
+      this.logger.log(`\n      ${propName} (${reqTag}, ${typeHint}${defaultTag}):\n`, { type: 'info' });
+
+      // Handle enum types specially
+      if (prop.enum && Array.isArray(prop.enum)) {
+        const enumValues = prop.enum;
+        for (let i = 0; i < enumValues.length; i++) {
+          const isDefault = hasDefault && enumValues[i] === defaultValue;
+          const marker = isDefault ? ' ← default' : '';
+          this.logger.log(`        ${i + 1}. ${enumValues[i]}${marker}\n`, { type: 'info' });
+        }
+
+        const enumInput = (await rl.question('      Select (Enter for default, "q" to cancel): ')).trim();
+        if (enumInput.toLowerCase() === 'q') return null;
+
+        if (enumInput === '') {
+          if (hasDefault) {
+            args[propName] = defaultValue;
+            this.logger.log(`        → Using default: ${defaultValue}\n`, { type: 'info' });
+          } else if (!isRequired) {
+            // Skip optional field with no default
+            this.logger.log(`        → Skipped\n`, { type: 'info' });
+          } else {
+            this.logger.log('        ✗ Required field, please select an option.\n', { type: 'error' });
+            return null;
+          }
+        } else {
+          const enumIndex = parseInt(enumInput) - 1;
+          if (isNaN(enumIndex) || enumIndex < 0 || enumIndex >= enumValues.length) {
+            this.logger.log('        ✗ Invalid selection.\n', { type: 'error' });
+            return null;
+          }
+          args[propName] = enumValues[enumIndex];
+        }
+      } else {
+        // Regular input
+        const value = (await rl.question('      > ')).trim();
+
+        if (value === '' || value.toLowerCase() === 'q') {
+          if (value.toLowerCase() === 'q') return null;
+
+          if (hasDefault) {
+            args[propName] = defaultValue;
+            this.logger.log(`        → Using default: ${JSON.stringify(defaultValue)}\n`, { type: 'info' });
+          } else if (!isRequired) {
+            this.logger.log(`        → Skipped\n`, { type: 'info' });
+          } else {
+            this.logger.log('        ✗ Required field cannot be empty.\n', { type: 'error' });
+            return null;
+          }
+        } else {
+          // Parse value based on type
+          args[propName] = this.parseValueByType(value, prop);
+        }
+      }
+    }
+
+    return args;
+  }
+
+  /**
+   * Get a human-readable type hint from a JSON schema property.
+   */
+  private getTypeHint(prop: any): string {
+    if (prop.enum) {
+      return 'enum';
+    }
+    if (prop.anyOf) {
+      const types = prop.anyOf.map((t: any) => t.type || 'unknown').filter((t: string) => t !== 'null');
+      return types.join(' | ') || 'any';
+    }
+    if (prop.type === 'array') {
+      const itemType = prop.items?.type || 'any';
+      return `array of ${itemType}`;
+    }
+    return prop.type || 'any';
+  }
+
+  /**
+   * Parse a string value into the appropriate type based on schema.
+   */
+  private parseValueByType(value: string, prop: any): any {
+    const type = prop.type || (prop.anyOf ? prop.anyOf.find((t: any) => t.type !== 'null')?.type : 'string');
+
+    switch (type) {
+      case 'integer':
+        return parseInt(value);
+      case 'number':
+        return parseFloat(value);
+      case 'boolean':
+        return value.toLowerCase() === 'true' || value === '1';
+      case 'array':
+        // Try parsing as JSON, otherwise split by comma
+        try {
+          return JSON.parse(value);
+        } catch {
+          return value.split(',').map(v => v.trim());
+        }
+      case 'object':
+        try {
+          return JSON.parse(value);
+        } catch {
+          return value;
+        }
+      default:
+        return value;
+    }
+  }
+
+  /**
+   * Format args object as Python-like function arguments.
+   */
+  private formatArgsAsPython(args: Record<string, any>): string {
+    const parts: string[] = [];
+    for (const [key, value] of Object.entries(args)) {
+      if (typeof value === 'string') {
+        parts.push(`${key}='${value}'`);
+      } else if (typeof value === 'boolean') {
+        parts.push(`${key}=${value ? 'true' : 'false'}`);
+      } else if (value === null) {
+        parts.push(`${key}=null`);
+      } else if (Array.isArray(value)) {
+        parts.push(`${key}=${JSON.stringify(value)}`);
+      } else {
+        parts.push(`${key}=${value}`);
+      }
+    }
+    return parts.join(', ');
   }
 }

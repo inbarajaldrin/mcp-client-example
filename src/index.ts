@@ -580,6 +580,92 @@ export class MCPClient {
   }
 
   /**
+   * Inject a tool result directly into the conversation context.
+   * This creates a synthetic tool_use/tool_result pair so the agent sees
+   * the tool result without having called the tool itself.
+   *
+   * Useful for ablation studies where you want to inject tool results
+   * from disabled tools or pre-computed results.
+   *
+   * @param toolName - Name of the tool (server__tool format)
+   * @param toolInput - The arguments that were passed to the tool
+   * @param result - The tool execution result to inject
+   */
+  injectToolResult(
+    toolName: string,
+    toolInput: Record<string, unknown>,
+    result: { displayText: string; contentBlocks: Array<{ type: string; text?: string; data?: string; mimeType?: string }> },
+  ): void {
+    // Generate a synthetic tool_use ID
+    const toolUseId = `injected_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+
+    // Create a synthetic assistant message with tool_use block
+    // Note: tool_calls uses 'arguments' (JSON string), content_blocks uses 'input' (object)
+    const assistantMessage: Message = {
+      role: 'assistant',
+      content: '', // No text content, just tool use
+      tool_calls: [{
+        id: toolUseId,
+        name: toolName,
+        arguments: JSON.stringify(toolInput),
+      }],
+      content_blocks: [{
+        type: 'tool_use',
+        id: toolUseId,
+        name: toolName,
+        input: toolInput,
+      }],
+    };
+
+    // Convert content blocks to Anthropic format for tool_result
+    let toolResultContent: string | Array<{ type: string; [key: string]: any }>;
+    const hasImages = result.contentBlocks.some(b => b.type === 'image');
+
+    if (hasImages) {
+      toolResultContent = result.contentBlocks.map((block) => {
+        if (block.type === 'text' && block.text) {
+          return { type: 'text', text: block.text };
+        } else if (block.type === 'image' && block.data && block.mimeType) {
+          return {
+            type: 'image',
+            source: {
+              type: 'base64',
+              media_type: block.mimeType,
+              data: block.data,
+            },
+          };
+        }
+        return { type: 'text', text: '[Unknown content]' };
+      });
+    } else {
+      // Text-only result - use simple string
+      toolResultContent = result.contentBlocks
+        .filter((b) => b.type === 'text' && b.text)
+        .map((b) => b.text!)
+        .join('\n');
+    }
+
+    // Create user message with tool_result
+    const userMessage: Message = {
+      role: 'user',
+      content: '',
+      tool_results: [{
+        type: 'tool_result',
+        tool_use_id: toolUseId,
+        content: toolResultContent,
+      }],
+    };
+
+    // Add both messages to conversation
+    this.messages.push(assistantMessage);
+    this.messages.push(userMessage);
+
+    // Note: We don't record injected results to chat history since they're
+    // synthetic entries for ablation purposes. The messages are in the
+    // conversation context which is what matters for the agent.
+  }
+
+  /**
    * Merges custom environment variables with default safe environment variables.
    */
   private mergeEnvironment(customEnv?: Record<string, string>): Record<string, string> {
