@@ -42,7 +42,7 @@ export interface AblationDefinition {
 export interface AblationRunResult {
   phase: string;
   model: AblationModel;
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped';
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'aborted';
   tokens?: number;
   duration?: number; // milliseconds
   chatFile?: string;

@@ -113,7 +113,9 @@ export class KeyboardMonitor {
 
       // Handle special keys
 
-      // Ctrl+A ('\x01') triggers abort only if not already aborted
+      // Ctrl+A ('\x01') triggers soft abort only if not already aborted
+      // This is a SOFT abort - lets current tool call complete, then stops
+      // Does NOT abort IPC server immediately (that would kill running tools)
       if (key === '\x01' && !this._abortRequested) {
         this.logger.log(
           '\n' +
@@ -125,11 +127,9 @@ export class KeyboardMonitor {
         );
         this._abortRequested = true;
 
-        // Also abort IPC server if it's running
-        const ipcServer = this.callbacks.getIPCServer();
-        if (ipcServer) {
-          ipcServer.setAborted(true);
-        }
+        // NOTE: We intentionally do NOT call ipcServer.setAborted(true) here
+        // The soft abort lets the current tool call complete gracefully
+        // Force-stop (the "y" button) is what triggers IPC server abort
 
         // Notify parent
         this.callbacks.onAbort();
