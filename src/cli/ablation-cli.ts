@@ -278,8 +278,154 @@ export class AblationCLI {
       await rl.question('  Description (optional): ')
     ).trim();
 
-    // Step 2: Define Phases
-    this.logger.log('\nStep 2: Define Phases (command sequences)\n', {
+    // Step 2: Select Models (with retry loop)
+    const models: AblationModel[] = [];
+
+    while (models.length === 0) {
+      this.logger.log('\nStep 2: Select Models (multi-select)\n', {
+        type: 'info',
+      });
+
+      this.logger.log('  Available providers:\n', { type: 'info' });
+      for (let i = 0; i < PROVIDERS.length; i++) {
+        this.logger.log(`    ${i + 1}. ${PROVIDERS[i].label}\n`, { type: 'info' });
+      }
+
+      const providerSelection = (
+        await rl.question('\n  Select providers (e.g., 1,2 or 1-3): ')
+      ).trim();
+      const selectedProviderIndices = this.parseSelection(
+        providerSelection,
+        PROVIDERS.length,
+      );
+
+      if (selectedProviderIndices.length === 0) {
+        this.logger.log('\n✗ Invalid selection. Please try again.\n', {
+          type: 'error',
+        });
+        continue;
+      }
+
+      for (const providerIdx of selectedProviderIndices) {
+        const provider = PROVIDERS[providerIdx - 1];
+        this.logger.log(`\n  Select ${provider.label} models:\n`, {
+          type: 'info',
+        });
+
+        for (let i = 0; i < provider.models.length; i++) {
+          this.logger.log(`    ${i + 1}. ${provider.models[i]}\n`, {
+            type: 'info',
+          });
+        }
+        this.logger.log(`    ${provider.models.length + 1}. Enter custom model name\n`, {
+          type: 'info',
+        });
+        this.logger.log(`    ${provider.models.length + 2}. Discover models from API\n`, {
+          type: 'info',
+        });
+
+        const modelSelection = (
+          await rl.question('\n  Select models (e.g., 1,2 or 1-3): ')
+        ).trim();
+        const selectedModelIndices = this.parseSelection(
+          modelSelection,
+          provider.models.length + 2,
+        );
+
+        for (const modelIdx of selectedModelIndices) {
+          if (modelIdx === provider.models.length + 2) {
+            // Discover from API
+            const discoveredModels = await this.discoverModelsFromAPI(
+              provider.name,
+            );
+            if (discoveredModels.length > 0) {
+              this.logger.log(
+                `\n  Discovered ${discoveredModels.length} models from ${provider.label}:\n`,
+                { type: 'info' },
+              );
+              for (let i = 0; i < discoveredModels.length; i++) {
+                const m = discoveredModels[i];
+                const contextInfo = m.contextWindow
+                  ? ` (${Math.round(m.contextWindow / 1000)}K)`
+                  : '';
+                this.logger.log(`    ${i + 1}. ${m.id}${contextInfo}\n`, {
+                  type: 'info',
+                });
+              }
+              const discoverSelection = (
+                await rl.question(
+                  '\n  Select discovered models (e.g., 1,2 or 1-3): ',
+                )
+              ).trim();
+              const discoverIndices = this.parseSelection(
+                discoverSelection,
+                discoveredModels.length,
+              );
+              for (const idx of discoverIndices) {
+                models.push({
+                  provider: provider.name,
+                  model: discoveredModels[idx - 1].id,
+                });
+              }
+            }
+          } else if (modelIdx === provider.models.length + 1) {
+            // Custom model
+            const customModel = (
+              await rl.question('  Enter custom model name: ')
+            ).trim();
+            if (customModel) {
+              models.push({ provider: provider.name, model: customModel });
+            }
+          } else {
+            models.push({
+              provider: provider.name,
+              model: provider.models[modelIdx - 1],
+            });
+          }
+        }
+      }
+
+      if (models.length === 0) {
+        this.logger.log('\n✗ At least one model is required. Please try again.\n', {
+          type: 'error',
+        });
+      }
+    }
+
+    // Step 3: MCP Config Path
+    this.logger.log('\nStep 3: MCP Config\n', { type: 'info' });
+    this.logger.log('  Use a custom MCP config file for this ablation.\n', { type: 'info' });
+    this.logger.log('  Supports relative paths (from project root) or absolute paths.\n', { type: 'info' });
+    this.logger.log('  Leave empty to use the default.\n', { type: 'info' });
+
+    const defaultMcpConfigPath = this.ablationManager.getDefaultMcpConfigPath();
+    let mcpConfigPath: string = defaultMcpConfigPath;
+    const mcpConfigInput = (
+      await rl.question(`  MCP config path (default: ${defaultMcpConfigPath}): `)
+    ).trim();
+
+    if (mcpConfigInput) {
+      const validation = this.ablationManager.validateMcpConfigPath(mcpConfigInput);
+      if (validation.valid) {
+        mcpConfigPath = mcpConfigInput;
+        this.logger.log(`  ✓ Valid MCP config: ${mcpConfigInput}\n`, { type: 'success' });
+      } else {
+        this.logger.log(`  ⚠ Warning: ${validation.error}\n`, { type: 'warning' });
+        const useAnyway = (
+          await rl.question('  Use this path anyway? (y/N): ')
+        ).trim().toLowerCase();
+        if (useAnyway === 'y' || useAnyway === 'yes') {
+          mcpConfigPath = mcpConfigInput;
+        } else {
+          this.logger.log(`  Using default: ${defaultMcpConfigPath}\n`, { type: 'info' });
+        }
+      }
+    } else {
+      this.logger.log(`  ✓ Using default: ${defaultMcpConfigPath}\n`, { type: 'info' });
+    }
+
+    // Step 4: Define Phases
+    this.logger.log('\nStep 4: Define Phases (command sequences)\n', {
       type: 'info',
     });
     const phases: AblationPhase[] = [];
@@ -460,113 +606,8 @@ export class AblationCLI {
       }
     }
 
-    // Step 3: Select Models
-    this.logger.log('\nStep 3: Select Models (multi-select)\n', {
-      type: 'info',
-    });
-    const models: AblationModel[] = [];
-
-    this.logger.log('  Available providers:\n', { type: 'info' });
-    for (let i = 0; i < PROVIDERS.length; i++) {
-      this.logger.log(`    ${i + 1}. ${PROVIDERS[i].label}\n`, { type: 'info' });
-    }
-
-    const providerSelection = (
-      await rl.question('\n  Select providers (e.g., 1,2 or 1-3): ')
-    ).trim();
-    const selectedProviderIndices = this.parseSelection(
-      providerSelection,
-      PROVIDERS.length,
-    );
-
-    for (const providerIdx of selectedProviderIndices) {
-      const provider = PROVIDERS[providerIdx - 1];
-      this.logger.log(`\n  Select ${provider.label} models:\n`, {
-        type: 'info',
-      });
-
-      for (let i = 0; i < provider.models.length; i++) {
-        this.logger.log(`    ${i + 1}. ${provider.models[i]}\n`, {
-          type: 'info',
-        });
-      }
-      this.logger.log(`    ${provider.models.length + 1}. Enter custom model name\n`, {
-        type: 'info',
-      });
-      this.logger.log(`    ${provider.models.length + 2}. Discover models from API\n`, {
-        type: 'info',
-      });
-
-      const modelSelection = (
-        await rl.question('\n  Select models (e.g., 1,2 or 1-3): ')
-      ).trim();
-      const selectedModelIndices = this.parseSelection(
-        modelSelection,
-        provider.models.length + 2,
-      );
-
-      for (const modelIdx of selectedModelIndices) {
-        if (modelIdx === provider.models.length + 2) {
-          // Discover from API
-          const discoveredModels = await this.discoverModelsFromAPI(
-            provider.name,
-          );
-          if (discoveredModels.length > 0) {
-            this.logger.log(
-              `\n  Discovered ${discoveredModels.length} models from ${provider.label}:\n`,
-              { type: 'info' },
-            );
-            for (let i = 0; i < discoveredModels.length; i++) {
-              const m = discoveredModels[i];
-              const contextInfo = m.contextWindow
-                ? ` (${Math.round(m.contextWindow / 1000)}K)`
-                : '';
-              this.logger.log(`    ${i + 1}. ${m.id}${contextInfo}\n`, {
-                type: 'info',
-              });
-            }
-            const discoverSelection = (
-              await rl.question(
-                '\n  Select discovered models (e.g., 1,2 or 1-3): ',
-              )
-            ).trim();
-            const discoverIndices = this.parseSelection(
-              discoverSelection,
-              discoveredModels.length,
-            );
-            for (const idx of discoverIndices) {
-              models.push({
-                provider: provider.name,
-                model: discoveredModels[idx - 1].id,
-              });
-            }
-          }
-        } else if (modelIdx === provider.models.length + 1) {
-          // Custom model
-          const customModel = (
-            await rl.question('  Enter custom model name: ')
-          ).trim();
-          if (customModel) {
-            models.push({ provider: provider.name, model: customModel });
-          }
-        } else {
-          models.push({
-            provider: provider.name,
-            model: provider.models[modelIdx - 1],
-          });
-        }
-      }
-    }
-
-    if (models.length === 0) {
-      this.logger.log('\n✗ At least one model is required.\n', {
-        type: 'error',
-      });
-      return;
-    }
-
-    // Step 4: Settings
-    this.logger.log('\nStep 4: Settings\n', { type: 'info' });
+    // Step 5: Settings
+    this.logger.log('\nStep 5: Settings\n', { type: 'info' });
 
     const defaultMaxIterations = this.preferencesManager.getMaxIterations();
     const maxIterationsStr = (
@@ -588,6 +629,7 @@ export class AblationCLI {
         settings: {
           maxIterations,
         },
+        mcpConfigPath,
       });
 
       // Display summary
@@ -619,6 +661,10 @@ export class AblationCLI {
         `\n  Total runs: ${this.ablationManager.getTotalRuns(ablation)} (${ablation.phases.length} phases × ${ablation.models.length} models)\n`,
         { type: 'info' },
       );
+
+      if (ablation.mcpConfigPath) {
+        this.logger.log(`\n  MCP Config: ${ablation.mcpConfigPath}\n`, { type: 'info' });
+      }
 
       this.logger.log(
         `\n✓ Saved to .mcp-client-data/ablations/${ablation.name}.yaml\n`,
@@ -668,10 +714,11 @@ export class AblationCLI {
       if (ablation.description) {
         this.logger.log(`     ${ablation.description}\n`, { type: 'info' });
       }
-      this.logger.log(
-        `     └─ ${ablation.phases.length} phases × ${ablation.models.length} models = ${totalRuns} runs │ ${providers.join(', ')} │ Created: ${createdDate}\n`,
-        { type: 'info' },
-      );
+      let infoLine = `     └─ ${ablation.phases.length} phases × ${ablation.models.length} models = ${totalRuns} runs │ ${providers.join(', ')} │ Created: ${createdDate}`;
+      if (ablation.mcpConfigPath) {
+        infoLine += ` │ MCP: ${ablation.mcpConfigPath}`;
+      }
+      this.logger.log(`${infoLine}\n`, { type: 'info' });
     }
 
     this.logger.log('\n', { type: 'info' });
@@ -736,7 +783,17 @@ export class AblationCLI {
 
     // Edit menu loop
     while (true) {
+      // Reload ablation to show current state
+      const currentAblation = this.ablationManager.load(ablation.name);
+      if (!currentAblation) {
+        this.logger.log('\n✗ Ablation not found.\n', { type: 'error' });
+        return;
+      }
+
       this.logger.log(`\n  Editing: ${ablation.name}\n`, { type: 'info' });
+      if (currentAblation.mcpConfigPath) {
+        this.logger.log(`  MCP Config: ${currentAblation.mcpConfigPath}\n`, { type: 'info' });
+      }
       this.logger.log('\n  What do you want to edit?\n', { type: 'info' });
       this.logger.log('    1. Add phase\n', { type: 'info' });
       this.logger.log('    2. Edit phase\n', { type: 'info' });
@@ -745,7 +802,8 @@ export class AblationCLI {
       this.logger.log('    5. Remove models\n', { type: 'info' });
       this.logger.log('    6. Edit settings\n', { type: 'info' });
       this.logger.log('    7. Edit description\n', { type: 'info' });
-      this.logger.log('    8. Done\n', { type: 'info' });
+      this.logger.log('    8. Edit MCP config path\n', { type: 'info' });
+      this.logger.log('    9. Done\n', { type: 'info' });
 
       const choice = (await rl.question('\n  Select option: ')).trim();
 
@@ -771,7 +829,10 @@ export class AblationCLI {
         case '7': // Edit description
           await this.handleEditDescription(ablation.name);
           break;
-        case '8': // Done
+        case '8': // Edit MCP config path
+          await this.handleEditMcpConfigPath(ablation.name);
+          break;
+        case '9': // Done
         case 'q':
           const updated = this.ablationManager.load(ablation.name);
           if (updated) {
@@ -780,6 +841,9 @@ export class AblationCLI {
               `  Phases: ${updated.phases.length}, Models: ${updated.models.length}, Total runs: ${this.ablationManager.getTotalRuns(updated)}\n`,
               { type: 'info' },
             );
+            if (updated.mcpConfigPath) {
+              this.logger.log(`  MCP Config: ${updated.mcpConfigPath}\n`, { type: 'info' });
+            }
           }
           this.logger.log('\n✓ Changes saved.\n', { type: 'success' });
           return;
@@ -1070,6 +1134,11 @@ export class AblationCLI {
       { type: 'info' },
     );
 
+    // Show custom MCP config if set
+    if (ablation.mcpConfigPath) {
+      this.logger.log(`  MCP Config: ${ablation.mcpConfigPath}\n`, { type: 'info' });
+    }
+
     // Display matrix header
     const modelHeaders = ablation.models.map((m) =>
       this.ablationManager.getModelShortName(m),
@@ -1124,6 +1193,28 @@ export class AblationCLI {
     this.logger.log('\n  Original chat saved. Starting ablation...\n', {
       type: 'info',
     });
+
+    // Load custom MCP config if different from default
+    const defaultMcpConfigPath = this.ablationManager.getDefaultMcpConfigPath();
+    let customMcpConfigLoaded = false;
+    if (ablation.mcpConfigPath && ablation.mcpConfigPath !== defaultMcpConfigPath) {
+      const resolvedPath = this.ablationManager.resolveMcpConfigPath(ablation);
+      if (resolvedPath) {
+        const validation = this.ablationManager.validateMcpConfigPath(ablation.mcpConfigPath);
+        if (validation.valid) {
+          this.logger.log(`  Loading custom MCP config: ${ablation.mcpConfigPath}\n`, { type: 'info' });
+          if (this.client.reloadConfigFromPath(resolvedPath)) {
+            await this.client.refreshServers();
+            customMcpConfigLoaded = true;
+            this.logger.log(`  ✓ Custom MCP servers loaded\n`, { type: 'success' });
+          } else {
+            this.logger.log(`  ⚠ Failed to load custom MCP config, using default\n`, { type: 'warning' });
+          }
+        } else {
+          this.logger.log(`  ⚠ Invalid MCP config: ${validation.error}\n`, { type: 'warning' });
+        }
+      }
+    }
 
     // Create run directory
     const { runDir, timestamp } = this.ablationManager.createRunDirectory(
@@ -1377,6 +1468,18 @@ export class AblationCLI {
       type: 'info',
     });
     this.ablationManager.cleanupOutputsSnapshot(runDir, true);
+
+    // Restore default MCP config if custom was loaded
+    if (customMcpConfigLoaded) {
+      this.logger.log('  Restoring default MCP config...\n', { type: 'info' });
+      const defaultConfigPath = this.ablationManager.getDefaultMcpConfigPath();
+      if (this.client.reloadConfigFromPath(defaultConfigPath)) {
+        await this.client.refreshServers();
+        this.logger.log('  ✓ Default MCP servers restored\n', { type: 'success' });
+      } else {
+        this.logger.log('  ⚠ Failed to restore default MCP config\n', { type: 'warning' });
+      }
+    }
 
     // Restore original provider/model and chat state
     this.logger.log('  Restoring original session...\n', { type: 'info' });
@@ -1885,6 +1988,55 @@ export class AblationCLI {
 
     this.ablationManager.update(ablationName, { description: newDescription });
     this.logger.log('\n✓ Description updated.\n', { type: 'success' });
+  }
+
+  /**
+   * Handler to edit MCP config path for an ablation
+   */
+  private async handleEditMcpConfigPath(ablationName: string): Promise<void> {
+    const rl = this.callbacks.getReadline();
+    if (!rl) return;
+
+    const ablation = this.ablationManager.load(ablationName);
+    if (!ablation) return;
+
+    const defaultMcpConfigPath = this.ablationManager.getDefaultMcpConfigPath();
+
+    this.logger.log(
+      `\n  Current MCP config: ${ablation.mcpConfigPath}\n`,
+      { type: 'info' },
+    );
+    this.logger.log('  Enter a path relative to project root or absolute path.\n', { type: 'info' });
+    this.logger.log('  Leave empty to use the default.\n', { type: 'info' });
+
+    const newPath = (
+      await rl.question(`  New MCP config path (default: ${defaultMcpConfigPath}): `)
+    ).trim();
+
+    if (!newPath) {
+      // Set to default path
+      this.ablationManager.update(ablationName, { mcpConfigPath: defaultMcpConfigPath });
+      this.logger.log(`\n✓ MCP config set to default: ${defaultMcpConfigPath}\n`, { type: 'success' });
+      return;
+    }
+
+    // Validate the new path
+    const validation = this.ablationManager.validateMcpConfigPath(newPath);
+    if (validation.valid) {
+      this.ablationManager.update(ablationName, { mcpConfigPath: newPath });
+      this.logger.log('\n✓ MCP config path updated.\n', { type: 'success' });
+    } else {
+      this.logger.log(`\n  ⚠ Warning: ${validation.error}\n`, { type: 'warning' });
+      const useAnyway = (
+        await rl.question('  Use this path anyway? (y/N): ')
+      ).trim().toLowerCase();
+      if (useAnyway === 'y' || useAnyway === 'yes') {
+        this.ablationManager.update(ablationName, { mcpConfigPath: newPath });
+        this.logger.log('\n✓ MCP config path updated.\n', { type: 'success' });
+      } else {
+        this.logger.log('\n  MCP config path unchanged.\n', { type: 'info' });
+      }
+    }
   }
 
   /**

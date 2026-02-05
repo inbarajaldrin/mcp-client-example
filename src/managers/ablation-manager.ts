@@ -37,6 +37,7 @@ export interface AblationDefinition {
   phases: AblationPhase[];
   models: AblationModel[];
   settings: AblationSettings;
+  mcpConfigPath?: string;  // Optional path to custom MCP config file
 }
 
 export interface AblationRunResult {
@@ -739,5 +740,81 @@ export class AblationManager {
    */
   getRunOutputsDir(runDir: string, phaseName: string, model: AblationModel): string {
     return join(runDir, 'outputs', sanitizeFolderName(phaseName), sanitizeFolderName(model.model));
+  }
+
+  // ==================== MCP Config Path Methods ====================
+
+  /**
+   * Get the project root directory (where mcp_config.json is located)
+   */
+  private getProjectRoot(): string {
+    return join(__dirname, '../..');
+  }
+
+  /**
+   * Resolve MCP config path from ablation definition
+   * Supports absolute paths and paths relative to project root
+   * @returns Absolute path to the config file
+   */
+  resolveMcpConfigPath(ablation: AblationDefinition): string | null {
+    if (!ablation.mcpConfigPath) {
+      return null;
+    }
+
+    const configPath = ablation.mcpConfigPath;
+
+    // If absolute path, use as-is
+    if (configPath.startsWith('/')) {
+      return configPath;
+    }
+
+    // Relative path - resolve from project root
+    return join(this.getProjectRoot(), configPath);
+  }
+
+  /**
+   * Validate that an MCP config path exists and has valid JSON format
+   * @param path Optional path to validate. If not provided, returns valid with no error.
+   * @returns Object with valid boolean and optional error message
+   */
+  validateMcpConfigPath(path?: string): { valid: boolean; error?: string } {
+    if (!path) {
+      return { valid: true };
+    }
+
+    // Resolve relative paths
+    const absolutePath = path.startsWith('/')
+      ? path
+      : join(this.getProjectRoot(), path);
+
+    // Check if file exists
+    if (!existsSync(absolutePath)) {
+      return { valid: false, error: `File not found: ${absolutePath}` };
+    }
+
+    // Check if file is valid JSON
+    try {
+      const content = readFileSync(absolutePath, 'utf-8');
+      const config = JSON.parse(content);
+
+      // Verify it has the expected structure
+      if (!config.mcpServers || typeof config.mcpServers !== 'object') {
+        return { valid: false, error: 'Invalid config format: missing mcpServers object' };
+      }
+
+      return { valid: true };
+    } catch (error) {
+      if (error instanceof SyntaxError) {
+        return { valid: false, error: `Invalid JSON: ${error.message}` };
+      }
+      return { valid: false, error: `Error reading file: ${error}` };
+    }
+  }
+
+  /**
+   * Get the default MCP config file path
+   */
+  getDefaultMcpConfigPath(): string {
+    return join(this.getProjectRoot(), 'mcp_config.json');
   }
 }

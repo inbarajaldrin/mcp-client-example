@@ -737,6 +737,51 @@ export class MCPClient {
     }
   }
 
+  /**
+   * Reloads the server configuration from a specific config file path.
+   * Updates this.serverConfigs with values from the specified file.
+   * Used by ablation runs with custom MCP config paths.
+   * @param configPath Absolute path to the MCP config file
+   * @returns true if successful, false otherwise
+   */
+  reloadConfigFromPath(configPath: string): boolean {
+    if (!existsSync(configPath)) {
+      this.logger.log(`Config file not found: ${configPath}\n`, { type: 'warning' });
+      return false;
+    }
+
+    try {
+      const content = readFileSync(configPath, 'utf-8');
+      const config = JSON.parse(content);
+
+      if (!config.mcpServers) {
+        this.logger.log('Invalid config format: missing mcpServers\n', { type: 'warning' });
+        return false;
+      }
+
+      // Build new server configs from file
+      const newConfigs: MultiServerConfig[] = [];
+      for (const [name, server] of Object.entries(config.mcpServers) as [string, any][]) {
+        newConfigs.push({
+          name,
+          config: {
+            command: server.command,
+            args: server.args || [],
+            env: this.mergeEnvironment(server.env),
+          },
+          disabledInConfig: server.disabled || false,
+        });
+      }
+
+      this.serverConfigs = newConfigs;
+      this.logger.log(`Reloaded config from ${configPath}: ${newConfigs.length} server(s) found\n`, { type: 'info' });
+      return true;
+    } catch (error) {
+      this.logger.log(`Error reading config file ${configPath}: ${error}\n`, { type: 'error' });
+      return false;
+    }
+  }
+
   async refreshServers() {
     // Reload config from disk to pick up any changes
     this.reloadConfigFromDisk();
