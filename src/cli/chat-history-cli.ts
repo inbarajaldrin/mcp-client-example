@@ -83,6 +83,7 @@ export class ChatHistoryCLI {
   private convertMessagesForProvider(messages: any[], providerName: string): any[] {
     switch (providerName) {
       case 'openai':
+      case 'xai':  // Grok uses OpenAI-compatible format
         return this.convertToOpenAIFormat(messages);
       case 'google':
         return this.convertToGeminiFormat(messages);
