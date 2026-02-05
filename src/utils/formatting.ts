@@ -6,6 +6,21 @@ import chalk from 'chalk';
 import { consoleStyles } from '../logger.js';
 
 /**
+ * Toggle for compact formatting mode.
+ * When true: keeps nested objects/arrays on single lines to reduce vertical space
+ * When false: fully expands all objects/arrays with indentation (verbose mode)
+ */
+export let COMPACT_FORMAT = true;
+
+/**
+ * Set the formatting mode.
+ * @param compact - true for compact mode, false for verbose mode
+ */
+export function setCompactFormat(compact: boolean): void {
+  COMPACT_FORMAT = compact;
+}
+
+/**
  * Format a tool call for display in the console.
  *
  * @param toolName - The name of the tool being called
@@ -15,7 +30,8 @@ import { consoleStyles } from '../logger.js';
  */
 export function formatToolCall(toolName: string, args: any, fromIPC: boolean = false): string {
   // Custom formatter that handles multiline strings nicely
-  const formatValue = (value: any, indent: string = ''): string => {
+  // In compact mode, nested values stay on one line; in verbose mode, everything expands
+  const formatValue = (value: any, indent: string = '', depth: number = 0): string => {
     if (typeof value === 'string' && value.includes('\n')) {
       // Multiline string - display with actual newlines
       const lines = value.split('\n');
@@ -31,16 +47,24 @@ export function formatToolCall(toolName: string, args: any, fromIPC: boolean = f
     }
     if (Array.isArray(value)) {
       if (value.length === 0) return '[]';
+      // In compact mode at depth > 0, keep arrays inline
+      if (COMPACT_FORMAT && depth > 0) {
+        return JSON.stringify(value);
+      }
       const items = value.map((item, i) =>
-        indent + '  ' + formatValue(item, indent + '  ') + (i < value.length - 1 ? ',' : '')
+        indent + '  ' + formatValue(item, indent + '  ', depth + 1) + (i < value.length - 1 ? ',' : '')
       );
       return '[\n' + items.join('\n') + '\n' + indent + ']';
     }
     if (value && typeof value === 'object') {
       const entries = Object.entries(value);
       if (entries.length === 0) return '{}';
+      // In compact mode at depth > 0, keep objects inline
+      if (COMPACT_FORMAT && depth > 0) {
+        return JSON.stringify(value);
+      }
       const formatted = entries.map(([key, val], i) => {
-        const formattedVal = formatValue(val, indent + '  ');
+        const formattedVal = formatValue(val, indent + '  ', depth + 1);
         return indent + '  ' + JSON.stringify(key) + ': ' + formattedVal + (i < entries.length - 1 ? ',' : '');
       });
       return '{\n' + formatted.join('\n') + '\n' + indent + '}';
@@ -84,4 +108,63 @@ export function formatJSON(json: string): string {
   return json
     .replace(/"([^"]+)":/g, chalk.blue('"$1":'))
     .replace(/: "([^"]+)"/g, ': ' + chalk.green('"$1"'));
+}
+
+/**
+ * Format a value as compact JSON string.
+ * In compact mode:
+ *   - Top-level keys get their own lines
+ *   - Array values: expand with one item per line (items stay inline)
+ *   - Object/primitive values: stay inline
+ * In verbose mode: equivalent to JSON.stringify(value, null, 2).
+ *
+ * @param value - The value to format
+ * @returns Formatted JSON string
+ */
+export function formatCompactJSON(value: any): string {
+  if (!COMPACT_FORMAT) {
+    return JSON.stringify(value, null, 2);
+  }
+
+  if (value === null || value === undefined) {
+    return JSON.stringify(value);
+  }
+
+  if (Array.isArray(value)) {
+    if (value.length === 0) return '[]';
+    // For top-level arrays, put each item on its own line but keep items inline
+    const items = value.map((item, i) => {
+      const comma = i < value.length - 1 ? ',' : '';
+      return '  ' + JSON.stringify(item) + comma;
+    });
+    return '[\n' + items.join('\n') + '\n]';
+  }
+
+  if (typeof value === 'object') {
+    const entries = Object.entries(value);
+    if (entries.length === 0) return '{}';
+    // For top-level objects, put each key on its own line
+    // Arrays get expanded (one item per line), other values stay inline
+    const lines = entries.map(([key, val], i) => {
+      const comma = i < entries.length - 1 ? ',' : '';
+
+      if (Array.isArray(val)) {
+        if (val.length === 0) {
+          return '  ' + JSON.stringify(key) + ': []' + comma;
+        }
+        // Expand array: one item per line
+        const items = val.map((item, j) => {
+          const itemComma = j < val.length - 1 ? ',' : '';
+          return '    ' + JSON.stringify(item) + itemComma;
+        });
+        return '  ' + JSON.stringify(key) + ': [\n' + items.join('\n') + '\n  ]' + comma;
+      }
+
+      // Non-array values stay inline
+      return '  ' + JSON.stringify(key) + ': ' + JSON.stringify(val) + comma;
+    });
+    return '{\n' + lines.join('\n') + '\n}';
+  }
+
+  return JSON.stringify(value);
 }

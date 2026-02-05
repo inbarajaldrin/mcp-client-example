@@ -31,7 +31,7 @@ import type {
 import { AnthropicProvider, type ToolExecutor } from './providers/anthropic.js';
 import { OrchestratorIPCServer } from './ipc-server.js';
 import { ElicitationHandler } from './handlers/elicitation-handler.js';
-import { formatToolCall, formatJSON } from './utils/formatting.js';
+import { formatToolCall, formatJSON, formatCompactJSON } from './utils/formatting.js';
 import { TokenManager } from './core/token-manager.js';
 import { MCPToolExecutor } from './core/tool-executor.js';
 import readline from 'readline/promises';
@@ -1628,7 +1628,7 @@ export class MCPClient {
       // Format result for display and logging (convert objects to JSON)
       const resultStr = typeof event.result === 'string'
         ? event.result
-        : JSON.stringify(event.result, null, 2);
+        : formatCompactJSON(event.result);
 
       // Display result in terminal
       if (event.error) {
@@ -1983,7 +1983,7 @@ export class MCPClient {
               try {
                 parsed = JSON.parse(parsed[0]);
                 // If inner string was valid JSON, format it normally
-                const formatted = JSON.stringify(parsed, null, 2);
+                const formatted = formatCompactJSON(parsed);
                 const colored = formatJSON(formatted);
                 const truncated = colored.length > 10000 
                   ? colored.substring(0, 10000) + '\n     ...(truncated)'
@@ -2002,7 +2002,7 @@ export class MCPClient {
               }
             } else {
               // Not an array with single string - format normally
-              const formatted = JSON.stringify(parsed, null, 2);
+              const formatted = formatCompactJSON(parsed);
               // Apply color formatting and truncate if needed (increased limit to 10000)
               const colored = formatJSON(formatted);
               const truncated = colored.length > 10000 
