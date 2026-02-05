@@ -129,7 +129,7 @@ export class GeminiProvider implements ModelProvider {
   }
 
   getProviderName(): string {
-    return 'gemini';
+    return 'google';
   }
 
   getDefaultModel(): string {
@@ -539,7 +539,7 @@ export class GeminiProvider implements ModelProvider {
           yield {
             type: 'client_info',
             message: `Model ${model} does not support multimodal function responses. Retrying without images.`,
-            provider: 'gemini',
+            provider: 'google',
           } as MessageStreamEvent;
 
           // Re-convert messages without images and retry

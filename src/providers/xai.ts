@@ -142,7 +142,7 @@ export class GrokProvider implements ModelProvider {
   }
 
   getProviderName(): string {
-    return 'grok';
+    return 'xai';
   }
 
   getDefaultModel(): string {

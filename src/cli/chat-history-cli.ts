@@ -84,7 +84,7 @@ export class ChatHistoryCLI {
     switch (providerName) {
       case 'openai':
         return this.convertToOpenAIFormat(messages);
-      case 'gemini':
+      case 'google':
         return this.convertToGeminiFormat(messages);
       case 'ollama':
         return this.convertToOllamaFormat(messages);

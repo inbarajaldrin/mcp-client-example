@@ -169,9 +169,9 @@ import { AttachmentManager, type AttachmentInfo } from '../managers/attachment-m
 import { PreferencesManager } from '../managers/preferences-manager.js';
 import { AnthropicProvider } from '../providers/anthropic.js';
 import { OpenAIProvider } from '../providers/openai.js';
-import { GeminiProvider } from '../providers/gemini.js';
+import { GeminiProvider } from '../providers/google.js';
 import { OllamaProvider } from '../providers/ollama.js';
-import { GrokProvider } from '../providers/grok.js';
+import { GrokProvider } from '../providers/xai.js';
 import type { ModelInfo, ModelProvider as IModelProvider } from '../model-provider.js';
 import type { ModelProvider } from '../model-provider.js';
 import type { ToolCLI } from './tool-cli.js';
@@ -476,8 +476,8 @@ export class AblationCLI {
         models: ['gpt-4o', 'gpt-4o-mini', 'gpt-5', 'gpt-5-mini'],
       },
       {
-        name: 'gemini',
-        label: 'Google Gemini',
+        name: 'google',
+        label: 'Google (Gemini)',
         models: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
       },
       {
@@ -819,11 +819,11 @@ export class AblationCLI {
         return new AnthropicProvider();
       case 'openai':
         return new OpenAIProvider();
-      case 'gemini':
+      case 'google':
         return new GeminiProvider();
       case 'ollama':
         return new OllamaProvider(process.env.OLLAMA_HOST);
-      case 'grok':
+      case 'xai':
         return new GrokProvider();
       default:
         throw new Error(`Unknown provider: ${providerName}`);
@@ -1718,8 +1718,8 @@ export class AblationCLI {
         models: ['gpt-4o', 'gpt-4o-mini', 'gpt-5', 'gpt-5-mini'],
       },
       {
-        name: 'gemini',
-        label: 'Gemini',
+        name: 'google',
+        label: 'Google (Gemini)',
         models: ['gemini-2.5-flash', 'gemini-2.5-pro'],
       },
       {
@@ -2160,13 +2160,13 @@ export class AblationCLI {
         case 'openai':
           provider = new OpenAIProvider();
           break;
-        case 'gemini':
+        case 'google':
           provider = new GeminiProvider();
           break;
         case 'ollama':
           provider = new OllamaProvider(process.env.OLLAMA_HOST);
           break;
-        case 'grok':
+        case 'xai':
           provider = new GrokProvider();
           break;
         default:

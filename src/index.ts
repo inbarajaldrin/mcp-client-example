@@ -2112,7 +2112,7 @@ export class MCPClient {
           lastTokenUsage.regularInputTokens = breakdown.input_tokens || 0;
           lastTokenUsage.cacheCreationTokens = breakdown.cache_creation_input_tokens || 0;
           lastTokenUsage.cacheReadTokens = breakdown.cache_read_input_tokens || 0;
-        } else if (this.modelProvider.getProviderName() === 'gemini') {
+        } else if (this.modelProvider.getProviderName() === 'google') {
           // Gemini doesn't provide cache token breakdown - treat all input as regular tokens
           // This enables cost calculation for Gemini models
           lastTokenUsage.regularInputTokens = chunk.input_tokens;
@@ -2167,7 +2167,7 @@ export class MCPClient {
             if (currentMessage.trim()) {
               contentBlocks.push({ type: 'text', text: currentMessage });
             }
-            const isGemini = this.modelProvider.getProviderName() === 'gemini';
+            const isGemini = this.modelProvider.getProviderName() === 'google';
             for (const tc of toolCallsArray) {
               let parsedInput: any = {};
               if (typeof tc.arguments === 'string' && tc.arguments.trim()) {
@@ -2268,8 +2268,8 @@ export class MCPClient {
             );
             lastTokenUsage = null; // Reset after logging
             tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
-          } else if (this.modelProvider.getProviderName() === 'gemini' && lastTokenUsage) {
-            // Gemini: use exact counts from API
+          } else if (this.modelProvider.getProviderName() === 'google' && lastTokenUsage) {
+            // Google (Gemini): use exact counts from API
             const totalTokens = lastTokenUsage.inputTokens + lastTokenUsage.outputTokens;
             this.chatHistoryManager.addTokenUsagePerCallback(
               lastTokenUsage.inputTokens,
