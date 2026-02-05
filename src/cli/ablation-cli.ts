@@ -171,6 +171,7 @@ import { AnthropicProvider } from '../providers/anthropic.js';
 import { OpenAIProvider } from '../providers/openai.js';
 import { GeminiProvider } from '../providers/gemini.js';
 import { OllamaProvider } from '../providers/ollama.js';
+import { GrokProvider } from '../providers/grok.js';
 import type { ModelInfo, ModelProvider as IModelProvider } from '../model-provider.js';
 import type { ModelProvider } from '../model-provider.js';
 import type { ToolCLI } from './tool-cli.js';
@@ -822,6 +823,8 @@ export class AblationCLI {
         return new GeminiProvider();
       case 'ollama':
         return new OllamaProvider(process.env.OLLAMA_HOST);
+      case 'grok':
+        return new GrokProvider();
       default:
         throw new Error(`Unknown provider: ${providerName}`);
     }
@@ -2162,6 +2165,9 @@ export class AblationCLI {
           break;
         case 'ollama':
           provider = new OllamaProvider(process.env.OLLAMA_HOST);
+          break;
+        case 'grok':
+          provider = new GrokProvider();
           break;
         default:
           this.logger.log(`    ✗ Unknown provider: ${providerName}\n`, {
