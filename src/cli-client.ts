@@ -142,6 +142,15 @@ export class MCPClientCLI {
         getAttachmentCLI: () => this.attachmentCLI,
         displayHelp: () => this.displayHelp(),
         displaySettings: () => this.displaySettings(),
+        // Check both keyboard monitor (Ctrl+A) and signal handler (Ctrl+C in abort mode)
+        isAbortRequested: () => this.keyboardMonitor.abortRequested || this.signalHandler.abortRequested,
+        resetAbort: () => {
+          this.keyboardMonitor.abortRequested = false;
+          this.signalHandler.resetAbort();
+        },
+        setAbortMode: (enabled: boolean) => this.signalHandler.setAbortMode(enabled),
+        startKeyboardMonitor: () => this.keyboardMonitor.start(),
+        stopKeyboardMonitor: () => this.keyboardMonitor.stop(),
       },
     );
 

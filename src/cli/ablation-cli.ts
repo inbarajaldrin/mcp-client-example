@@ -194,6 +194,16 @@ export interface AblationCLICallbacks {
   displayHelp: () => void;
   /** Display settings */
   displaySettings: () => Promise<void>;
+  /** Check if abort was requested (Ctrl+A or Ctrl+C in abort mode) */
+  isAbortRequested: () => boolean;
+  /** Reset abort state */
+  resetAbort: () => void;
+  /** Enable abort mode (Ctrl+C sets flag instead of exiting) */
+  setAbortMode: (enabled: boolean) => void;
+  /** Start keyboard monitor to capture Ctrl+A for abort */
+  startKeyboardMonitor: () => void;
+  /** Stop keyboard monitor */
+  stopKeyboardMonitor: () => void;
 }
 
 /**
@@ -1138,9 +1148,24 @@ export class AblationCLI {
     const totalStartTime = Date.now();
     let shouldBreak = false;
 
+    // Enable abort mode - Ctrl+C will set abort flag instead of exiting
+    this.callbacks.setAbortMode(true);
+
+    // Reset abort state and start keyboard monitor for Ctrl+A support
+    this.callbacks.resetAbort();
+    this.callbacks.startKeyboardMonitor();
+
+    try {
     // Execute each phase × model combination
     for (const phase of ablation.phases) {
       if (shouldBreak) break;
+
+      // Check for abort (Ctrl+A or Ctrl+C)
+      if (this.callbacks.isAbortRequested()) {
+        this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+        shouldBreak = true;
+        break;
+      }
       const phaseDir = this.ablationManager.createPhaseDirectory(
         runDir,
         phase.name,
@@ -1148,6 +1173,14 @@ export class AblationCLI {
 
       for (const model of ablation.models) {
         if (shouldBreak) break;
+
+        // Check for abort (Ctrl+A or Ctrl+C)
+        if (this.callbacks.isAbortRequested()) {
+          this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+          shouldBreak = true;
+          break;
+        }
+
         runNumber++;
         const modelShortName = this.ablationManager.getModelShortName(model);
 
@@ -1185,7 +1218,16 @@ export class AblationCLI {
           await this.client.switchProviderAndModel(provider, model.model);
 
           // Execute commands for this phase
+          let aborted = false;
           for (let i = 0; i < phase.commands.length; i++) {
+            // Check for abort before each command
+            if (this.callbacks.isAbortRequested()) {
+              this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+              aborted = true;
+              shouldBreak = true;
+              break;
+            }
+
             const command = phase.commands[i];
             this.logger.log(
               `  [${i + 1}/${phase.commands.length}] Executing: ${command}\n`,
@@ -1195,6 +1237,21 @@ export class AblationCLI {
               command,
               ablation.settings.maxIterations,
             );
+
+            // Check for abort after each command
+            if (this.callbacks.isAbortRequested()) {
+              this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+              aborted = true;
+              shouldBreak = true;
+              break;
+            }
+          }
+
+          if (aborted) {
+            result.status = 'aborted';
+            result.duration = Date.now() - startTime;
+            run.results.push(result);
+            break;
           }
 
           // Get token usage
@@ -1263,6 +1320,13 @@ export class AblationCLI {
         }
       }
     }
+    } finally {
+      // Stop keyboard monitor - always runs even if aborted/errored
+      this.callbacks.stopKeyboardMonitor();
+
+      // Disable abort mode - Ctrl+C will exit normally again
+      this.callbacks.setAbortMode(false);
+    }
 
     // Finalize run
     run.completedAt = new Date().toISOString();
@@ -1291,11 +1355,15 @@ export class AblationCLI {
       (r) => r.status === 'completed',
     ).length;
     const failedRuns = run.results.filter((r) => r.status === 'failed').length;
+    const abortedRuns = run.results.filter((r) => r.status === 'aborted').length;
     this.logger.log(`    Completed: ${completedRuns}/${totalRuns}\n`, {
       type: 'info',
     });
     if (failedRuns > 0) {
       this.logger.log(`    Failed: ${failedRuns}\n`, { type: 'warning' });
+    }
+    if (abortedRuns > 0) {
+      this.logger.log(`    Aborted: ${abortedRuns}\n`, { type: 'warning' });
     }
     this.logger.log(
       `    Total time: ${(run.totalDuration / 1000).toFixed(1)}s\n`,
