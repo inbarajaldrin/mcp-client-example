@@ -2338,7 +2338,11 @@ export class AblationCLI {
 
       this.logger.log(`\n      ${propName} (${reqTag}, ${typeHint}${defaultTag}):\n`, { type: 'info' });
 
-      // Handle enum types specially
+      // Check for anyOf with enum (e.g., control_gripper command: enum | integer)
+      const anyOfEnum = prop.anyOf?.find((t: any) => t.enum && Array.isArray(t.enum));
+      const anyOfOtherTypes = prop.anyOf?.filter((t: any) => !t.enum && t.type !== 'null').map((t: any) => t.type) || [];
+
+      // Handle enum types specially (including anyOf with enum)
       if (prop.enum && Array.isArray(prop.enum)) {
         const enumValues = prop.enum;
         for (let i = 0; i < enumValues.length; i++) {
@@ -2368,6 +2372,51 @@ export class AblationCLI {
             return null;
           }
           args[propName] = enumValues[enumIndex];
+        }
+      } else if (anyOfEnum) {
+        // Handle anyOf with enum (e.g., enum | integer)
+        const enumValues = anyOfEnum.enum;
+        for (let i = 0; i < enumValues.length; i++) {
+          const isDefault = hasDefault && enumValues[i] === defaultValue;
+          const marker = isDefault ? ' ← default' : '';
+          this.logger.log(`        ${i + 1}. ${enumValues[i]}${marker}\n`, { type: 'info' });
+        }
+        if (anyOfOtherTypes.length > 0) {
+          this.logger.log(`        Or enter a value (${anyOfOtherTypes.join(' | ')})\n`, { type: 'info' });
+        }
+
+        const input = (await rl.question('      Select or enter value (Enter for default, "q" to cancel): ')).trim();
+        if (input.toLowerCase() === 'q') return null;
+
+        if (input === '') {
+          if (hasDefault) {
+            args[propName] = defaultValue;
+            this.logger.log(`        → Using default: ${JSON.stringify(defaultValue)}\n`, { type: 'info' });
+          } else if (!isRequired) {
+            this.logger.log(`        → Skipped\n`, { type: 'info' });
+          } else {
+            this.logger.log('        ✗ Required field, please select an option.\n', { type: 'error' });
+            return null;
+          }
+        } else {
+          // Check if input is a number selecting from enum
+          const enumIndex = parseInt(input) - 1;
+          if (!isNaN(enumIndex) && enumIndex >= 0 && enumIndex < enumValues.length) {
+            args[propName] = enumValues[enumIndex];
+          } else if (anyOfOtherTypes.includes('integer') && /^-?\d+$/.test(input)) {
+            // Parse as integer if that's one of the allowed types
+            args[propName] = parseInt(input);
+          } else if (anyOfOtherTypes.includes('number') && /^-?\d+\.?\d*$/.test(input)) {
+            // Parse as number if that's one of the allowed types
+            args[propName] = parseFloat(input);
+          } else {
+            // Use as string value (might be one of the enum values typed directly)
+            if (enumValues.includes(input)) {
+              args[propName] = input;
+            } else {
+              args[propName] = input;
+            }
+          }
         }
       } else {
         // Regular input
@@ -2400,10 +2449,18 @@ export class AblationCLI {
    */
   private getTypeHint(prop: any): string {
     if (prop.enum) {
-      return 'enum';
+      return `enum(${prop.enum.join(', ')})`;
     }
     if (prop.anyOf) {
-      const types = prop.anyOf.map((t: any) => t.type || 'unknown').filter((t: string) => t !== 'null');
+      const types = prop.anyOf
+        .map((t: any) => {
+          // Handle enum within anyOf
+          if (t.enum) {
+            return `enum(${t.enum.join(', ')})`;
+          }
+          return t.type || 'unknown';
+        })
+        .filter((t: string) => t !== 'null');
       return types.join(' | ') || 'any';
     }
     if (prop.type === 'array') {
