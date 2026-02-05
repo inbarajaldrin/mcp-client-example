@@ -782,7 +782,7 @@ export class MCPClient {
     }
   }
 
-  async refreshServers() {
+  async refreshServers(options?: { includeDisabled?: boolean }) {
     // Reload config from disk to pick up any changes
     this.reloadConfigFromDisk();
 
@@ -799,10 +799,11 @@ export class MCPClient {
 
     const connectionErrors: Array<{ name: string; error: any }> = [];
 
-    // Reconnect to enabled servers (same logic as start())
+    // Reconnect to servers
+    // When includeDisabled is true (e.g. ablation mode), connect ALL servers
     for (const serverConfig of this.serverConfigs) {
-      // Skip disabled servers - they can be connected on-demand
-      if (serverConfig.disabledInConfig) {
+      // Skip disabled servers unless includeDisabled is set
+      if (serverConfig.disabledInConfig && !options?.includeDisabled) {
         continue;
       }
 
@@ -889,6 +890,14 @@ export class MCPClient {
       `✓ Refreshed ${this.servers.size} server(s): ${Array.from(this.servers.keys()).join(', ')}\n`,
       { type: 'success' },
     );
+  }
+
+  /**
+   * Check if all configured servers (including disabled) are currently connected.
+   * Used by ablation to skip redundant refreshes.
+   */
+  areAllServersConnected(): boolean {
+    return this.serverConfigs.every(config => this.servers.has(config.name));
   }
 
   private async initMCPTools() {

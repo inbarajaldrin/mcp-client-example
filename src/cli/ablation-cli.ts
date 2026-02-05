@@ -216,6 +216,7 @@ export class AblationCLI {
   private attachmentManager: AttachmentManager;
   private preferencesManager: PreferencesManager;
   private callbacks: AblationCLICallbacks;
+  private lastAblationMcpConfigPath: string | null = null;
 
   constructor(
     client: MCPClient,
@@ -1052,7 +1053,8 @@ export class AblationCLI {
   }
 
   /**
-   * Handle /ablation-run command - Run an ablation study
+   * Handle /ablation-run command - Run one or more ablation studies
+   * Supports multi-select: comma-separated numbers (e.g. "1,3"), ranges (e.g. "1-3"), or "all"
    */
   async handleAblationRun(): Promise<void> {
     const rl = this.callbacks.getReadline();
@@ -1091,55 +1093,188 @@ export class AblationCLI {
       });
     }
 
-    const selection = (
-      await rl.question('\nSelect ablation to run (or "q" to cancel): ')
-    ).trim();
+    let selectedAblations: AblationDefinition[] = [];
+    while (selectedAblations.length === 0) {
+      const selection = (
+        await rl.question('\nSelect ablation(s) to run (e.g. 1, 1,3, 1-3, all, or "q" to cancel): ')
+      ).trim();
 
-    if (selection.toLowerCase() === 'q') {
+      if (selection.toLowerCase() === 'q') {
+        this.logger.log('\nCancelled.\n', { type: 'info' });
+        return;
+      }
+
+      selectedAblations = this.parseAblationSelection(selection, ablations);
+      if (selectedAblations.length === 0) {
+        this.logger.log('  ✗ Invalid selection, try again.\n', { type: 'error' });
+      }
+    }
+
+    // Display summary of all selected ablations
+    const totalAblationRuns = selectedAblations.reduce(
+      (sum, a) => sum + this.ablationManager.getTotalRuns(a), 0,
+    );
+    if (selectedAblations.length > 1) {
+      this.logger.log(
+        `\n  Selected ${selectedAblations.length} ablation(s) (${totalAblationRuns} total runs):\n`,
+        { type: 'info' },
+      );
+      for (const a of selectedAblations) {
+        const runs = this.ablationManager.getTotalRuns(a);
+        this.logger.log(`    - ${a.name} (${runs} runs)\n`, { type: 'info' });
+      }
+    }
+
+    // Display details for each selected ablation
+    for (const ablation of selectedAblations) {
+      const totalRuns = this.ablationManager.getTotalRuns(ablation);
+      this.logger.log(
+        `\n┌─────────────────────────────────────────────────────────────┐\n`,
+        { type: 'info' },
+      );
+      this.logger.log(
+        `│  ABLATION: ${ablation.name.padEnd(48)}│\n`,
+        { type: 'info' },
+      );
+      if (ablation.description) {
+        this.logger.log(
+          `│  ${ablation.description.substring(0, 57).padEnd(58)}│\n`,
+          { type: 'info' },
+        );
+      }
+      this.logger.log(
+        `└─────────────────────────────────────────────────────────────┘\n`,
+        { type: 'info' },
+      );
+
+      this.logger.log(
+        `\n  Matrix: ${ablation.phases.length} phases × ${ablation.models.length} models = ${totalRuns} runs\n`,
+        { type: 'info' },
+      );
+
+      if (ablation.mcpConfigPath) {
+        this.logger.log(`  MCP Config: ${ablation.mcpConfigPath}\n`, { type: 'info' });
+      }
+
+      this.displayAblationMatrix(ablation);
+    }
+
+    const confirm = (await rl.question('\nStart ablation? (Y/n): '))
+      .trim()
+      .toLowerCase();
+    if (confirm === 'n' || confirm === 'no') {
       this.logger.log('\nCancelled.\n', { type: 'info' });
       return;
     }
 
-    const index = parseInt(selection) - 1;
-    if (isNaN(index) || index < 0 || index >= ablations.length) {
-      this.logger.log('\n✗ Invalid selection.\n', { type: 'error' });
-      return;
+    // Save original provider/model and chat state to restore after all ablations
+    const originalProviderName = this.client.getProviderName();
+    const originalModel = this.client.getModel();
+    const savedState = this.client.saveState();
+    this.logger.log('\n  Original chat saved. Starting ablation...\n', {
+      type: 'info',
+    });
+
+    // Run each selected ablation
+    let batchAborted = false;
+    for (let i = 0; i < selectedAblations.length; i++) {
+      const ablation = selectedAblations[i];
+      if (selectedAblations.length > 1) {
+        this.logger.log(
+          `\n╔═════════════════════════════════════════════════════════════════╗\n`,
+          { type: 'info' },
+        );
+        this.logger.log(
+          `║  BATCH ${i + 1}/${selectedAblations.length}: ${ablation.name.padEnd(43)}║\n`,
+          { type: 'info' },
+        );
+        this.logger.log(
+          `╚═════════════════════════════════════════════════════════════════╝\n`,
+          { type: 'info' },
+        );
+      }
+
+      const aborted = await this.runSingleAblation(ablation);
+      if (aborted) {
+        batchAborted = true;
+        break;
+      }
     }
 
-    const ablation = ablations[index];
-    const totalRuns = this.ablationManager.getTotalRuns(ablation);
-
-    // Display run details
-    this.logger.log(
-      `\n┌─────────────────────────────────────────────────────────────┐\n`,
-      { type: 'info' },
-    );
-    this.logger.log(
-      `│  ABLATION: ${ablation.name.padEnd(48)}│\n`,
-      { type: 'info' },
-    );
-    if (ablation.description) {
+    if (selectedAblations.length > 1 && !batchAborted) {
       this.logger.log(
-        `│  ${ablation.description.substring(0, 57).padEnd(58)}│\n`,
-        { type: 'info' },
+        `\n  ✓ All ${selectedAblations.length} ablation(s) complete\n`,
+        { type: 'success' },
       );
     }
-    this.logger.log(
-      `└─────────────────────────────────────────────────────────────┘\n`,
-      { type: 'info' },
-    );
 
-    this.logger.log(
-      `\n  Matrix: ${ablation.phases.length} phases × ${ablation.models.length} models = ${totalRuns} runs\n`,
-      { type: 'info' },
-    );
-
-    // Show custom MCP config if set
-    if (ablation.mcpConfigPath) {
-      this.logger.log(`  MCP Config: ${ablation.mcpConfigPath}\n`, { type: 'info' });
+    // Restore default MCP config if a custom config is still active
+    const defaultMcpConfigPath = this.ablationManager.getDefaultMcpConfigPath();
+    if (this.lastAblationMcpConfigPath && this.lastAblationMcpConfigPath !== defaultMcpConfigPath) {
+      this.logger.log('  Restoring default MCP config...\n', { type: 'info' });
+      if (this.client.reloadConfigFromPath(defaultMcpConfigPath)) {
+        await this.client.refreshServers();
+        this.logger.log('  ✓ Default MCP servers restored\n', { type: 'success' });
+      } else {
+        this.logger.log('  ⚠ Failed to restore default MCP config\n', { type: 'warning' });
+      }
+      this.lastAblationMcpConfigPath = null;
     }
 
-    // Display matrix header
+    // Restore original provider/model and chat state
+    this.logger.log('  Restoring original session...\n', { type: 'info' });
+    const originalProvider = this.createProviderInstance(originalProviderName);
+    await this.client.restoreState(savedState, originalProvider, originalModel);
+    this.logger.log(
+      `  ✓ Restored to ${originalProviderName}/${originalModel}\n`,
+      { type: 'success' },
+    );
+  }
+
+  /**
+   * Parse a selection string into ablation definitions.
+   * Supports: single number "1", comma-separated "1,3", ranges "1-3", "all"
+   */
+  private parseAblationSelection(
+    selection: string,
+    ablations: AblationDefinition[],
+  ): AblationDefinition[] {
+    const lower = selection.toLowerCase().trim();
+    if (lower === 'all') {
+      return [...ablations];
+    }
+
+    const indices = new Set<number>();
+    const parts = lower.split(',').map(s => s.trim()).filter(Boolean);
+
+    for (const part of parts) {
+      const rangeMatch = part.match(/^(\d+)\s*-\s*(\d+)$/);
+      if (rangeMatch) {
+        const start = parseInt(rangeMatch[1]) - 1;
+        const end = parseInt(rangeMatch[2]) - 1;
+        if (isNaN(start) || isNaN(end) || start < 0 || end >= ablations.length || start > end) {
+          return [];
+        }
+        for (let i = start; i <= end; i++) {
+          indices.add(i);
+        }
+      } else {
+        const index = parseInt(part) - 1;
+        if (isNaN(index) || index < 0 || index >= ablations.length) {
+          return [];
+        }
+        indices.add(index);
+      }
+    }
+
+    // Return in sorted order
+    return Array.from(indices).sort((a, b) => a - b).map(i => ablations[i]);
+  }
+
+  /**
+   * Display the phase × model matrix for an ablation
+   */
+  private displayAblationMatrix(ablation: AblationDefinition): void {
     const modelHeaders = ablation.models.map((m) =>
       this.ablationManager.getModelShortName(m),
     );
@@ -1177,43 +1312,48 @@ export class AblationCLI {
       this.logger.log('┴─────────────', { type: 'info' });
     }
     this.logger.log('┘\n', { type: 'info' });
+  }
 
-    const confirm = (await rl.question('\nStart ablation? (Y/n): '))
-      .trim()
-      .toLowerCase();
-    if (confirm === 'n' || confirm === 'no') {
-      this.logger.log('\nCancelled.\n', { type: 'info' });
-      return;
-    }
+  /**
+   * Run a single ablation study. Handles MCP config, execution, results, and output cleanup.
+   * Server connections are reused across calls when the config hasn't changed.
+   * @returns true if the user aborted
+   */
+  private async runSingleAblation(ablation: AblationDefinition): Promise<boolean> {
+    const totalRuns = this.ablationManager.getTotalRuns(ablation);
 
-    // Save original provider/model and chat state to restore after ablation
-    const originalProviderName = this.client.getProviderName();
-    const originalModel = this.client.getModel();
-    const savedState = this.client.saveState();
-    this.logger.log('\n  Original chat saved. Starting ablation...\n', {
-      type: 'info',
-    });
-
-    // Load custom MCP config if different from default
+    // Tool access model for ablation:
+    // - Agent tools: from regular config with disabled servers respected (filtered by initMCPTools)
+    // - @tool-exec: has client privileges — can reach ALL servers including disabled ones
+    // We connect disabled servers here so @tool-exec: can route to them.
     const defaultMcpConfigPath = this.ablationManager.getDefaultMcpConfigPath();
-    let customMcpConfigLoaded = false;
-    if (ablation.mcpConfigPath && ablation.mcpConfigPath !== defaultMcpConfigPath) {
-      const resolvedPath = this.ablationManager.resolveMcpConfigPath(ablation);
-      if (resolvedPath) {
-        const validation = this.ablationManager.validateMcpConfigPath(ablation.mcpConfigPath);
-        if (validation.valid) {
-          this.logger.log(`  Loading custom MCP config: ${ablation.mcpConfigPath}\n`, { type: 'info' });
-          if (this.client.reloadConfigFromPath(resolvedPath)) {
-            await this.client.refreshServers();
-            customMcpConfigLoaded = true;
-            this.logger.log(`  ✓ Custom MCP servers loaded\n`, { type: 'success' });
+    const effectiveConfigPath = (ablation.mcpConfigPath && ablation.mcpConfigPath !== defaultMcpConfigPath)
+      ? ablation.mcpConfigPath
+      : defaultMcpConfigPath;
+
+    if (this.lastAblationMcpConfigPath === effectiveConfigPath && this.client.areAllServersConnected()) {
+      this.logger.log(`  All servers already connected for this config, skipping refresh\n`, { type: 'info' });
+    } else {
+      if (effectiveConfigPath !== defaultMcpConfigPath) {
+        const resolvedPath = this.ablationManager.resolveMcpConfigPath(ablation);
+        if (resolvedPath) {
+          const validation = this.ablationManager.validateMcpConfigPath(ablation.mcpConfigPath!);
+          if (validation.valid) {
+            this.logger.log(`  Loading custom MCP config: ${ablation.mcpConfigPath}\n`, { type: 'info' });
+            if (!this.client.reloadConfigFromPath(resolvedPath)) {
+              this.logger.log(`  ⚠ Failed to load custom MCP config, using default\n`, { type: 'warning' });
+            }
           } else {
-            this.logger.log(`  ⚠ Failed to load custom MCP config, using default\n`, { type: 'warning' });
+            this.logger.log(`  ⚠ Invalid MCP config: ${validation.error}\n`, { type: 'warning' });
           }
-        } else {
-          this.logger.log(`  ⚠ Invalid MCP config: ${validation.error}\n`, { type: 'warning' });
         }
       }
+
+      // Refresh with includeDisabled so @tool-exec: can reach all servers
+      this.logger.log(`  Connecting all servers (including disabled)...\n`, { type: 'info' });
+      await this.client.refreshServers({ includeDisabled: true });
+      this.lastAblationMcpConfigPath = effectiveConfigPath;
+      this.logger.log(`  ✓ All servers connected\n`, { type: 'success' });
     }
 
     // Create run directory
@@ -1469,26 +1609,7 @@ export class AblationCLI {
     });
     this.ablationManager.cleanupOutputsSnapshot(runDir, true);
 
-    // Restore default MCP config if custom was loaded
-    if (customMcpConfigLoaded) {
-      this.logger.log('  Restoring default MCP config...\n', { type: 'info' });
-      const defaultConfigPath = this.ablationManager.getDefaultMcpConfigPath();
-      if (this.client.reloadConfigFromPath(defaultConfigPath)) {
-        await this.client.refreshServers();
-        this.logger.log('  ✓ Default MCP servers restored\n', { type: 'success' });
-      } else {
-        this.logger.log('  ⚠ Failed to restore default MCP config\n', { type: 'warning' });
-      }
-    }
-
-    // Restore original provider/model and chat state
-    this.logger.log('  Restoring original session...\n', { type: 'info' });
-    const originalProvider = this.createProviderInstance(originalProviderName);
-    await this.client.restoreState(savedState, originalProvider, originalModel);
-    this.logger.log(
-      `  ✓ Restored to ${originalProviderName}/${originalModel}\n`,
-      { type: 'success' },
-    );
+    return shouldBreak;
   }
 
   /**
