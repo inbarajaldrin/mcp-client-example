@@ -624,6 +624,8 @@ export class GrokProvider implements ModelProvider {
         name: string;
         content: string;
       }> = [];
+      // Collect image parts from tool results to inject as a user message
+      const toolImageParts: Array<{ type: 'image_url'; image_url: { url: string } }> = [];
 
       for (const toolCall of assistantMessage.tool_calls) {
         // Check for cancellation before executing each tool
@@ -666,7 +668,8 @@ export class GrokProvider implements ModelProvider {
             hasImages: result.hasImages,
           };
 
-          // Grok doesn't support images in tool results, use text content only
+          // Grok tool messages only support string content, so images go in a
+          // follow-up user message (Grok supports images in user messages via image_url)
           const textContent = result.contentBlocks
             .filter((b) => b.type === 'text')
             .map((b) => (b as { type: 'text'; text: string }).text)
@@ -677,6 +680,20 @@ export class GrokProvider implements ModelProvider {
             name: functionCall.name,
             content: textContent,
           });
+
+          // Collect any image blocks to inject as a user message after tool results
+          if (result.hasImages) {
+            const imageBlocks = result.contentBlocks.filter((b) => b.type === 'image');
+            for (const img of imageBlocks) {
+              const imgBlock = img as { type: 'image'; data: string; mimeType: string };
+              toolImageParts.push({
+                type: 'image_url' as const,
+                image_url: {
+                  url: `data:${imgBlock.mimeType || 'image/jpeg'};base64,${imgBlock.data}`,
+                },
+              });
+            }
+          }
         } catch (error) {
           const functionCall = 'function' in toolCall ? toolCall.function : null;
           const toolName = functionCall?.name || 'unknown';
@@ -697,6 +714,18 @@ export class GrokProvider implements ModelProvider {
           tool_call_id: toolResult.tool_call_id,
           content: toolResult.content,
         });
+      }
+
+      // If any tool results contained images, inject them as a user message
+      // Grok doesn't support images in tool messages, but does support them in user messages
+      if (toolImageParts.length > 0) {
+        conversationMessages.push({
+          role: 'user',
+          content: [
+            { type: 'text', text: 'Here are the image(s) returned by the tool(s) above. Please analyze them as part of the tool results.' },
+            ...toolImageParts,
+          ],
+        } as any);
       }
 
       hasPendingToolResults = true;

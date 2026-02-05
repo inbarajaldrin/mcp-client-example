@@ -2070,6 +2070,8 @@ export class MCPClient {
         }
         
         // Log tool execution to history
+        // TODO: Persist tool result images for chat restore.
+        // Currently, image base64 data from tool results (chunk.hasImages) is lost on save.
         this.chatHistoryManager.addToolExecution(
           chunk.toolName,
           chunk.toolInput || {},

@@ -461,10 +461,15 @@ export class OllamaProvider implements ModelProvider {
       }
 
       // Standard messages (user or assistant without tool_calls)
-      return {
+      const result: any = {
         role: msg.role,
         content: msg.content || '',
       };
+      // Preserve images field (e.g. from tool result image injection)
+      if ((msg as any).images) {
+        result.images = (msg as any).images;
+      }
+      return result;
     });
   }
 
@@ -882,6 +887,8 @@ export class OllamaProvider implements ModelProvider {
       }
 
       // Execute tools
+      // Collect image data from tool results to inject as a user message
+      const toolImages: string[] = [];
       for (const toolCall of toolCalls) {
         // Check for cancellation before executing each tool
         // This prevents queued tools from executing after abort is requested
@@ -924,7 +931,8 @@ export class OllamaProvider implements ModelProvider {
             hasImages: result.hasImages,
           };
 
-          // Ollama doesn't support images in tool results, use text content only
+          // Ollama tool messages only support string content, so images go in a
+          // follow-up user message (Ollama supports images via the 'images' field)
           const textContent = result.contentBlocks
             .filter((b) => b.type === 'text')
             .map((b) => (b as { type: 'text'; text: string }).text)
@@ -936,6 +944,15 @@ export class OllamaProvider implements ModelProvider {
             tool_name: toolCall.name,
             content: textContent,
           });
+
+          // Collect any image blocks to inject as a user message after tool results
+          if (result.hasImages) {
+            const imageBlocks = result.contentBlocks.filter((b) => b.type === 'image');
+            for (const img of imageBlocks) {
+              const imgBlock = img as { type: 'image'; data: string; mimeType: string };
+              toolImages.push(imgBlock.data);
+            }
+          }
         } catch (error) {
           const errorMessage = `Error executing tool: ${error instanceof Error ? error.message : String(error)}`;
 
@@ -953,6 +970,16 @@ export class OllamaProvider implements ModelProvider {
             content: errorMessage,
           });
         }
+      }
+
+      // If any tool results contained images, inject them as a user message
+      // Ollama doesn't support images in tool messages, but does support them in user messages
+      if (toolImages.length > 0) {
+        conversationMessages.push({
+          role: 'user',
+          content: 'Here are the image(s) returned by the tool(s) above. Please analyze them as part of the tool results.',
+          images: toolImages,
+        } as any);
       }
 
       hasPendingToolResults = true;
