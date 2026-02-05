@@ -18,6 +18,14 @@ import type {
   ModelInfo,
 } from '../model-provider.js';
 
+// Provider metadata - exported for use by CLI
+export const PROVIDER_INFO = {
+  name: 'ollama',
+  label: 'Ollama (Local LLMs)',
+  defaultModel: 'llama3.2:3b',
+  models: ['llama3.2:3b', 'llama3.1:8b', 'mistral:7b'],
+};
+
 // Default Ollama host
 const DEFAULT_OLLAMA_HOST = 'http://localhost:11434';
 const DEFAULT_MODEL = 'llama3.2:3b';

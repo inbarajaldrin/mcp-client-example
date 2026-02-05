@@ -17,6 +17,14 @@ import type {
 
 import type { ToolExecutionResult } from '../core/tool-executor.js';
 
+// Provider metadata - exported for use by CLI
+export const PROVIDER_INFO = {
+  name: 'anthropic',
+  label: 'Anthropic (Claude)',
+  defaultModel: 'claude-haiku-4-5-20251001',
+  models: ['claude-haiku-4-5-20251001', 'claude-sonnet-4-20250514', 'claude-opus-4-20250514'],
+};
+
 // Tool Executor Type - function that executes tools on your system
 // Returns ToolExecutionResult with display text and content blocks (including images)
 export type ToolExecutor = (

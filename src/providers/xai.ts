@@ -20,6 +20,14 @@ export type ToolExecutor = (
   toolInput: Record<string, any>,
 ) => Promise<ToolExecutionResult>;
 
+// Provider metadata - exported for use by CLI
+export const PROVIDER_INFO = {
+  name: 'xai',
+  label: 'xAI (Grok)',
+  defaultModel: 'grok-4-fast',
+  models: ['grok-4-fast', 'grok-4'],
+};
+
 // Grok model context window limits (in tokens)
 // Based on xAI documentation: https://docs.x.ai/docs/models
 const GROK_MODEL_CONTEXT_WINDOWS: Record<string, number> = {

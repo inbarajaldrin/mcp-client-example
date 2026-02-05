@@ -7,12 +7,33 @@ import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import readline from 'readline';
-import { AnthropicProvider } from './providers/anthropic.js';
-import { OpenAIProvider } from './providers/openai.js';
-import { OllamaProvider } from './providers/ollama.js';
-import { GeminiProvider } from './providers/google.js';
-import { GrokProvider } from './providers/xai.js';
+import { AnthropicProvider, PROVIDER_INFO as ANTHROPIC } from './providers/anthropic.js';
+import { OpenAIProvider, PROVIDER_INFO as OPENAI } from './providers/openai.js';
+import { OllamaProvider, PROVIDER_INFO as OLLAMA } from './providers/ollama.js';
+import { GeminiProvider, PROVIDER_INFO as GOOGLE } from './providers/google.js';
+import { GrokProvider, PROVIDER_INFO as XAI } from './providers/xai.js';
 import type { ModelProvider, ModelInfo } from './model-provider.js';
+
+// Assembled from individual provider exports - single source of truth
+export const PROVIDERS = [ANTHROPIC, OPENAI, GOOGLE, XAI, OLLAMA];
+
+// Create provider instance - exported for use by other modules
+export function createProvider(providerName: string): ModelProvider | undefined {
+  switch (providerName.toLowerCase()) {
+    case 'anthropic':
+      return new AnthropicProvider();
+    case 'openai':
+      return new OpenAIProvider();
+    case 'google':
+      return new GeminiProvider();
+    case 'xai':
+      return new GrokProvider();
+    case 'ollama':
+      return new OllamaProvider(process.env.OLLAMA_HOST);
+    default:
+      return undefined;
+  }
+}
 
 // Load .env file from mcp-client directory
 const __filename = fileURLToPath(import.meta.url);
@@ -264,28 +285,20 @@ async function selectProvider(): Promise<ModelProvider> {
   };
 
   try {
-    const providers = [
-      { name: 'anthropic', label: 'Anthropic (Claude)', defaultModel: 'claude-haiku-4-5-20251001' },
-      { name: 'openai', label: 'OpenAI (GPT)', defaultModel: 'gpt-5-mini' },
-      { name: 'google', label: 'Google (Gemini)', defaultModel: 'gemini-2.5-flash' },
-      { name: 'xai', label: 'xAI (Grok)', defaultModel: 'grok-4-fast' },
-      { name: 'ollama', label: 'Ollama (Local LLMs)', defaultModel: 'llama3.2:3b' },
-    ];
-
     console.log('\nAvailable providers:\n');
-    providers.forEach((provider, index) => {
+    PROVIDERS.forEach((provider, index) => {
       console.log(`  ${index + 1}. ${provider.label}`);
       console.log(`     Default model: ${provider.defaultModel}`);
       console.log();
     });
 
     while (true) {
-      const answer = await question('Select a provider (1-5): ');
+      const answer = await question(`Select a provider (1-${PROVIDERS.length}): `);
       const trimmed = answer.trim();
-      
+
       const num = parseInt(trimmed, 10);
-      if (num >= 1 && num <= providers.length) {
-        const selectedProviderName = providers[num - 1].name;
+      if (num >= 1 && num <= PROVIDERS.length) {
+        const selectedProviderName = PROVIDERS[num - 1].name;
         rl.close();
         const provider = createProvider(selectedProviderName);
         if (!provider) {
@@ -293,8 +306,8 @@ async function selectProvider(): Promise<ModelProvider> {
         }
         return provider;
       }
-      
-      console.log(`Invalid selection. Please enter a number between 1 and ${providers.length}.`);
+
+      console.log(`Invalid selection. Please enter a number between 1 and ${PROVIDERS.length}.`);
     }
   } catch (error) {
     rl.close();
@@ -437,33 +450,9 @@ function checkRequiredEnvVars(provider?: string) {
     // Ollama doesn't require an API key - it's local
     // We'll check if the server is running later
   } else {
-    console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai, google, xai, ollama`);
+    const available = PROVIDERS.map(p => p.name).join(', ');
+    console.error(`Error: Unknown provider "${providerName}". Available: ${available}`);
     process.exit(1);
-  }
-}
-
-// Create provider instance based on provider name
-function createProvider(providerName?: string): ModelProvider | undefined {
-  if (!providerName) {
-    return undefined; // Will default to Anthropic
-  }
-  
-  const name = providerName.toLowerCase();
-  switch (name) {
-    case 'anthropic':
-      return new AnthropicProvider();
-    case 'openai':
-      return new OpenAIProvider();
-    case 'google':
-      return new GeminiProvider();
-    case 'xai':
-      return new GrokProvider();
-    case 'ollama':
-      // Use OLLAMA_HOST env var or default to localhost:11434
-      return new OllamaProvider(process.env.OLLAMA_HOST);
-    default:
-      console.error(`Error: Unknown provider "${providerName}". Available: anthropic, openai, google, xai, ollama`);
-      process.exit(1);
   }
 }
 
@@ -543,7 +532,7 @@ async function main() {
 
     // Determine provider early (for env var checks)
     const providerName = args.values['provider'];
-    const provider = createProvider(providerName);
+    const provider = providerName ? createProvider(providerName) : undefined;
 
     // Handle list-models command (needs API key or Ollama server)
     if (args.values['list-models']) {

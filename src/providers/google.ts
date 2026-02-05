@@ -20,6 +20,14 @@ export type ToolExecutor = (
   toolInput: Record<string, any>,
 ) => Promise<ToolExecutionResult>;
 
+// Provider metadata - exported for use by CLI
+export const PROVIDER_INFO = {
+  name: 'google',
+  label: 'Google (Gemini)',
+  defaultModel: 'gemini-2.5-flash',
+  models: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
+};
+
 // Gemini model context window limits (in tokens)
 const GEMINI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'gemini-2.5-flash': 1000000,

@@ -20,6 +20,14 @@ export type ToolExecutor = (
   toolInput: Record<string, any>,
 ) => Promise<ToolExecutionResult>;
 
+// Provider metadata - exported for use by CLI
+export const PROVIDER_INFO = {
+  name: 'openai',
+  label: 'OpenAI (GPT)',
+  defaultModel: 'gpt-5-mini',
+  models: ['gpt-4o', 'gpt-4o-mini', 'gpt-5', 'gpt-5-mini'],
+};
+
 // OpenAI model context window limits (in tokens)
 const OPENAI_MODEL_CONTEXT_WINDOWS: Record<string, number> = {
   'gpt-5': 200000,

@@ -167,11 +167,7 @@ function parsePythonArgs(argsStr: string): Record<string, unknown> {
 }
 import { AttachmentManager, type AttachmentInfo } from '../managers/attachment-manager.js';
 import { PreferencesManager } from '../managers/preferences-manager.js';
-import { AnthropicProvider } from '../providers/anthropic.js';
-import { OpenAIProvider } from '../providers/openai.js';
-import { GeminiProvider } from '../providers/google.js';
-import { OllamaProvider } from '../providers/ollama.js';
-import { GrokProvider } from '../providers/xai.js';
+import { createProvider, PROVIDERS } from '../bin.js';
 import type { ModelInfo, ModelProvider as IModelProvider } from '../model-provider.js';
 import type { ModelProvider } from '../model-provider.js';
 import type { ToolCLI } from './tool-cli.js';
@@ -460,36 +456,9 @@ export class AblationCLI {
     });
     const models: AblationModel[] = [];
 
-    const providers = [
-      {
-        name: 'anthropic',
-        label: 'Anthropic (Claude)',
-        models: [
-          'claude-haiku-4-5-20251001',
-          'claude-sonnet-4-20250514',
-          'claude-opus-4-20250514',
-        ],
-      },
-      {
-        name: 'openai',
-        label: 'OpenAI (GPT)',
-        models: ['gpt-4o', 'gpt-4o-mini', 'gpt-5', 'gpt-5-mini'],
-      },
-      {
-        name: 'google',
-        label: 'Google (Gemini)',
-        models: ['gemini-2.5-flash', 'gemini-2.5-pro', 'gemini-2.0-flash'],
-      },
-      {
-        name: 'ollama',
-        label: 'Ollama (Local)',
-        models: ['llama3.2:3b', 'llama3.1:8b', 'mistral:7b'],
-      },
-    ];
-
     this.logger.log('  Available providers:\n', { type: 'info' });
-    for (let i = 0; i < providers.length; i++) {
-      this.logger.log(`    ${i + 1}. ${providers[i].label}\n`, { type: 'info' });
+    for (let i = 0; i < PROVIDERS.length; i++) {
+      this.logger.log(`    ${i + 1}. ${PROVIDERS[i].label}\n`, { type: 'info' });
     }
 
     const providerSelection = (
@@ -497,11 +466,11 @@ export class AblationCLI {
     ).trim();
     const selectedProviderIndices = this.parseSelection(
       providerSelection,
-      providers.length,
+      PROVIDERS.length,
     );
 
     for (const providerIdx of selectedProviderIndices) {
-      const provider = providers[providerIdx - 1];
+      const provider = PROVIDERS[providerIdx - 1];
       this.logger.log(`\n  Select ${provider.label} models:\n`, {
         type: 'info',
       });
@@ -814,20 +783,12 @@ export class AblationCLI {
    * Create a provider instance from a provider name string
    */
   private createProviderInstance(providerName: string): ModelProvider {
-    switch (providerName.toLowerCase()) {
-      case 'anthropic':
-        return new AnthropicProvider();
-      case 'openai':
-        return new OpenAIProvider();
-      case 'google':
-        return new GeminiProvider();
-      case 'ollama':
-        return new OllamaProvider(process.env.OLLAMA_HOST);
-      case 'xai':
-        return new GrokProvider();
-      default:
-        throw new Error(`Unknown provider: ${providerName}`);
+    const provider = createProvider(providerName);
+    if (!provider) {
+      const available = PROVIDERS.map(p => p.name).join(', ');
+      throw new Error(`Unknown provider: ${providerName}. Available: ${available}`);
     }
+    return provider;
   }
 
   /**
@@ -1702,36 +1663,9 @@ export class AblationCLI {
     const rl = this.callbacks.getReadline();
     if (!rl) return;
 
-    const providers = [
-      {
-        name: 'anthropic',
-        label: 'Anthropic',
-        models: [
-          'claude-haiku-4-5-20251001',
-          'claude-sonnet-4-20250514',
-          'claude-opus-4-20250514',
-        ],
-      },
-      {
-        name: 'openai',
-        label: 'OpenAI',
-        models: ['gpt-4o', 'gpt-4o-mini', 'gpt-5', 'gpt-5-mini'],
-      },
-      {
-        name: 'google',
-        label: 'Google (Gemini)',
-        models: ['gemini-2.5-flash', 'gemini-2.5-pro'],
-      },
-      {
-        name: 'ollama',
-        label: 'Ollama',
-        models: ['llama3.2:3b', 'llama3.1:8b'],
-      },
-    ];
-
     this.logger.log('\n  Select provider:\n', { type: 'info' });
-    for (let i = 0; i < providers.length; i++) {
-      this.logger.log(`    ${i + 1}. ${providers[i].label}\n`, { type: 'info' });
+    for (let i = 0; i < PROVIDERS.length; i++) {
+      this.logger.log(`    ${i + 1}. ${PROVIDERS[i].label}\n`, { type: 'info' });
     }
 
     const providerSelection = (
@@ -1742,13 +1676,13 @@ export class AblationCLI {
     if (
       isNaN(providerIndex) ||
       providerIndex < 0 ||
-      providerIndex >= providers.length
+      providerIndex >= PROVIDERS.length
     ) {
       this.logger.log('\n✗ Invalid selection.\n', { type: 'error' });
       return;
     }
 
-    const provider = providers[providerIndex];
+    const provider = PROVIDERS[providerIndex];
     this.logger.log(`\n  Select ${provider.label} models:\n`, { type: 'info' });
     for (let i = 0; i < provider.models.length; i++) {
       this.logger.log(`    ${i + 1}. ${provider.models[i]}\n`, { type: 'info' });
@@ -2152,28 +2086,12 @@ export class AblationCLI {
         { type: 'info' },
       );
 
-      let provider: IModelProvider;
-      switch (providerName.toLowerCase()) {
-        case 'anthropic':
-          provider = new AnthropicProvider();
-          break;
-        case 'openai':
-          provider = new OpenAIProvider();
-          break;
-        case 'google':
-          provider = new GeminiProvider();
-          break;
-        case 'ollama':
-          provider = new OllamaProvider(process.env.OLLAMA_HOST);
-          break;
-        case 'xai':
-          provider = new GrokProvider();
-          break;
-        default:
-          this.logger.log(`    ✗ Unknown provider: ${providerName}\n`, {
-            type: 'error',
-          });
-          return [];
+      const provider = createProvider(providerName);
+      if (!provider) {
+        this.logger.log(`    ✗ Unknown provider: ${providerName}\n`, {
+          type: 'error',
+        });
+        return [];
       }
 
       const models = await provider.listAvailableModels();
