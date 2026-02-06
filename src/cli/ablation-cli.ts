@@ -175,6 +175,24 @@ import type { PromptCLI } from './prompt-cli.js';
 import type { AttachmentCLI } from './attachment-cli.js';
 
 /**
+ * Format milliseconds as human-readable duration (e.g. "4m 5s", "1h 23m 45s")
+ */
+function formatDuration(ms: number): string {
+  const totalSeconds = Math.floor(ms / 1000);
+  const hours = Math.floor(totalSeconds / 3600);
+  const minutes = Math.floor((totalSeconds % 3600) / 60);
+  const seconds = totalSeconds % 60;
+
+  if (hours > 0) {
+    return `${hours}h ${minutes}m ${seconds}s`;
+  }
+  if (minutes > 0) {
+    return `${minutes}m ${seconds}s`;
+  }
+  return `${seconds}s`;
+}
+
+/**
  * Callbacks for AblationCLI to interact with parent component.
  */
 export interface AblationCLICallbacks {
@@ -873,6 +891,7 @@ export class AblationCLI {
   private async executeAblationCommand(
     command: string,
     maxIterations: number,
+    dryRun: boolean = false,
   ): Promise<void> {
     const trimmedCommand = command.trim();
 
@@ -1040,6 +1059,10 @@ export class AblationCLI {
       }
     } else {
       // Regular query - send to model
+      if (dryRun) {
+        this.logger.log(`    ⚠ Skipping query in dry run (no model): ${trimmedCommand}\n`, { type: 'warning' });
+        return;
+      }
       const pendingAttachments = this.callbacks.getPendingAttachments();
       await this.client.processQuery(
         trimmedCommand,
@@ -1128,29 +1151,42 @@ export class AblationCLI {
     // Display details for each selected ablation
     for (const ablation of selectedAblations) {
       const totalRuns = this.ablationManager.getTotalRuns(ablation);
+      const nameLine = `ABLATION: ${ablation.name}`;
+      const innerWidth = Math.max(
+        nameLine.length,
+        ablation.description ? ablation.description.length : 0,
+        59,
+      );
       this.logger.log(
-        `\n┌─────────────────────────────────────────────────────────────┐\n`,
+        `\n┌──${'─'.repeat(innerWidth)}──┐\n`,
         { type: 'info' },
       );
       this.logger.log(
-        `│  ABLATION: ${ablation.name.padEnd(48)}│\n`,
+        `│  ${nameLine.padEnd(innerWidth)}  │\n`,
         { type: 'info' },
       );
       if (ablation.description) {
         this.logger.log(
-          `│  ${ablation.description.substring(0, 57).padEnd(58)}│\n`,
+          `│  ${ablation.description.padEnd(innerWidth)}  │\n`,
           { type: 'info' },
         );
       }
       this.logger.log(
-        `└─────────────────────────────────────────────────────────────┘\n`,
+        `└──${'─'.repeat(innerWidth)}──┘\n`,
         { type: 'info' },
       );
 
-      this.logger.log(
-        `\n  Matrix: ${ablation.phases.length} phases × ${ablation.models.length} models = ${totalRuns} runs\n`,
-        { type: 'info' },
-      );
+      if (ablation.dryRun) {
+        this.logger.log(
+          `\n  Dry Run: ${ablation.phases.length} phases = ${totalRuns} runs (no model)\n`,
+          { type: 'info' },
+        );
+      } else {
+        this.logger.log(
+          `\n  Matrix: ${ablation.phases.length} phases × ${ablation.models.length} models = ${totalRuns} runs\n`,
+          { type: 'info' },
+        );
+      }
 
       if (ablation.mcpConfigPath) {
         this.logger.log(`  MCP Config: ${ablation.mcpConfigPath}\n`, { type: 'info' });
@@ -1185,7 +1221,7 @@ export class AblationCLI {
           { type: 'info' },
         );
         this.logger.log(
-          `║  BATCH ${i + 1}/${selectedAblations.length}: ${ablation.name.padEnd(43)}║\n`,
+          `║  ${`BATCH ${i + 1}/${selectedAblations.length}: ${ablation.name}`.padEnd(61)}║\n`,
           { type: 'info' },
         );
         this.logger.log(
@@ -1275,6 +1311,21 @@ export class AblationCLI {
    * Display the phase × model matrix for an ablation
    */
   private displayAblationMatrix(ablation: AblationDefinition): void {
+    if (ablation.dryRun) {
+      // Simplified display for dry run - just list phases
+      this.logger.log('\n  ┌─────────────────────┬─────────────┐\n', { type: 'info' });
+      this.logger.log('  │                     │ dry-run     │\n', { type: 'info' });
+      this.logger.log('  ├─────────────────────┼─────────────┤\n', { type: 'info' });
+      for (const phase of ablation.phases) {
+        this.logger.log(
+          `  │ ${phase.name.padEnd(19).substring(0, 19)} │ ${'pending'.padEnd(12)}│\n`,
+          { type: 'info' },
+        );
+      }
+      this.logger.log('  └─────────────────────┴─────────────┘\n', { type: 'info' });
+      return;
+    }
+
     const modelHeaders = ablation.models.map((m) =>
       this.ablationManager.getModelShortName(m),
     );
@@ -1387,6 +1438,11 @@ export class AblationCLI {
     this.callbacks.startKeyboardMonitor();
 
     try {
+    // Determine models to iterate over
+    // In dry run mode, use a single placeholder model (no model switching needed)
+    const dryRunModel: AblationModel = { provider: 'none', model: 'dry-run' };
+    const modelsToRun = ablation.dryRun ? [dryRunModel] : ablation.models;
+
     // Execute each phase × model combination
     for (const phase of ablation.phases) {
       if (shouldBreak) break;
@@ -1402,7 +1458,7 @@ export class AblationCLI {
         phase.name,
       );
 
-      for (const model of ablation.models) {
+      for (const model of modelsToRun) {
         if (shouldBreak) break;
 
         // Check for abort (Ctrl+A or Ctrl+C)
@@ -1413,20 +1469,27 @@ export class AblationCLI {
         }
 
         runNumber++;
-        const modelShortName = this.ablationManager.getModelShortName(model);
+        const modelShortName = ablation.dryRun ? 'dry-run' : this.ablationManager.getModelShortName(model);
 
         this.logger.log(
           `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`,
           { type: 'info' },
         );
-        this.logger.log(
-          `  RUN ${runNumber}/${totalRuns}: ${phase.name} + ${modelShortName}\n`,
-          { type: 'info' },
-        );
-        this.logger.log(
-          `  Provider: ${model.provider} │ Model: ${model.model}\n`,
-          { type: 'info' },
-        );
+        if (ablation.dryRun) {
+          this.logger.log(
+            `  RUN ${runNumber}/${totalRuns}: ${phase.name} (dry run)\n`,
+            { type: 'info' },
+          );
+        } else {
+          this.logger.log(
+            `  RUN ${runNumber}/${totalRuns}: ${phase.name} + ${modelShortName}\n`,
+            { type: 'info' },
+          );
+          this.logger.log(
+            `  Provider: ${model.provider} │ Model: ${model.model}\n`,
+            { type: 'info' },
+          );
+        }
         this.logger.log(
           `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`,
           { type: 'info' },
@@ -1444,9 +1507,11 @@ export class AblationCLI {
         const startTime = Date.now();
 
         try {
-          // Create provider instance and switch to this model
-          const provider = this.createProviderInstance(model.provider);
-          await this.client.switchProviderAndModel(provider, model.model);
+          // Create provider instance and switch to this model (skip in dry run)
+          if (!ablation.dryRun) {
+            const provider = this.createProviderInstance(model.provider);
+            await this.client.switchProviderAndModel(provider, model.model);
+          }
 
           // Execute commands for this phase
           let aborted = false;
@@ -1467,6 +1532,7 @@ export class AblationCLI {
             await this.executeAblationCommand(
               command,
               ablation.settings.maxIterations,
+              ablation.dryRun || false,
             );
 
             // Check for abort after each command
@@ -1479,19 +1545,45 @@ export class AblationCLI {
           }
 
           if (aborted) {
+            // Stop any active video recording so the file is finalized before capture
+            await this.client.cleanupVideoRecording();
+
             result.status = 'aborted';
             result.duration = Date.now() - startTime;
+            result.durationFormatted = formatDuration(result.duration);
+
+            // Capture any outputs written before abort (including video files)
+            const capturedCount = this.ablationManager.captureRunOutputs(
+              runDir,
+              phase.name,
+              model,
+            );
+            if (capturedCount > 0) {
+              this.logger.log(`  📁 Captured ${capturedCount} output files\n`, {
+                type: 'info',
+              });
+            }
+
             run.results.push(result);
             break;
           }
 
-          // Get token usage
-          const tokenUsage = this.client.getTokenUsage();
-          result.tokens = tokenUsage.current;
+          // Get token usage (skip in dry run - no model means no tokens)
+          if (!ablation.dryRun) {
+            const tokenUsage = this.client.getTokenUsage();
+            result.tokens = tokenUsage.current;
+          }
 
           result.status = 'completed';
           result.duration = Date.now() - startTime;
-          result.chatFile = `chats/${phase.name}/${this.ablationManager.getChatFileName(model)}`;
+          result.durationFormatted = formatDuration(result.duration);
+
+          if (!ablation.dryRun) {
+            result.chatFile = `chats/${phase.name}/${this.ablationManager.getChatFileName(model)}`;
+          }
+
+          // Stop any active video recording so the file is finalized before capture
+          await this.client.cleanupVideoRecording();
 
           // Capture outputs written during this run
           const capturedCount = this.ablationManager.captureRunOutputs(
@@ -1505,20 +1597,26 @@ export class AblationCLI {
             });
           }
 
-          // Save chat history to phase directory
-          const chatHistoryManager = this.client.getChatHistoryManager();
-          chatHistoryManager.endSession(
-            `Ablation run: ${phase.name} with ${model.provider}/${model.model}`,
-          );
+          // Save chat history to phase directory (skip in dry run)
+          if (!ablation.dryRun) {
+            const chatHistoryManager = this.client.getChatHistoryManager();
+            chatHistoryManager.endSession(
+              `Ablation run: ${phase.name} with ${model.provider}/${model.model}`,
+            );
+          }
 
           this.logger.log(
-            `\n  ✓ Scenario complete │ Duration: ${(result.duration / 1000).toFixed(1)}s │ Tokens: ${result.tokens}\n`,
+            `\n  ✓ Scenario complete │ Duration: ${formatDuration(result.duration)}${result.tokens !== undefined ? ` │ Tokens: ${result.tokens}` : ''}\n`,
             { type: 'success' },
           );
         } catch (error: any) {
           result.status = 'failed';
           result.error = error.message;
           result.duration = Date.now() - startTime;
+          result.durationFormatted = formatDuration(result.duration);
+
+          // Stop any active video recording so the file is finalized before capture
+          await this.client.cleanupVideoRecording();
 
           // Still capture any outputs that were written before failure
           const capturedCount = this.ablationManager.captureRunOutputs(
@@ -1557,27 +1655,33 @@ export class AblationCLI {
 
       // Disable abort mode - Ctrl+C will exit normally again
       this.callbacks.setAbortMode(false);
+
+      // Stop any active video recordings (prevents orphaned recording processes on abort)
+      await this.client.cleanupVideoRecording();
     }
 
     // Finalize run
     run.completedAt = new Date().toISOString();
     run.totalDuration = Date.now() - totalStartTime;
+    run.totalDurationFormatted = formatDuration(run.totalDuration);
     run.totalTokens = run.results.reduce((sum, r) => sum + (r.tokens || 0), 0);
 
     // Save results
     this.ablationManager.saveRunResults(runDir, run);
 
     // Display summary
+    const completeLine = `ABLATION COMPLETE: ${ablation.name}`;
+    const completeWidth = Math.max(completeLine.length, 59);
     this.logger.log(
-      `\n┌─────────────────────────────────────────────────────────────┐\n`,
+      `\n┌──${'─'.repeat(completeWidth)}──┐\n`,
       { type: 'info' },
     );
     this.logger.log(
-      `│  ABLATION COMPLETE: ${ablation.name.padEnd(38)}│\n`,
+      `│  ${completeLine.padEnd(completeWidth)}  │\n`,
       { type: 'info' },
     );
     this.logger.log(
-      `└─────────────────────────────────────────────────────────────┘\n`,
+      `└──${'─'.repeat(completeWidth)}──┘\n`,
       { type: 'info' },
     );
 
@@ -1597,7 +1701,7 @@ export class AblationCLI {
       this.logger.log(`    Aborted: ${abortedRuns}\n`, { type: 'warning' });
     }
     this.logger.log(
-      `    Total time: ${(run.totalDuration / 1000).toFixed(1)}s\n`,
+      `    Total time: ${formatDuration(run.totalDuration)}\n`,
       { type: 'info' },
     );
     this.logger.log(`\n  Outputs saved to:\n`, { type: 'info' });
@@ -1740,7 +1844,7 @@ export class AblationCLI {
       ).length;
       const totalCount = run.results.length;
       const duration = run.totalDuration
-        ? `${(run.totalDuration / 1000).toFixed(1)}s`
+        ? formatDuration(run.totalDuration)
         : 'N/A';
 
       this.logger.log(`  ${i + 1}. ${timestamp}\n`, { type: 'info' });
@@ -1785,7 +1889,7 @@ export class AblationCLI {
       type: 'info',
     });
     this.logger.log(
-      `  Total Duration: ${run.totalDuration ? (run.totalDuration / 1000).toFixed(1) + 's' : 'N/A'}\n`,
+      `  Total Duration: ${run.totalDuration ? formatDuration(run.totalDuration) : 'N/A'}\n`,
       { type: 'info' },
     );
 
@@ -1799,7 +1903,7 @@ export class AblationCLI {
             ? '✗'
             : '○';
       const duration = result.duration
-        ? `${(result.duration / 1000).toFixed(1)}s`
+        ? formatDuration(result.duration)
         : 'N/A';
       const modelShort = this.ablationManager.getModelShortName(result.model);
 

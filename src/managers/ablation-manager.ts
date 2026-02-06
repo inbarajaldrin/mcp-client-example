@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, cpSync, rmSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, rmdirSync, unlinkSync, statSync, cpSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { Logger } from '../logger.js';
@@ -34,6 +34,7 @@ export interface AblationDefinition {
   description: string;
   created: string;
   updated?: string;
+  dryRun?: boolean;        // When true, skip model switching - execute tool calls directly
   phases: AblationPhase[];
   models: AblationModel[];
   settings: AblationSettings;
@@ -46,6 +47,7 @@ export interface AblationRunResult {
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'aborted';
   tokens?: number;
   duration?: number; // milliseconds
+  durationFormatted?: string; // human-readable (e.g. "4m 5s")
   chatFile?: string;
   error?: string;
 }
@@ -57,6 +59,7 @@ export interface AblationRun {
   results: AblationRunResult[];
   totalTokens?: number;
   totalDuration?: number;
+  totalDurationFormatted?: string; // human-readable (e.g. "1h 23m 45s")
 }
 
 // ==================== Manager ====================
@@ -330,6 +333,9 @@ export class AblationManager {
    * Get total number of runs for an ablation (phases × models)
    */
   getTotalRuns(ablation: AblationDefinition): number {
+    if (ablation.dryRun) {
+      return ablation.phases.length;
+    }
     return ablation.phases.length * ablation.models.length;
   }
 
@@ -632,13 +638,16 @@ export class AblationManager {
       const currentItems = this.getDirectoryContents(OUTPUTS_DIR);
       const snapshotItems = existsSync(snapshotDir) && !existsSync(join(snapshotDir, '.empty'))
         ? this.getDirectoryContents(snapshotDir)
-        : new Map<string, { size: number; mtime: number }>();
+        : new Map<string, { size: number }>();
 
       // Find new or modified items
+      // NOTE: We only compare by path existence and file size, NOT mtime.
+      // cpSync does not preserve mtimes, so restored files get new mtimes
+      // that would incorrectly appear as "modified" when compared to snapshot.
       const newItems: string[] = [];
       for (const [relativePath, stats] of currentItems) {
         const snapshotStats = snapshotItems.get(relativePath);
-        if (!snapshotStats || stats.size !== snapshotStats.size || stats.mtime > snapshotStats.mtime) {
+        if (!snapshotStats || stats.size !== snapshotStats.size) {
           newItems.push(relativePath);
         }
       }
@@ -650,20 +659,14 @@ export class AblationManager {
       // Create run outputs directory
       mkdirSync(runOutputsDir, { recursive: true });
 
-      // Copy new/modified items to run outputs
+      // Copy new/modified files to run outputs
       for (const relativePath of newItems) {
         const sourcePath = join(OUTPUTS_DIR, relativePath);
         const destPath = join(runOutputsDir, relativePath);
 
         // Ensure parent directory exists
         mkdirSync(dirname(destPath), { recursive: true });
-
-        const stats = statSync(sourcePath);
-        if (stats.isDirectory()) {
-          cpSync(sourcePath, destPath, { recursive: true });
-        } else {
-          cpSync(sourcePath, destPath);
-        }
+        cpSync(sourcePath, destPath);
       }
 
       return newItems.length;
@@ -674,11 +677,11 @@ export class AblationManager {
   }
 
   /**
-   * Get all files/folders in a directory with their stats
-   * Returns a map of relative paths to {size, mtime}
+   * Get all files in a directory recursively with their sizes
+   * Returns a map of relative paths to {size} (directories are traversed but not included)
    */
-  private getDirectoryContents(dir: string, basePath: string = ''): Map<string, { size: number; mtime: number }> {
-    const contents = new Map<string, { size: number; mtime: number }>();
+  private getDirectoryContents(dir: string, basePath: string = ''): Map<string, { size: number }> {
+    const contents = new Map<string, { size: number }>();
 
     try {
       const items = readdirSync(dir);
@@ -687,17 +690,16 @@ export class AblationManager {
         const relativePath = basePath ? join(basePath, item) : item;
         const stats = statSync(fullPath);
 
-        contents.set(relativePath, {
-          size: stats.size,
-          mtime: stats.mtimeMs
-        });
-
         if (stats.isDirectory()) {
-          // Recursively get contents of subdirectories
+          // Recursively get contents of subdirectories (skip directory entries themselves)
           const subContents = this.getDirectoryContents(fullPath, relativePath);
           for (const [subPath, subStats] of subContents) {
             contents.set(subPath, subStats);
           }
+        } else {
+          contents.set(relativePath, {
+            size: stats.size
+          });
         }
       }
     } catch (error) {
@@ -730,8 +732,36 @@ export class AblationManager {
           mkdirSync(OUTPUTS_DIR, { recursive: true });
         }
       }
+
+      // Remove the _initial snapshot from the run directory — it was only needed during the run
+      if (existsSync(snapshotDir)) {
+        rmSync(snapshotDir, { recursive: true, force: true });
+      }
+
+      // Remove any empty directories left in the run folder
+      this.removeEmptyDirs(runDir);
     } catch (error) {
       this.logger.log(`Failed to cleanup outputs snapshot: ${error}\n`, { type: 'error' });
+    }
+  }
+
+  /**
+   * Recursively remove empty directories within a path.
+   * Walks bottom-up so nested empty dirs are cleaned first.
+   */
+  private removeEmptyDirs(dir: string): void {
+    if (!existsSync(dir) || !statSync(dir).isDirectory()) return;
+
+    for (const item of readdirSync(dir)) {
+      const fullPath = join(dir, item);
+      if (statSync(fullPath).isDirectory()) {
+        this.removeEmptyDirs(fullPath);
+      }
+    }
+
+    // After cleaning children, remove this dir if now empty (but never the run root)
+    if (readdirSync(dir).length === 0) {
+      rmdirSync(dir);
     }
   }
 
