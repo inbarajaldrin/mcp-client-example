@@ -179,8 +179,8 @@ export class ChatHistoryManager {
   /**
    * Start a new chat session
    */
-  startSession(model: string, servers: string[], tools?: Array<{ name: string; description: string; input_schema?: { type: 'object'; properties?: Record<string, any>; required?: string[] } }>): string {
-    const sessionId = this.generateSessionId();
+  startSession(model: string, servers: string[], tools?: Array<{ name: string; description: string; input_schema?: { type: 'object'; properties?: Record<string, any>; required?: string[] } }>, resumeSessionId?: string): string {
+    const sessionId = resumeSessionId || this.generateSessionId();
     const now = new Date();
 
     this.currentSession = {
@@ -200,7 +200,9 @@ export class ChatHistoryManager {
     this.sessionStartTime = now;
     this.toolUseCount = 0;
 
-    this.logger.log(`Started chat session: ${sessionId}\n`, { type: 'info' });
+    if (!resumeSessionId) {
+      this.logger.log(`Started chat session: ${sessionId}\n`, { type: 'info' });
+    }
     return sessionId;
   }
 
@@ -651,6 +653,39 @@ export class ChatHistoryManager {
     this.currentSession = null;
     this.sessionStartTime = null;
     this.toolUseCount = 0;
+  }
+
+  /**
+   * Pause the current session without saving to disk.
+   * Returns the session state so it can be resumed later.
+   */
+  pauseSession(): { session: ChatSession; startTime: Date; toolUseCount: number } | null {
+    if (!this.currentSession || !this.sessionStartTime) {
+      return null;
+    }
+
+    const state = {
+      session: this.currentSession,
+      startTime: this.sessionStartTime,
+      toolUseCount: this.toolUseCount,
+    };
+
+    // Clear without saving
+    this.currentSession = null;
+    this.sessionStartTime = null;
+    this.toolUseCount = 0;
+
+    return state;
+  }
+
+  /**
+   * Resume a previously paused session.
+   * Restores the full session state including all messages and metadata.
+   */
+  resumeSession(state: { session: ChatSession; startTime: Date; toolUseCount: number }): void {
+    this.currentSession = state.session;
+    this.sessionStartTime = state.startTime;
+    this.toolUseCount = state.toolUseCount;
   }
 
   /**

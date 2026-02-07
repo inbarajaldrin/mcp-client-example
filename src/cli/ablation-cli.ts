@@ -3,6 +3,8 @@
  */
 
 import readline from 'readline/promises';
+import { cpSync, existsSync } from 'fs';
+import { join } from 'path';
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { MCPClient } from '../index.js';
 import { Logger } from '../logger.js';
@@ -13,6 +15,11 @@ import {
   type AblationModel,
   type AblationRun,
   type AblationRunResult,
+  type AblationCommandResult,
+  type ToolExecLogEntry,
+  type PostToolHook,
+  type AblationArgument,
+  type AblationArgumentType,
 } from '../managers/ablation-manager.js';
 
 // ==================== Tool Schema Types ====================
@@ -411,9 +418,11 @@ export class AblationCLI {
       }
     }
 
-    // Step 3: MCP Config Path
-    this.logger.log('\nStep 3: MCP Config\n', { type: 'info' });
-    this.logger.log('  Use a custom MCP config file for this ablation.\n', { type: 'info' });
+    // Step 3: Settings
+    this.logger.log('\nStep 3: Settings\n', { type: 'info' });
+
+    // MCP Config Path
+    this.logger.log('  MCP config file for this ablation.\n', { type: 'info' });
     this.logger.log('  Supports relative paths (from project root) or absolute paths.\n', { type: 'info' });
     this.logger.log('  Leave empty to use the default.\n', { type: 'info' });
 
@@ -442,6 +451,24 @@ export class AblationCLI {
     } else {
       this.logger.log(`  ✓ Using default: ${defaultMcpConfigPath}\n`, { type: 'info' });
     }
+
+    // Max Iterations
+    this.logger.log('\n  Max iterations controls how many agent turns the model can take\n', { type: 'info' });
+    this.logger.log('  per phase run. Use -1 for unlimited, or a positive number to cap it.\n', { type: 'info' });
+    const defaultMaxIterations = this.preferencesManager.getMaxIterations();
+    const maxIterationsStr = (
+      await rl.question(
+        `  Max iterations per run (default ${defaultMaxIterations}): `,
+      )
+    ).trim();
+    const maxIterations = maxIterationsStr
+      ? parseInt(maxIterationsStr) || defaultMaxIterations
+      : defaultMaxIterations;
+
+    const runsStr = (
+      await rl.question('  Number of repeat runs (default 1): ')
+    ).trim();
+    const runs = runsStr ? parseInt(runsStr) || 1 : 1;
 
     // Step 4: Define Phases
     this.logger.log('\nStep 4: Define Phases (command sequences)\n', {
@@ -585,6 +612,9 @@ export class AblationCLI {
           // If it's a command, execute it to show the output
           if (input.startsWith('/')) {
             await this.executeAblationPreviewCommand(input);
+          } else if (input.match(/^@wait:\d+(?:\.\d+)?$/)) {
+            const seconds = parseFloat(input.slice('@wait:'.length));
+            this.logger.log(`    ℹ️  Wait: ${seconds}s pause before next command\n`, { type: 'info' });
           } else if (input.startsWith('@tool:') || input.startsWith('@tool-exec:')) {
             // Validate tool call syntax during creation
             const parsed = parseDirectToolCall(input);
@@ -625,18 +655,227 @@ export class AblationCLI {
       }
     }
 
-    // Step 5: Settings
-    this.logger.log('\nStep 5: Settings\n', { type: 'info' });
+    // Step 5: Dynamic Arguments (auto-detected from {{placeholders}})
+    const tempAblation: AblationDefinition = {
+      name: '', description: '', created: '', phases, models: [], settings: { maxIterations: 0 },
+    };
+    const detectedPlaceholders = this.ablationManager.extractPlaceholders(tempAblation);
+    const ablationArguments: AblationArgument[] = [];
 
-    const defaultMaxIterations = this.preferencesManager.getMaxIterations();
-    const maxIterationsStr = (
-      await rl.question(
-        `  Max iterations per run (default ${defaultMaxIterations}): `,
-      )
-    ).trim();
-    const maxIterations = maxIterationsStr
-      ? parseInt(maxIterationsStr) || defaultMaxIterations
-      : defaultMaxIterations;
+    if (detectedPlaceholders.length > 0) {
+      this.logger.log('\nStep 5: Dynamic Arguments\n', { type: 'info' });
+      this.logger.log(`  Detected {{placeholders}} in commands: ${detectedPlaceholders.map(p => `{{${p}}}`).join(', ')}\n`, { type: 'info' });
+      this.logger.log('  Define how each placeholder should be resolved at runtime.\n', { type: 'info' });
+
+      for (const name of detectedPlaceholders) {
+        this.logger.log(`\n  Argument: {{${name}}}\n`, { type: 'info' });
+
+        const argDescription = (
+          await rl.question('    Description (optional): ')
+        ).trim();
+
+        this.logger.log('    Type:\n', { type: 'info' });
+        this.logger.log('      1. string - Text input\n', { type: 'info' });
+        this.logger.log('      2. attachment - File picker\n', { type: 'info' });
+        const typeChoice = (
+          await rl.question('    Select type (1): ')
+        ).trim();
+        const argType: AblationArgumentType = typeChoice === '2' ? 'attachment' : 'string';
+
+        const requiredInput = (
+          await rl.question('    Required? (Y/n): ')
+        ).trim().toLowerCase();
+        const argRequired = requiredInput !== 'n' && requiredInput !== 'no';
+
+        let argDefault: string | undefined;
+        if (!argRequired) {
+          argDefault = (
+            await rl.question('    Default value (optional): ')
+          ).trim() || undefined;
+        }
+
+        const arg: AblationArgument = { name, type: argType };
+        if (argDescription) arg.description = argDescription;
+        if (!argRequired) arg.required = false;
+        if (argDefault) arg.default = argDefault;
+
+        ablationArguments.push(arg);
+        this.logger.log(`    ✓ Defined: {{${name}}} (${argType}${argRequired ? ', required' : ''}${argDefault ? `, default: ${argDefault}` : ''})\n`, { type: 'success' });
+      }
+    } else {
+      const defineArgs = (
+        await rl.question('\nStep 5: Define dynamic arguments? (y/N): ')
+      ).trim().toLowerCase();
+
+      if (defineArgs === 'y' || defineArgs === 'yes') {
+        this.logger.log('  Use {{name}} syntax in commands to reference these arguments.\n', { type: 'info' });
+        while (true) {
+          const argName = (
+            await rl.question('\n  Argument name (empty to finish): ')
+          ).trim();
+          if (!argName) break;
+
+          const argDescription = (
+            await rl.question('    Description (optional): ')
+          ).trim();
+
+          this.logger.log('    Type:\n', { type: 'info' });
+          this.logger.log('      1. string - Text input\n', { type: 'info' });
+          this.logger.log('      2. attachment - File picker\n', { type: 'info' });
+          const typeChoice = (
+            await rl.question('    Select type (1): ')
+          ).trim();
+          const argType: AblationArgumentType = typeChoice === '2' ? 'attachment' : 'string';
+
+          const requiredInput = (
+            await rl.question('    Required? (Y/n): ')
+          ).trim().toLowerCase();
+          const argRequired = requiredInput !== 'n' && requiredInput !== 'no';
+
+          let argDefault: string | undefined;
+          if (!argRequired) {
+            argDefault = (
+              await rl.question('    Default value (optional): ')
+            ).trim() || undefined;
+          }
+
+          const arg: AblationArgument = { name: argName, type: argType };
+          if (argDescription) arg.description = argDescription;
+          if (!argRequired) arg.required = false;
+          if (argDefault) arg.default = argDefault;
+
+          ablationArguments.push(arg);
+          this.logger.log(`    ✓ Defined: {{${argName}}} (${argType}${argRequired ? ', required' : ''}${argDefault ? `, default: ${argDefault}` : ''})\n`, { type: 'success' });
+        }
+      }
+    }
+
+    // Validate arguments against commands
+    if (ablationArguments.length > 0) {
+      tempAblation.arguments = ablationArguments;
+      const warnings = this.ablationManager.validateArguments(tempAblation);
+      for (const warning of warnings) {
+        this.logger.log(`  ⚠ ${warning}\n`, { type: 'warning' });
+      }
+    }
+
+    // Step 6: Post-Tool Hooks (optional)
+    this.logger.log('\nStep 6: Post-Tool Hooks (optional)\n', { type: 'info' });
+    this.logger.log('  Automatically run a command after a specific tool call.\n', { type: 'info' });
+
+    const topLevelHooks: PostToolHook[] = [];
+    const phaseHooksMap = new Map<string, PostToolHook[]>();
+
+    const addHooks = (
+      await rl.question('  Add post-tool hooks? (y/N): ')
+    ).trim().toLowerCase();
+
+    if (addHooks === 'y' || addHooks === 'yes') {
+      while (true) {
+        const afterTool = (
+          await rl.question('  Tool name to watch (e.g. ros-mcp-server__verify_assembly): ')
+        ).trim();
+        if (!afterTool) break;
+
+        const runCmd = (
+          await rl.question('  Command to run after (e.g. @tool-exec:server__tool(arg=\'val\')): ')
+        ).trim();
+        if (!runCmd) break;
+
+        // Ask where to apply
+        this.logger.log('  Apply to:\n', { type: 'info' });
+        this.logger.log('    1. All phases\n', { type: 'info' });
+        for (let i = 0; i < phases.length; i++) {
+          this.logger.log(`    ${i + 2}. Phase: ${phases[i].name}\n`, { type: 'info' });
+        }
+
+        const scopeStr = (
+          await rl.question('  Select scope: ')
+        ).trim();
+        const scopeIdx = parseInt(scopeStr);
+
+        if (scopeIdx === 1) {
+          topLevelHooks.push({ after: afterTool, run: runCmd });
+          this.logger.log(`  ✓ Hook added (all phases): after ${afterTool}\n`, { type: 'success' });
+        } else if (scopeIdx >= 2 && scopeIdx <= phases.length + 1) {
+          const targetPhase = phases[scopeIdx - 2].name;
+          const existing = phaseHooksMap.get(targetPhase) || [];
+          existing.push({ after: afterTool, run: runCmd });
+          phaseHooksMap.set(targetPhase, existing);
+          this.logger.log(`  ✓ Hook added (phase: ${targetPhase}): after ${afterTool}\n`, { type: 'success' });
+        } else {
+          this.logger.log('  ✗ Invalid selection, skipping hook.\n', { type: 'error' });
+          continue;
+        }
+
+        const addMore = (
+          await rl.question('  Add another hook? (y/N): ')
+        ).trim().toLowerCase();
+        if (addMore !== 'y' && addMore !== 'yes') break;
+      }
+    }
+
+    // Apply phase-level hooks to phase objects
+    for (const phase of phases) {
+      const phaseHooks = phaseHooksMap.get(phase.name);
+      if (phaseHooks && phaseHooks.length > 0) {
+        phase.hooks = phaseHooks;
+      }
+    }
+
+    // Step 7: Phase Lifecycle Hooks (optional)
+    this.logger.log('\nStep 7: Phase Lifecycle Hooks (optional)\n', { type: 'info' });
+    this.logger.log('  Run commands at the start/end of each phase (e.g., capture camera image).\n', { type: 'info' });
+
+    const addLifecycle = (
+      await rl.question('  Add phase lifecycle hooks (onStart/onEnd)? (y/N): ')
+    ).trim().toLowerCase();
+
+    if (addLifecycle === 'y' || addLifecycle === 'yes') {
+      for (const phase of phases) {
+        this.logger.log(`\n  Phase: ${phase.name}\n`, { type: 'info' });
+
+        // onStart hooks
+        const addOnStart = (
+          await rl.question('    Add onStart commands? (y/N): ')
+        ).trim().toLowerCase();
+
+        if (addOnStart === 'y' || addOnStart === 'yes') {
+          const onStartCmds: string[] = [];
+          while (true) {
+            const cmd = (
+              await rl.question('    onStart command (empty to finish): ')
+            ).trim();
+            if (!cmd) break;
+            onStartCmds.push(cmd);
+            this.logger.log(`    ✓ Added onStart: ${cmd}\n`, { type: 'success' });
+          }
+          if (onStartCmds.length > 0) {
+            phase.onStart = onStartCmds;
+          }
+        }
+
+        // onEnd hooks
+        const addOnEnd = (
+          await rl.question('    Add onEnd commands? (y/N): ')
+        ).trim().toLowerCase();
+
+        if (addOnEnd === 'y' || addOnEnd === 'yes') {
+          const onEndCmds: string[] = [];
+          while (true) {
+            const cmd = (
+              await rl.question('    onEnd command (empty to finish): ')
+            ).trim();
+            if (!cmd) break;
+            onEndCmds.push(cmd);
+            this.logger.log(`    ✓ Added onEnd: ${cmd}\n`, { type: 'success' });
+          }
+          if (onEndCmds.length > 0) {
+            phase.onEnd = onEndCmds;
+          }
+        }
+      }
+    }
 
     // Create the ablation
     try {
@@ -646,9 +885,12 @@ export class AblationCLI {
         phases,
         models,
         settings: {
+          mcpConfigPath,
           maxIterations,
         },
-        mcpConfigPath,
+        ...(runs > 1 ? { runs } : {}),
+        ...(ablationArguments.length > 0 ? { arguments: ablationArguments } : {}),
+        ...(topLevelHooks.length > 0 ? { hooks: topLevelHooks } : {}),
       });
 
       // Display summary
@@ -676,13 +918,54 @@ export class AblationCLI {
           type: 'info',
         });
       }
+      const createRunsInfo = (ablation.runs ?? 1) > 1 ? ` × ${ablation.runs} runs` : '';
       this.logger.log(
-        `\n  Total runs: ${this.ablationManager.getTotalRuns(ablation)} (${ablation.phases.length} phases × ${ablation.models.length} models)\n`,
+        `\n  Total runs: ${this.ablationManager.getTotalRuns(ablation)} (${ablation.phases.length} phases × ${ablation.models.length} models${createRunsInfo})\n`,
         { type: 'info' },
       );
 
-      if (ablation.mcpConfigPath) {
-        this.logger.log(`\n  MCP Config: ${ablation.mcpConfigPath}\n`, { type: 'info' });
+      if (ablation.settings.mcpConfigPath) {
+        this.logger.log(`\n  MCP Config: ${ablation.settings.mcpConfigPath}\n`, { type: 'info' });
+      }
+
+      // Show arguments summary
+      if (ablation.arguments && ablation.arguments.length > 0) {
+        this.logger.log(`\n  Arguments: ${ablation.arguments.length}\n`, { type: 'info' });
+        for (const arg of ablation.arguments) {
+          const required = arg.required !== false ? 'required' : 'optional';
+          const defaultStr = arg.default ? `, default: ${arg.default}` : '';
+          this.logger.log(`    • {{${arg.name}}} (${arg.type}, ${required}${defaultStr})${arg.description ? ` - ${arg.description}` : ''}\n`, { type: 'info' });
+        }
+      }
+
+      // Show hooks summary
+      const totalHooks = (ablation.hooks?.length ?? 0)
+        + ablation.phases.reduce((sum, p) => sum + (p.hooks?.length ?? 0), 0);
+      if (totalHooks > 0) {
+        this.logger.log(`\n  Post-tool hooks: ${totalHooks}\n`, { type: 'info' });
+        for (const hook of (ablation.hooks ?? [])) {
+          this.logger.log(`    • [all phases] after ${hook.after} → ${hook.run}\n`, { type: 'info' });
+        }
+        for (const phase of ablation.phases) {
+          for (const hook of (phase.hooks ?? [])) {
+            this.logger.log(`    • [${phase.name}] after ${hook.after} → ${hook.run}\n`, { type: 'info' });
+          }
+        }
+      }
+
+      // Show lifecycle hooks summary
+      const totalOnStart = ablation.phases.reduce((sum, p) => sum + (p.onStart?.length ?? 0), 0);
+      const totalOnEnd = ablation.phases.reduce((sum, p) => sum + (p.onEnd?.length ?? 0), 0);
+      if (totalOnStart > 0 || totalOnEnd > 0) {
+        this.logger.log(`\n  Lifecycle hooks: ${totalOnStart} onStart, ${totalOnEnd} onEnd\n`, { type: 'info' });
+        for (const phase of ablation.phases) {
+          for (const cmd of (phase.onStart ?? [])) {
+            this.logger.log(`    • [${phase.name}] onStart → ${cmd}\n`, { type: 'info' });
+          }
+          for (const cmd of (phase.onEnd ?? [])) {
+            this.logger.log(`    • [${phase.name}] onEnd → ${cmd}\n`, { type: 'info' });
+          }
+        }
       }
 
       this.logger.log(
@@ -733,9 +1016,12 @@ export class AblationCLI {
       if (ablation.description) {
         this.logger.log(`     ${ablation.description}\n`, { type: 'info' });
       }
-      let infoLine = `     └─ ${ablation.phases.length} phases × ${ablation.models.length} models = ${totalRuns} runs │ ${providers.join(', ')} │ Created: ${createdDate}`;
-      if (ablation.mcpConfigPath) {
-        infoLine += ` │ MCP: ${ablation.mcpConfigPath}`;
+      const runsInfo = (ablation.runs ?? 1) > 1 ? ` × ${ablation.runs} runs` : '';
+      const argsCount = ablation.arguments?.length ?? 0;
+      const argsInfo = argsCount > 0 ? ` │ ${argsCount} arg${argsCount > 1 ? 's' : ''}` : '';
+      let infoLine = `     └─ ${ablation.phases.length} phases × ${ablation.models.length} models${runsInfo} = ${totalRuns} runs${argsInfo} │ ${providers.join(', ')} │ Created: ${createdDate}`;
+      if (ablation.settings.mcpConfigPath) {
+        infoLine += ` │ MCP: ${ablation.settings.mcpConfigPath}`;
       }
       this.logger.log(`${infoLine}\n`, { type: 'info' });
     }
@@ -810,8 +1096,11 @@ export class AblationCLI {
       }
 
       this.logger.log(`\n  Editing: ${ablation.name}\n`, { type: 'info' });
-      if (currentAblation.mcpConfigPath) {
-        this.logger.log(`  MCP Config: ${currentAblation.mcpConfigPath}\n`, { type: 'info' });
+      if (currentAblation.settings.mcpConfigPath) {
+        this.logger.log(`  MCP Config: ${currentAblation.settings.mcpConfigPath}\n`, { type: 'info' });
+      }
+      if (currentAblation.arguments && currentAblation.arguments.length > 0) {
+        this.logger.log(`  Arguments: ${currentAblation.arguments.length} (${currentAblation.arguments.map(a => `{{${a.name}}}`).join(', ')})\n`, { type: 'info' });
       }
       this.logger.log('\n  What do you want to edit?\n', { type: 'info' });
       this.logger.log('    1. Add phase\n', { type: 'info' });
@@ -822,7 +1111,9 @@ export class AblationCLI {
       this.logger.log('    6. Edit settings\n', { type: 'info' });
       this.logger.log('    7. Edit description\n', { type: 'info' });
       this.logger.log('    8. Edit MCP config path\n', { type: 'info' });
-      this.logger.log('    9. Done\n', { type: 'info' });
+      this.logger.log('    9. Edit hooks\n', { type: 'info' });
+      this.logger.log('   10. Edit arguments\n', { type: 'info' });
+      this.logger.log('   11. Done\n', { type: 'info' });
 
       const choice = (await rl.question('\n  Select option: ')).trim();
 
@@ -851,17 +1142,24 @@ export class AblationCLI {
         case '8': // Edit MCP config path
           await this.handleEditMcpConfigPath(ablation.name);
           break;
-        case '9': // Done
+        case '9': // Edit hooks
+          await this.handleEditHooks(ablation.name);
+          break;
+        case '10': // Edit arguments
+          await this.handleEditArguments(ablation.name);
+          break;
+        case '11': // Done
         case 'q':
           const updated = this.ablationManager.load(ablation.name);
           if (updated) {
             this.logger.log(`\n  Updated ablation:\n`, { type: 'info' });
+            const editRunsInfo = (updated.runs ?? 1) > 1 ? `, Repeat runs: ${updated.runs}` : '';
             this.logger.log(
-              `  Phases: ${updated.phases.length}, Models: ${updated.models.length}, Total runs: ${this.ablationManager.getTotalRuns(updated)}\n`,
+              `  Phases: ${updated.phases.length}, Models: ${updated.models.length}, Total runs: ${this.ablationManager.getTotalRuns(updated)}${editRunsInfo}\n`,
               { type: 'info' },
             );
-            if (updated.mcpConfigPath) {
-              this.logger.log(`  MCP Config: ${updated.mcpConfigPath}\n`, { type: 'info' });
+            if (updated.settings.mcpConfigPath) {
+              this.logger.log(`  MCP Config: ${updated.settings.mcpConfigPath}\n`, { type: 'info' });
             }
           }
           this.logger.log('\n✓ Changes saved.\n', { type: 'success' });
@@ -892,7 +1190,7 @@ export class AblationCLI {
     command: string,
     maxIterations: number,
     dryRun: boolean = false,
-  ): Promise<void> {
+  ): Promise<AblationCommandResult> {
     const trimmedCommand = command.trim();
 
     // Handle direct tool calls (@tool: or @tool-exec:)
@@ -925,12 +1223,26 @@ export class AblationCLI {
           await this.client.injectToolResult(parsed.toolName, parsed.args, result);
           this.logger.log(`    Result injected into conversation context\n`, { type: 'info' });
         }
+
+        return {
+          toolExecResult: {
+            toolName: parsed.toolName,
+            args: parsed.args,
+            displayText: result.displayText,
+            success: true,
+          },
+        };
       } catch (error: any) {
         this.logger.log(`    Tool execution failed: ${error.message}\n`, { type: 'error' });
-        throw error;
+        throw Object.assign(error, {
+          _toolExecResult: {
+            toolName: parsed.toolName,
+            args: parsed.args,
+            success: false,
+            error: error.message,
+          },
+        });
       }
-
-      return;
     }
 
     // Handle slash commands
@@ -1061,7 +1373,7 @@ export class AblationCLI {
       // Regular query - send to model
       if (dryRun) {
         this.logger.log(`    ⚠ Skipping query in dry run (no model): ${trimmedCommand}\n`, { type: 'warning' });
-        return;
+        return {};
       }
       const pendingAttachments = this.callbacks.getPendingAttachments();
       await this.client.processQuery(
@@ -1073,6 +1385,8 @@ export class AblationCLI {
       // Clear attachments after use
       this.callbacks.setPendingAttachments([]);
     }
+
+    return {};
   }
 
   /**
@@ -1176,23 +1490,49 @@ export class AblationCLI {
         { type: 'info' },
       );
 
+      const runsMultiplier = (ablation.runs ?? 1) > 1 ? ` × ${ablation.runs} runs` : '';
       if (ablation.dryRun) {
         this.logger.log(
-          `\n  Dry Run: ${ablation.phases.length} phases = ${totalRuns} runs (no model)\n`,
+          `\n  Dry Run: ${ablation.phases.length} phases${runsMultiplier} = ${totalRuns} runs (no model)\n`,
           { type: 'info' },
         );
       } else {
         this.logger.log(
-          `\n  Matrix: ${ablation.phases.length} phases × ${ablation.models.length} models = ${totalRuns} runs\n`,
+          `\n  Matrix: ${ablation.phases.length} phases × ${ablation.models.length} models${runsMultiplier} = ${totalRuns} runs\n`,
           { type: 'info' },
         );
       }
 
-      if (ablation.mcpConfigPath) {
-        this.logger.log(`  MCP Config: ${ablation.mcpConfigPath}\n`, { type: 'info' });
+      if (ablation.settings.mcpConfigPath) {
+        this.logger.log(`  MCP Config: ${ablation.settings.mcpConfigPath}\n`, { type: 'info' });
+      }
+
+      if (ablation.arguments && ablation.arguments.length > 0) {
+        this.logger.log(`  Arguments: ${ablation.arguments.map(a => `{{${a.name}}}`).join(', ')}\n`, { type: 'info' });
       }
 
       this.displayAblationMatrix(ablation);
+    }
+
+    // Resolve dynamic arguments for each ablation that has them
+    const resolvedArgsMap = new Map<string, Record<string, string>>();
+    for (const ablation of selectedAblations) {
+      if (ablation.arguments && ablation.arguments.length > 0) {
+        const resolved = await this.resolveAblationArguments(ablation);
+        if (resolved === null) {
+          this.logger.log('\nCancelled.\n', { type: 'info' });
+          return;
+        }
+        resolvedArgsMap.set(ablation.name, resolved);
+
+        // Display resolved values for confirmation
+        if (Object.keys(resolved).length > 0) {
+          this.logger.log('\n  Resolved arguments:\n', { type: 'info' });
+          for (const [name, value] of Object.entries(resolved)) {
+            this.logger.log(`    {{${name}}} = ${value}\n`, { type: 'info' });
+          }
+        }
+      }
     }
 
     const confirm = (await rl.question('\nStart ablation? (Y/n): '))
@@ -1207,30 +1547,36 @@ export class AblationCLI {
     const originalProviderName = this.client.getProviderName();
     const originalModel = this.client.getModel();
     const savedState = this.client.saveState();
-    this.logger.log('\n  Original chat saved. Starting ablation...\n', {
-      type: 'info',
-    });
+    const hasConversation = savedState.messages.length > 0;
+    if (hasConversation) {
+      this.logger.log('\n  Original chat saved. Starting ablation...\n', {
+        type: 'info',
+      });
+    }
 
     // Run each selected ablation
     let batchAborted = false;
     for (let i = 0; i < selectedAblations.length; i++) {
       const ablation = selectedAblations[i];
       if (selectedAblations.length > 1) {
+        const batchLine = `BATCH ${i + 1}/${selectedAblations.length}: ${ablation.name}`;
+        const batchWidth = Math.max(batchLine.length, 59);
         this.logger.log(
-          `\n╔═════════════════════════════════════════════════════════════════╗\n`,
+          `\n╔══${'═'.repeat(batchWidth)}══╗\n`,
           { type: 'info' },
         );
         this.logger.log(
-          `║  ${`BATCH ${i + 1}/${selectedAblations.length}: ${ablation.name}`.padEnd(61)}║\n`,
+          `║  ${batchLine.padEnd(batchWidth)}  ║\n`,
           { type: 'info' },
         );
         this.logger.log(
-          `╚═════════════════════════════════════════════════════════════════╝\n`,
+          `╚══${'═'.repeat(batchWidth)}══╝\n`,
           { type: 'info' },
         );
       }
 
-      const aborted = await this.runSingleAblation(ablation);
+      const resolvedArgs = resolvedArgsMap.get(ablation.name);
+      const aborted = await this.runSingleAblation(ablation, resolvedArgs);
       if (aborted) {
         batchAborted = true;
         break;
@@ -1258,13 +1604,17 @@ export class AblationCLI {
     }
 
     // Restore original provider/model and chat state
-    this.logger.log('  Restoring original session...\n', { type: 'info' });
     const originalProvider = this.createProviderInstance(originalProviderName);
+    if (hasConversation) {
+      this.logger.log('  Restoring original session...\n', { type: 'info' });
+    }
     await this.client.restoreState(savedState, originalProvider, originalModel);
-    this.logger.log(
-      `  ✓ Restored to ${originalProviderName}/${originalModel}\n`,
-      { type: 'success' },
-    );
+    if (hasConversation) {
+      this.logger.log(
+        `  ✓ Restored to ${originalProviderName}/${originalModel}\n`,
+        { type: 'success' },
+      );
+    }
   }
 
   /**
@@ -1366,31 +1716,126 @@ export class AblationCLI {
   }
 
   /**
+   * Resolve dynamic arguments for an ablation by prompting the user.
+   * For 'string' args: readline prompt with optional default.
+   * For 'attachment' args: numbered attachment list, user picks by index.
+   * @returns Resolved values, or null if user cancelled.
+   */
+  private async resolveAblationArguments(
+    ablation: AblationDefinition,
+  ): Promise<Record<string, string> | null> {
+    const rl = this.callbacks.getReadline();
+    if (!rl) return null;
+
+    const args = ablation.arguments;
+    if (!args || args.length === 0) return {};
+
+    this.logger.log('\n  Resolving dynamic arguments:\n', { type: 'info' });
+
+    const resolved: Record<string, string> = {};
+
+    for (const arg of args) {
+      const isRequired = arg.required !== false;
+      const desc = arg.description ? ` - ${arg.description}` : '';
+      const defaultHint = arg.default ? ` [default: ${arg.default}]` : '';
+      const requiredHint = isRequired ? ' (required)' : ' (optional)';
+
+      if (arg.type === 'attachment') {
+        // Show attachment list and let user pick
+        const attachments = this.attachmentManager.listAttachments();
+        if (attachments.length === 0) {
+          this.logger.log(`    {{${arg.name}}}${desc}: No attachments available.\n`, { type: 'warning' });
+          if (isRequired && !arg.default) {
+            this.logger.log('    Cannot continue without required attachment.\n', { type: 'error' });
+            return null;
+          }
+          if (arg.default) {
+            resolved[arg.name] = arg.default;
+            this.logger.log(`    → Using default: ${arg.default}\n`, { type: 'info' });
+          }
+          continue;
+        }
+
+        this.logger.log(`\n    {{${arg.name}}}${desc}${requiredHint}\n`, { type: 'info' });
+        this.logger.log('    Available attachments:\n', { type: 'info' });
+        for (let i = 0; i < attachments.length; i++) {
+          this.logger.log(`      ${i + 1}. ${attachments[i].fileName}\n`, { type: 'info' });
+        }
+
+        const prompt = arg.default
+          ? `    Select attachment (1-${attachments.length})${defaultHint}: `
+          : `    Select attachment (1-${attachments.length}): `;
+        const input = (await rl.question(prompt)).trim();
+
+        if (input.toLowerCase() === 'q') return null;
+
+        if (!input && arg.default) {
+          resolved[arg.name] = arg.default;
+          this.logger.log(`    → ${arg.default}\n`, { type: 'info' });
+        } else {
+          const idx = parseInt(input) - 1;
+          if (isNaN(idx) || idx < 0 || idx >= attachments.length) {
+            if (isRequired && !arg.default) {
+              this.logger.log('    ✗ Invalid selection.\n', { type: 'error' });
+              return null;
+            }
+            if (arg.default) {
+              resolved[arg.name] = arg.default;
+              this.logger.log(`    → Using default: ${arg.default}\n`, { type: 'info' });
+            }
+          } else {
+            resolved[arg.name] = attachments[idx].fileName;
+            this.logger.log(`    → ${attachments[idx].fileName}\n`, { type: 'info' });
+          }
+        }
+      } else {
+        // type: 'string'
+        this.logger.log(`\n    {{${arg.name}}}${desc}${requiredHint}\n`, { type: 'info' });
+
+        const prompt = arg.default
+          ? `    Value${defaultHint}: `
+          : `    Value: `;
+        const input = (await rl.question(prompt)).trim();
+
+        if (input.toLowerCase() === 'q') return null;
+
+        if (!input && arg.default) {
+          resolved[arg.name] = arg.default;
+          this.logger.log(`    → ${arg.default}\n`, { type: 'info' });
+        } else if (!input && isRequired) {
+          this.logger.log('    ✗ Required argument cannot be empty.\n', { type: 'error' });
+          return null;
+        } else {
+          resolved[arg.name] = input;
+        }
+      }
+    }
+
+    return resolved;
+  }
+
+  /**
    * Run a single ablation study. Handles MCP config, execution, results, and output cleanup.
    * Server connections are reused across calls when the config hasn't changed.
    * @returns true if the user aborted
    */
-  private async runSingleAblation(ablation: AblationDefinition): Promise<boolean> {
+  private async runSingleAblation(ablation: AblationDefinition, resolvedArguments?: Record<string, string>): Promise<boolean> {
     const totalRuns = this.ablationManager.getTotalRuns(ablation);
 
-    // Tool access model for ablation:
-    // - Agent tools: from regular config with disabled servers respected (filtered by initMCPTools)
-    // - @tool-exec: has client privileges — can reach ALL servers including disabled ones
-    // We connect disabled servers here so @tool-exec: can route to them.
+    // All servers (including disabled) are connected at startup.
+    // Only refresh if this ablation uses a custom MCP config path.
     const defaultMcpConfigPath = this.ablationManager.getDefaultMcpConfigPath();
-    const effectiveConfigPath = (ablation.mcpConfigPath && ablation.mcpConfigPath !== defaultMcpConfigPath)
-      ? ablation.mcpConfigPath
+    const effectiveConfigPath = (ablation.settings.mcpConfigPath && ablation.settings.mcpConfigPath !== defaultMcpConfigPath)
+      ? ablation.settings.mcpConfigPath
       : defaultMcpConfigPath;
 
-    if (this.lastAblationMcpConfigPath === effectiveConfigPath && this.client.areAllServersConnected()) {
-      this.logger.log(`  All servers already connected for this config, skipping refresh\n`, { type: 'info' });
-    } else {
-      if (effectiveConfigPath !== defaultMcpConfigPath) {
+    if (effectiveConfigPath !== defaultMcpConfigPath) {
+      if (this.lastAblationMcpConfigPath !== effectiveConfigPath) {
         const resolvedPath = this.ablationManager.resolveMcpConfigPath(ablation);
         if (resolvedPath) {
-          const validation = this.ablationManager.validateMcpConfigPath(ablation.mcpConfigPath!);
+          const validation = this.ablationManager.validateMcpConfigPath(ablation.settings.mcpConfigPath!);
           if (validation.valid) {
-            this.logger.log(`  Loading custom MCP config: ${ablation.mcpConfigPath}\n`, { type: 'info' });
+            this.logger.log(`  Loading custom MCP config: ${ablation.settings.mcpConfigPath}\n`, { type: 'info' });
             if (!this.client.reloadConfigFromPath(resolvedPath)) {
               this.logger.log(`  ⚠ Failed to load custom MCP config, using default\n`, { type: 'warning' });
             }
@@ -1398,13 +1843,14 @@ export class AblationCLI {
             this.logger.log(`  ⚠ Invalid MCP config: ${validation.error}\n`, { type: 'warning' });
           }
         }
-      }
 
-      // Refresh with includeDisabled so @tool-exec: can reach all servers
-      this.logger.log(`  Connecting all servers (including disabled)...\n`, { type: 'info' });
-      await this.client.refreshServers({ includeDisabled: true });
-      this.lastAblationMcpConfigPath = effectiveConfigPath;
-      this.logger.log(`  ✓ All servers connected\n`, { type: 'success' });
+        this.logger.log(`  Connecting servers for custom config...\n`, { type: 'info' });
+        await this.client.refreshServers();
+        this.lastAblationMcpConfigPath = effectiveConfigPath;
+        this.logger.log(`  ✓ Servers connected\n`, { type: 'success' });
+      } else {
+        this.logger.log(`  Servers already connected for this config, skipping refresh\n`, { type: 'info' });
+      }
     }
 
     // Create run directory
@@ -1413,7 +1859,8 @@ export class AblationCLI {
     );
 
     // Copy attachments to run directory (same for all runs)
-    this.ablationManager.copyAttachmentsToRun(runDir, ablation);
+    // Pass resolved arguments so dynamically-named attachments are detected
+    this.ablationManager.copyAttachmentsToRun(runDir, ablation, resolvedArguments);
 
     // Snapshot current outputs folder to ensure each run starts with the same state
     this.logger.log('  Snapshotting outputs folder...\n', { type: 'info' });
@@ -1423,6 +1870,9 @@ export class AblationCLI {
     const run: AblationRun = {
       ablationName: ablation.name,
       startedAt: new Date().toISOString(),
+      ...(resolvedArguments && Object.keys(resolvedArguments).length > 0
+        ? { resolvedArguments }
+        : {}),
       results: [],
     };
 
@@ -1442,23 +1892,36 @@ export class AblationCLI {
     // In dry run mode, use a single placeholder model (no model switching needed)
     const dryRunModel: AblationModel = { provider: 'none', model: 'dry-run' };
     const modelsToRun = ablation.dryRun ? [dryRunModel] : ablation.models;
+    const iterations = ablation.runs ?? 1;
+    const hasMultipleIterations = iterations > 1;
+    // runIteration passed to directory helpers: undefined when iterations=1 (preserves old paths)
+    const getRunIter = (iter: number) => hasMultipleIterations ? iter : undefined;
 
-    // Execute each phase × model combination
-    for (const phase of ablation.phases) {
+    // Execute: runIteration > phase > model
+    for (let iteration = 1; iteration <= iterations; iteration++) {
       if (shouldBreak) break;
 
-      // Check for abort (Ctrl+A or Ctrl+C)
-      if (this.callbacks.isAbortRequested()) {
-        this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
-        shouldBreak = true;
-        break;
+      if (hasMultipleIterations) {
+        const iterLine = `ITERATION ${iteration}/${iterations}`;
+        const iterWidth = Math.max(iterLine.length, 59);
+        this.logger.log(
+          `\n╔══${'═'.repeat(iterWidth)}══╗\n`,
+          { type: 'info' },
+        );
+        this.logger.log(
+          `║  ${iterLine.padEnd(iterWidth)}  ║\n`,
+          { type: 'info' },
+        );
+        this.logger.log(
+          `╚══${'═'.repeat(iterWidth)}══╝\n`,
+          { type: 'info' },
+        );
       }
-      const phaseDir = this.ablationManager.createPhaseDirectory(
-        runDir,
-        phase.name,
-      );
 
-      for (const model of modelsToRun) {
+      // Restore outputs from snapshot once per iteration
+      this.ablationManager.restoreOutputsFromSnapshot(runDir);
+
+      for (const phase of ablation.phases) {
         if (shouldBreak) break;
 
         // Check for abort (Ctrl+A or Ctrl+C)
@@ -1467,186 +1930,384 @@ export class AblationCLI {
           shouldBreak = true;
           break;
         }
-
-        runNumber++;
-        const modelShortName = ablation.dryRun ? 'dry-run' : this.ablationManager.getModelShortName(model);
-
-        this.logger.log(
-          `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`,
-          { type: 'info' },
-        );
-        if (ablation.dryRun) {
-          this.logger.log(
-            `  RUN ${runNumber}/${totalRuns}: ${phase.name} (dry run)\n`,
-            { type: 'info' },
-          );
-        } else {
-          this.logger.log(
-            `  RUN ${runNumber}/${totalRuns}: ${phase.name} + ${modelShortName}\n`,
-            { type: 'info' },
-          );
-          this.logger.log(
-            `  Provider: ${model.provider} │ Model: ${model.model}\n`,
-            { type: 'info' },
-          );
-        }
-        this.logger.log(
-          `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`,
-          { type: 'info' },
+        const phaseDir = this.ablationManager.createPhaseDirectory(
+          runDir,
+          phase.name,
+          getRunIter(iteration),
         );
 
-        // Restore outputs from snapshot before each run
-        this.ablationManager.restoreOutputsFromSnapshot(runDir);
+        for (const model of modelsToRun) {
+          if (shouldBreak) break;
 
-        const result: AblationRunResult = {
-          phase: phase.name,
-          model,
-          status: 'running',
-        };
-
-        const startTime = Date.now();
-
-        try {
-          // Create provider instance and switch to this model (skip in dry run)
-          if (!ablation.dryRun) {
-            const provider = this.createProviderInstance(model.provider);
-            await this.client.switchProviderAndModel(provider, model.model);
-          }
-
-          // Execute commands for this phase
-          let aborted = false;
-          for (let i = 0; i < phase.commands.length; i++) {
-            // Check for abort before each command
-            if (this.callbacks.isAbortRequested()) {
-              this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
-              aborted = true;
-              shouldBreak = true;
-              break;
-            }
-
-            const command = phase.commands[i];
-            this.logger.log(
-              `  [${i + 1}/${phase.commands.length}] Executing: ${command}\n`,
-              { type: 'info' },
-            );
-            await this.executeAblationCommand(
-              command,
-              ablation.settings.maxIterations,
-              ablation.dryRun || false,
-            );
-
-            // Check for abort after each command
-            if (this.callbacks.isAbortRequested()) {
-              this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
-              aborted = true;
-              shouldBreak = true;
-              break;
-            }
-          }
-
-          if (aborted) {
-            // Stop any active video recording so the file is finalized before capture
-            await this.client.cleanupVideoRecording();
-
-            result.status = 'aborted';
-            result.duration = Date.now() - startTime;
-            result.durationFormatted = formatDuration(result.duration);
-
-            // Capture any outputs written before abort (including video files)
-            const capturedCount = this.ablationManager.captureRunOutputs(
-              runDir,
-              phase.name,
-              model,
-            );
-            if (capturedCount > 0) {
-              this.logger.log(`  📁 Captured ${capturedCount} output files\n`, {
-                type: 'info',
-              });
-            }
-
-            run.results.push(result);
+          // Check for abort (Ctrl+A or Ctrl+C)
+          if (this.callbacks.isAbortRequested()) {
+            this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+            shouldBreak = true;
             break;
           }
 
-          // Get token usage (skip in dry run - no model means no tokens)
-          if (!ablation.dryRun) {
-            const tokenUsage = this.client.getTokenUsage();
-            result.tokens = tokenUsage.current;
-          }
-
-          result.status = 'completed';
-          result.duration = Date.now() - startTime;
-          result.durationFormatted = formatDuration(result.duration);
-
-          if (!ablation.dryRun) {
-            result.chatFile = `chats/${phase.name}/${this.ablationManager.getChatFileName(model)}`;
-          }
-
-          // Stop any active video recording so the file is finalized before capture
-          await this.client.cleanupVideoRecording();
-
-          // Capture outputs written during this run
-          const capturedCount = this.ablationManager.captureRunOutputs(
-            runDir,
-            phase.name,
-            model,
-          );
-          if (capturedCount > 0) {
-            this.logger.log(`  📁 Captured ${capturedCount} output files\n`, {
-              type: 'info',
-            });
-          }
-
-          // Save chat history to phase directory (skip in dry run)
-          if (!ablation.dryRun) {
-            const chatHistoryManager = this.client.getChatHistoryManager();
-            chatHistoryManager.endSession(
-              `Ablation run: ${phase.name} with ${model.provider}/${model.model}`,
-            );
-          }
+          runNumber++;
+          const modelShortName = ablation.dryRun ? 'dry-run' : this.ablationManager.getModelShortName(model);
+          const iterationSuffix = hasMultipleIterations ? ` (iteration ${iteration}/${iterations})` : '';
 
           this.logger.log(
-            `\n  ✓ Scenario complete │ Duration: ${formatDuration(result.duration)}${result.tokens !== undefined ? ` │ Tokens: ${result.tokens}` : ''}\n`,
-            { type: 'success' },
+            `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`,
+            { type: 'info' },
           );
-        } catch (error: any) {
-          result.status = 'failed';
-          result.error = error.message;
-          result.duration = Date.now() - startTime;
-          result.durationFormatted = formatDuration(result.duration);
-
-          // Stop any active video recording so the file is finalized before capture
-          await this.client.cleanupVideoRecording();
-
-          // Still capture any outputs that were written before failure
-          const capturedCount = this.ablationManager.captureRunOutputs(
-            runDir,
-            phase.name,
-            model,
-          );
-          if (capturedCount > 0) {
+          if (ablation.dryRun) {
             this.logger.log(
-              `  📁 Captured ${capturedCount} output files before failure\n`,
+              `  RUN ${runNumber}/${totalRuns}: ${phase.name} (dry run)${iterationSuffix}\n`,
+              { type: 'info' },
+            );
+          } else {
+            this.logger.log(
+              `  RUN ${runNumber}/${totalRuns}: ${phase.name} + ${modelShortName}${iterationSuffix}\n`,
+              { type: 'info' },
+            );
+            this.logger.log(
+              `  Provider: ${model.provider} │ Model: ${model.model}\n`,
               { type: 'info' },
             );
           }
-
-          this.logger.log(`\n  ✗ Scenario failed: ${error.message}\n`, {
-            type: 'error',
-          });
-        }
-
-        run.results.push(result);
-
-        // Always stop on error
-        if (result.status === 'failed') {
           this.logger.log(
-            `\nAblation stopped due to error: ${result.error}\n`,
-            { type: 'error' },
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`,
+            { type: 'info' },
           );
-          this.logger.log('Partial results saved.\n', { type: 'warning' });
-          shouldBreak = true;
+
+          const result: AblationRunResult = {
+            phase: phase.name,
+            model,
+            status: 'running',
+          };
+          if (hasMultipleIterations) {
+            result.run = iteration;
+          }
+
+          const startTime = Date.now();
+
+          // Collect tool exec log entries for dry run
+          const toolExecLog: ToolExecLogEntry[] = [];
+
+          // Substitute argument placeholders in all command arrays for this phase
+          const sub = (cmds: string[]) =>
+            resolvedArguments ? this.ablationManager.substituteArguments(cmds, resolvedArguments) : cmds;
+          const phaseCommands = sub(phase.commands);
+          const phaseOnStart = phase.onStart ? sub(phase.onStart) : undefined;
+          const phaseOnEnd = phase.onEnd ? sub(phase.onEnd) : undefined;
+
+          try {
+            // Create provider instance and switch to this model (skip in dry run)
+            if (!ablation.dryRun) {
+              const provider = this.createProviderInstance(model.provider);
+              await this.client.switchProviderAndModel(provider, model.model);
+            }
+
+            // Execute onStart lifecycle hooks
+            let aborted = false;
+            if (phaseOnStart && phaseOnStart.length > 0) {
+              this.logger.log(`  ⤷ Phase onStart hooks...\n`, { type: 'info' });
+              for (const startCmd of phaseOnStart) {
+                if (this.callbacks.isAbortRequested()) {
+                  this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+                  aborted = true;
+                  shouldBreak = true;
+                  break;
+                }
+
+                this.logger.log(`    ↳ ${startCmd}\n`, { type: 'info' });
+                const hookStartTime = Date.now();
+                const hookResult = await this.executeAblationCommand(
+                  startCmd,
+                  ablation.settings.maxIterations,
+                  ablation.dryRun || false,
+                );
+
+                if (ablation.dryRun && hookResult.toolExecResult) {
+                  const hookDuration = Date.now() - hookStartTime;
+                  toolExecLog.push({
+                    commandIndex: -1,
+                    command: startCmd,
+                    toolName: hookResult.toolExecResult.toolName,
+                    args: hookResult.toolExecResult.args,
+                    timestamp: new Date(hookStartTime).toISOString(),
+                    duration: hookDuration,
+                    durationFormatted: formatDuration(hookDuration),
+                    success: hookResult.toolExecResult.success,
+                    displayText: hookResult.toolExecResult.displayText,
+                    isHook: true,
+                    triggeredBy: 'onStart',
+                  });
+                }
+              }
+            }
+
+            // Execute commands for this phase
+            for (let i = 0; i < phaseCommands.length && !aborted; i++) {
+              // Check for abort before each command
+              if (this.callbacks.isAbortRequested()) {
+                this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+                aborted = true;
+                shouldBreak = true;
+                break;
+              }
+
+              const command = phaseCommands[i];
+              this.logger.log(
+                `  [${i + 1}/${phaseCommands.length}] Executing: ${command}\n`,
+                { type: 'info' },
+              );
+
+              // Handle @wait:<seconds> command
+              const waitMatch = command.trim().match(/^@wait:(\d+(?:\.\d+)?)$/);
+              if (waitMatch) {
+                const waitSeconds = parseFloat(waitMatch[1]);
+                this.logger.log(`    Waiting ${waitSeconds}s...\n`, { type: 'info' });
+                await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
+                this.logger.log(`    Done waiting.\n`, { type: 'info' });
+                continue;
+              }
+
+              const cmdStartTime = Date.now();
+              const cmdResult = await this.executeAblationCommand(
+                command,
+                ablation.settings.maxIterations,
+                ablation.dryRun || false,
+              );
+
+              // Collect tool exec log entry for dry run
+              if (ablation.dryRun && cmdResult.toolExecResult) {
+                const cmdDuration = Date.now() - cmdStartTime;
+                toolExecLog.push({
+                  commandIndex: i,
+                  command,
+                  toolName: cmdResult.toolExecResult.toolName,
+                  args: cmdResult.toolExecResult.args,
+                  timestamp: new Date(cmdStartTime).toISOString(),
+                  duration: cmdDuration,
+                  durationFormatted: formatDuration(cmdDuration),
+                  success: cmdResult.toolExecResult.success,
+                  displayText: cmdResult.toolExecResult.displayText,
+                });
+              }
+
+              // Execute post-tool hooks (only for @tool-exec/@tool commands, no recursion)
+              if (cmdResult.toolExecResult) {
+                const hooks = this.ablationManager.getHooksForPhase(ablation, phase.name);
+                for (const hook of hooks) {
+                  if (hook.after === cmdResult.toolExecResult.toolName) {
+                    // Check for abort before hook
+                    if (this.callbacks.isAbortRequested()) break;
+
+                    const hookCmd = resolvedArguments
+                      ? this.ablationManager.substituteArguments([hook.run], resolvedArguments)[0]
+                      : hook.run;
+                    this.logger.log(`  ↳ Hook: executing ${hookCmd}\n`, { type: 'info' });
+                    const hookStartTime = Date.now();
+                    const hookResult = await this.executeAblationCommand(
+                      hookCmd,
+                      ablation.settings.maxIterations,
+                      ablation.dryRun || false,
+                    );
+
+                    // Collect hook tool exec log entry for dry run
+                    if (ablation.dryRun && hookResult.toolExecResult) {
+                      const hookDuration = Date.now() - hookStartTime;
+                      toolExecLog.push({
+                        commandIndex: i,
+                        command: hook.run,
+                        toolName: hookResult.toolExecResult.toolName,
+                        args: hookResult.toolExecResult.args,
+                        timestamp: new Date(hookStartTime).toISOString(),
+                        duration: hookDuration,
+                        durationFormatted: formatDuration(hookDuration),
+                        success: hookResult.toolExecResult.success,
+                        displayText: hookResult.toolExecResult.displayText,
+                        isHook: true,
+                        triggeredBy: cmdResult.toolExecResult.toolName,
+                      });
+                    }
+                  }
+                }
+              }
+
+              // Check for abort after each command
+              if (this.callbacks.isAbortRequested()) {
+                this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+                aborted = true;
+                shouldBreak = true;
+                break;
+              }
+            }
+
+            // Execute onEnd lifecycle hooks (only if not aborted)
+            if (!aborted && phaseOnEnd && phaseOnEnd.length > 0) {
+              this.logger.log(`  ⤷ Phase onEnd hooks...\n`, { type: 'info' });
+              for (const endCmd of phaseOnEnd) {
+                if (this.callbacks.isAbortRequested()) {
+                  this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+                  aborted = true;
+                  shouldBreak = true;
+                  break;
+                }
+
+                this.logger.log(`    ↳ ${endCmd}\n`, { type: 'info' });
+                const hookStartTime = Date.now();
+                const hookResult = await this.executeAblationCommand(
+                  endCmd,
+                  ablation.settings.maxIterations,
+                  ablation.dryRun || false,
+                );
+
+                if (ablation.dryRun && hookResult.toolExecResult) {
+                  const hookDuration = Date.now() - hookStartTime;
+                  toolExecLog.push({
+                    commandIndex: -1,
+                    command: endCmd,
+                    toolName: hookResult.toolExecResult.toolName,
+                    args: hookResult.toolExecResult.args,
+                    timestamp: new Date(hookStartTime).toISOString(),
+                    duration: hookDuration,
+                    durationFormatted: formatDuration(hookDuration),
+                    success: hookResult.toolExecResult.success,
+                    displayText: hookResult.toolExecResult.displayText,
+                    isHook: true,
+                    triggeredBy: 'onEnd',
+                  });
+                }
+              }
+            }
+
+            if (aborted) {
+              // Stop any active video recording so the file is finalized before capture
+              await this.client.cleanupVideoRecording();
+
+              result.status = 'aborted';
+              result.duration = Date.now() - startTime;
+              result.durationFormatted = formatDuration(result.duration);
+
+              // Save partial tool exec logs on abort
+              if (ablation.dryRun && toolExecLog.length > 0) {
+                const logsDir = this.ablationManager.createLogsDirectory(runDir, phase.name, getRunIter(iteration));
+                result.logFile = this.ablationManager.saveToolExecLog(runDir, logsDir, toolExecLog, phase.name);
+              }
+
+              run.results.push(result);
+              break;
+            }
+
+            // Get token usage (skip in dry run - no model means no tokens)
+            if (!ablation.dryRun) {
+              const tokenUsage = this.client.getTokenUsage();
+              result.tokens = tokenUsage.current;
+            }
+
+            result.status = 'completed';
+            result.duration = Date.now() - startTime;
+            result.durationFormatted = formatDuration(result.duration);
+
+            // Save tool exec logs for dry run
+            if (ablation.dryRun && toolExecLog.length > 0) {
+              const logsDir = this.ablationManager.createLogsDirectory(runDir, phase.name, getRunIter(iteration));
+              result.logFile = this.ablationManager.saveToolExecLog(runDir, logsDir, toolExecLog, phase.name);
+            }
+
+            // Stop any active video recording so the file is finalized before capture
+            await this.client.cleanupVideoRecording();
+
+            // Save chat history and copy to phase directory (skip in dry run)
+            if (!ablation.dryRun) {
+              const chatHistoryManager = this.client.getChatHistoryManager();
+              const chatMetadata = chatHistoryManager.endSession(
+                `Ablation run: ${phase.name} with ${model.provider}/${model.model}`,
+              );
+
+              // Copy chat files from global chats dir into the run's phase directory
+              if (chatMetadata) {
+                const chatFileName = this.ablationManager.getChatFileName(model);
+                const chatPrefix = hasMultipleIterations ? `chats/run-${iteration}` : 'chats';
+                const relativeChatPath = `${chatPrefix}/${phase.name}/${chatFileName}`;
+                const destJsonPath = join(phaseDir, chatFileName);
+                const destMdPath = join(phaseDir, chatFileName.replace('.json', '.md'));
+
+                try {
+                  if (existsSync(chatMetadata.filePath)) {
+                    cpSync(chatMetadata.filePath, destJsonPath);
+                  }
+                  if (existsSync(chatMetadata.mdFilePath)) {
+                    cpSync(chatMetadata.mdFilePath, destMdPath);
+                  }
+                  result.chatFile = relativeChatPath;
+                } catch (copyError) {
+                  this.logger.log(`  Warning: Failed to copy chat files to run directory: ${copyError}\n`, { type: 'warning' });
+                  // Fall back to referencing the global chat path
+                  result.chatFile = chatMetadata.filePath;
+                }
+              }
+            }
+
+            this.logger.log(
+              `\n  ✓ Scenario complete │ Duration: ${formatDuration(result.duration)}${result.tokens !== undefined ? ` │ Tokens: ${result.tokens}` : ''}\n`,
+              { type: 'success' },
+            );
+          } catch (error: any) {
+            result.status = 'failed';
+            result.error = error.message;
+            result.duration = Date.now() - startTime;
+            result.durationFormatted = formatDuration(result.duration);
+
+            // Collect failed tool exec entry if available
+            if (ablation.dryRun && error._toolExecResult) {
+              const cmdDuration = Date.now() - startTime;
+              toolExecLog.push({
+                commandIndex: toolExecLog.length,
+                command: phaseCommands[toolExecLog.length] || '',
+                toolName: error._toolExecResult.toolName,
+                args: error._toolExecResult.args,
+                timestamp: new Date().toISOString(),
+                duration: cmdDuration,
+                durationFormatted: formatDuration(cmdDuration),
+                success: false,
+                error: error._toolExecResult.error,
+              });
+            }
+
+            // Save partial tool exec logs on error
+            if (ablation.dryRun && toolExecLog.length > 0) {
+              const logsDir = this.ablationManager.createLogsDirectory(runDir, phase.name, getRunIter(iteration));
+              result.logFile = this.ablationManager.saveToolExecLog(runDir, logsDir, toolExecLog, phase.name);
+            }
+
+            // Stop any active video recording so the file is finalized before capture
+            await this.client.cleanupVideoRecording();
+
+            this.logger.log(`\n  ✗ Scenario failed: ${error.message}\n`, {
+              type: 'error',
+            });
+          }
+
+          run.results.push(result);
+
+          // Always stop on error
+          if (result.status === 'failed') {
+            this.logger.log(
+              `\nAblation stopped due to error: ${result.error}\n`,
+              { type: 'error' },
+            );
+            this.logger.log('Partial results saved.\n', { type: 'warning' });
+            shouldBreak = true;
+          }
         }
+      }
+
+      // Capture all outputs produced during this iteration
+      const iterCapturedCount = this.ablationManager.captureIterationOutputs(
+        runDir,
+        getRunIter(iteration),
+      );
+      if (iterCapturedCount > 0) {
+        this.logger.log(`  📁 Captured ${iterCapturedCount} output files for iteration${hasMultipleIterations ? ` ${iteration}` : ''}\n`, {
+          type: 'info',
+        });
       }
     }
     } finally {
@@ -2179,6 +2840,9 @@ export class AblationCLI {
     this.logger.log(`    Max iterations: ${ablation.settings.maxIterations}\n`, {
       type: 'info',
     });
+    this.logger.log(`    Repeat runs: ${ablation.runs ?? 1}\n`, {
+      type: 'info',
+    });
 
     const maxIterStr = (
       await rl.question('\n  Max iterations (Enter to keep): ')
@@ -2191,7 +2855,19 @@ export class AblationCLI {
       if (!isNaN(maxIter) && maxIter > 0) newSettings.maxIterations = maxIter;
     }
 
-    this.ablationManager.update(ablationName, { settings: newSettings });
+    const runsStr = (
+      await rl.question(`  Repeat runs (Enter to keep ${ablation.runs ?? 1}): `)
+    ).trim();
+
+    let newRuns = ablation.runs;
+    if (runsStr) {
+      const runs = parseInt(runsStr);
+      if (!isNaN(runs) && runs > 0) {
+        newRuns = runs > 1 ? runs : undefined;
+      }
+    }
+
+    this.ablationManager.update(ablationName, { settings: newSettings, runs: newRuns });
     this.logger.log('\n✓ Settings updated.\n', { type: 'success' });
   }
 
@@ -2228,7 +2904,7 @@ export class AblationCLI {
     const defaultMcpConfigPath = this.ablationManager.getDefaultMcpConfigPath();
 
     this.logger.log(
-      `\n  Current MCP config: ${ablation.mcpConfigPath}\n`,
+      `\n  Current MCP config: ${ablation.settings.mcpConfigPath}\n`,
       { type: 'info' },
     );
     this.logger.log('  Enter a path relative to project root or absolute path.\n', { type: 'info' });
@@ -2240,7 +2916,7 @@ export class AblationCLI {
 
     if (!newPath) {
       // Set to default path
-      this.ablationManager.update(ablationName, { mcpConfigPath: defaultMcpConfigPath });
+      this.ablationManager.update(ablationName, { settings: { ...ablation.settings, mcpConfigPath: defaultMcpConfigPath } });
       this.logger.log(`\n✓ MCP config set to default: ${defaultMcpConfigPath}\n`, { type: 'success' });
       return;
     }
@@ -2248,7 +2924,7 @@ export class AblationCLI {
     // Validate the new path
     const validation = this.ablationManager.validateMcpConfigPath(newPath);
     if (validation.valid) {
-      this.ablationManager.update(ablationName, { mcpConfigPath: newPath });
+      this.ablationManager.update(ablationName, { settings: { ...ablation.settings, mcpConfigPath: newPath } });
       this.logger.log('\n✓ MCP config path updated.\n', { type: 'success' });
     } else {
       this.logger.log(`\n  ⚠ Warning: ${validation.error}\n`, { type: 'warning' });
@@ -2256,10 +2932,445 @@ export class AblationCLI {
         await rl.question('  Use this path anyway? (y/N): ')
       ).trim().toLowerCase();
       if (useAnyway === 'y' || useAnyway === 'yes') {
-        this.ablationManager.update(ablationName, { mcpConfigPath: newPath });
+        this.ablationManager.update(ablationName, { settings: { ...ablation.settings, mcpConfigPath: newPath } });
         this.logger.log('\n✓ MCP config path updated.\n', { type: 'success' });
       } else {
         this.logger.log('\n  MCP config path unchanged.\n', { type: 'info' });
+      }
+    }
+  }
+
+  /**
+   * Handler to edit post-tool hooks for an ablation
+   */
+  private async handleEditHooks(ablationName: string): Promise<void> {
+    const rl = this.callbacks.getReadline();
+    if (!rl) return;
+
+    const ablation = this.ablationManager.load(ablationName);
+    if (!ablation) return;
+
+    while (true) {
+      // Display current post-tool hooks
+      const topHooks = ablation.hooks ?? [];
+      const phaseHooks: { phase: string; hook: PostToolHook }[] = [];
+      for (const phase of ablation.phases) {
+        for (const hook of (phase.hooks ?? [])) {
+          phaseHooks.push({ phase: phase.name, hook });
+        }
+      }
+
+      const allHooks: { label: string; isTopLevel: boolean; phase?: string; index: number }[] = [];
+
+      this.logger.log('\n  Current post-tool hooks:\n', { type: 'info' });
+      if (topHooks.length === 0 && phaseHooks.length === 0) {
+        this.logger.log('    (none)\n', { type: 'info' });
+      } else {
+        let num = 1;
+        for (let i = 0; i < topHooks.length; i++) {
+          const h = topHooks[i];
+          this.logger.log(`    ${num}. [all phases] after ${h.after} → ${h.run}\n`, { type: 'info' });
+          allHooks.push({ label: `[all phases] ${h.after}`, isTopLevel: true, index: i });
+          num++;
+        }
+        for (const ph of phaseHooks) {
+          const phaseObj = ablation.phases.find(p => p.name === ph.phase);
+          const hookIdx = phaseObj?.hooks?.indexOf(ph.hook) ?? 0;
+          this.logger.log(`    ${num}. [${ph.phase}] after ${ph.hook.after} → ${ph.hook.run}\n`, { type: 'info' });
+          allHooks.push({ label: `[${ph.phase}] ${ph.hook.after}`, isTopLevel: false, phase: ph.phase, index: hookIdx });
+          num++;
+        }
+      }
+
+      // Display current lifecycle hooks
+      this.logger.log('\n  Current lifecycle hooks:\n', { type: 'info' });
+      let hasLifecycleHooks = false;
+      for (const phase of ablation.phases) {
+        for (const cmd of (phase.onStart ?? [])) {
+          this.logger.log(`    [${phase.name}] onStart → ${cmd}\n`, { type: 'info' });
+          hasLifecycleHooks = true;
+        }
+        for (const cmd of (phase.onEnd ?? [])) {
+          this.logger.log(`    [${phase.name}] onEnd → ${cmd}\n`, { type: 'info' });
+          hasLifecycleHooks = true;
+        }
+      }
+      if (!hasLifecycleHooks) {
+        this.logger.log('    (none)\n', { type: 'info' });
+      }
+
+      this.logger.log('\n  Options:\n', { type: 'info' });
+      this.logger.log('    1. Add post-tool hook\n', { type: 'info' });
+      this.logger.log('    2. Remove post-tool hook\n', { type: 'info' });
+      this.logger.log('    3. Edit lifecycle hooks (onStart/onEnd)\n', { type: 'info' });
+      this.logger.log('    4. Done\n', { type: 'info' });
+
+      const choice = (await rl.question('\n  Select option: ')).trim();
+
+      if (choice === '1') {
+        // Add post-tool hook
+        const afterTool = (
+          await rl.question('  Tool name to watch (e.g. ros-mcp-server__verify_assembly): ')
+        ).trim();
+        if (!afterTool) continue;
+
+        const runCmd = (
+          await rl.question('  Command to run after (e.g. @tool-exec:server__tool(arg=\'val\')): ')
+        ).trim();
+        if (!runCmd) continue;
+
+        this.logger.log('  Apply to:\n', { type: 'info' });
+        this.logger.log('    1. All phases\n', { type: 'info' });
+        for (let i = 0; i < ablation.phases.length; i++) {
+          this.logger.log(`    ${i + 2}. Phase: ${ablation.phases[i].name}\n`, { type: 'info' });
+        }
+
+        const scopeStr = (await rl.question('  Select scope: ')).trim();
+        const scopeIdx = parseInt(scopeStr);
+
+        if (scopeIdx === 1) {
+          if (!ablation.hooks) ablation.hooks = [];
+          ablation.hooks.push({ after: afterTool, run: runCmd });
+          this.ablationManager.update(ablationName, { hooks: ablation.hooks });
+          this.logger.log('  ✓ Top-level hook added.\n', { type: 'success' });
+        } else if (scopeIdx >= 2 && scopeIdx <= ablation.phases.length + 1) {
+          const phase = ablation.phases[scopeIdx - 2];
+          if (!phase.hooks) phase.hooks = [];
+          phase.hooks.push({ after: afterTool, run: runCmd });
+          this.ablationManager.update(ablationName, { phases: ablation.phases });
+          this.logger.log(`  ✓ Hook added to phase: ${phase.name}\n`, { type: 'success' });
+        } else {
+          this.logger.log('  ✗ Invalid selection.\n', { type: 'error' });
+        }
+      } else if (choice === '2') {
+        // Remove post-tool hook
+        if (allHooks.length === 0) {
+          this.logger.log('  No hooks to remove.\n', { type: 'info' });
+          continue;
+        }
+
+        const removeStr = (
+          await rl.question('  Enter hook number to remove: ')
+        ).trim();
+        const removeIdx = parseInt(removeStr) - 1;
+
+        if (removeIdx < 0 || removeIdx >= allHooks.length) {
+          this.logger.log('  ✗ Invalid selection.\n', { type: 'error' });
+          continue;
+        }
+
+        const target = allHooks[removeIdx];
+        if (target.isTopLevel) {
+          ablation.hooks?.splice(target.index, 1);
+          if (ablation.hooks?.length === 0) ablation.hooks = undefined;
+          this.ablationManager.update(ablationName, { hooks: ablation.hooks });
+        } else {
+          const phase = ablation.phases.find(p => p.name === target.phase);
+          if (phase?.hooks) {
+            phase.hooks.splice(target.index, 1);
+            if (phase.hooks.length === 0) phase.hooks = undefined;
+            this.ablationManager.update(ablationName, { phases: ablation.phases });
+          }
+        }
+        this.logger.log('  ✓ Hook removed.\n', { type: 'success' });
+      } else if (choice === '3') {
+        // Edit lifecycle hooks (onStart/onEnd)
+        await this.handleEditLifecycleHooks(ablationName, ablation);
+      } else if (choice === '4' || choice.toLowerCase() === 'q') {
+        return;
+      } else {
+        this.logger.log('  ✗ Invalid option.\n', { type: 'error' });
+      }
+    }
+  }
+
+  /**
+   * Handle editing lifecycle hooks (onStart/onEnd) for phases
+   */
+  private async handleEditLifecycleHooks(ablationName: string, ablation: AblationDefinition): Promise<void> {
+    const rl = this.callbacks.getReadline();
+    if (!rl) return;
+
+    // Select phase
+    this.logger.log('\n  Select phase:\n', { type: 'info' });
+    for (let i = 0; i < ablation.phases.length; i++) {
+      const phase = ablation.phases[i];
+      const onStartCount = phase.onStart?.length ?? 0;
+      const onEndCount = phase.onEnd?.length ?? 0;
+      this.logger.log(`    ${i + 1}. ${phase.name} (${onStartCount} onStart, ${onEndCount} onEnd)\n`, { type: 'info' });
+    }
+
+    const phaseStr = (await rl.question('\n  Phase number: ')).trim();
+    const phaseIdx = parseInt(phaseStr) - 1;
+
+    if (phaseIdx < 0 || phaseIdx >= ablation.phases.length) {
+      this.logger.log('  ✗ Invalid selection.\n', { type: 'error' });
+      return;
+    }
+
+    const phase = ablation.phases[phaseIdx];
+
+    while (true) {
+      // Display current lifecycle hooks for this phase
+      this.logger.log(`\n  Phase: ${phase.name}\n`, { type: 'info' });
+      this.logger.log('  onStart commands:\n', { type: 'info' });
+      if (!phase.onStart || phase.onStart.length === 0) {
+        this.logger.log('    (none)\n', { type: 'info' });
+      } else {
+        for (let i = 0; i < phase.onStart.length; i++) {
+          this.logger.log(`    ${i + 1}. ${phase.onStart[i]}\n`, { type: 'info' });
+        }
+      }
+      this.logger.log('  onEnd commands:\n', { type: 'info' });
+      if (!phase.onEnd || phase.onEnd.length === 0) {
+        this.logger.log('    (none)\n', { type: 'info' });
+      } else {
+        for (let i = 0; i < phase.onEnd.length; i++) {
+          this.logger.log(`    ${i + 1}. ${phase.onEnd[i]}\n`, { type: 'info' });
+        }
+      }
+
+      this.logger.log('\n  Options:\n', { type: 'info' });
+      this.logger.log('    1. Add onStart command\n', { type: 'info' });
+      this.logger.log('    2. Remove onStart command\n', { type: 'info' });
+      this.logger.log('    3. Add onEnd command\n', { type: 'info' });
+      this.logger.log('    4. Remove onEnd command\n', { type: 'info' });
+      this.logger.log('    5. Back\n', { type: 'info' });
+
+      const choice = (await rl.question('\n  Select option: ')).trim();
+
+      if (choice === '1') {
+        // Add onStart command
+        const cmd = (await rl.question('  onStart command: ')).trim();
+        if (!cmd) continue;
+        if (!phase.onStart) phase.onStart = [];
+        phase.onStart.push(cmd);
+        this.ablationManager.update(ablationName, { phases: ablation.phases });
+        this.logger.log('  ✓ onStart command added.\n', { type: 'success' });
+      } else if (choice === '2') {
+        // Remove onStart command
+        if (!phase.onStart || phase.onStart.length === 0) {
+          this.logger.log('  No onStart commands to remove.\n', { type: 'info' });
+          continue;
+        }
+        const removeStr = (await rl.question('  Enter command number to remove: ')).trim();
+        const removeIdx = parseInt(removeStr) - 1;
+        if (removeIdx < 0 || removeIdx >= phase.onStart.length) {
+          this.logger.log('  ✗ Invalid selection.\n', { type: 'error' });
+          continue;
+        }
+        phase.onStart.splice(removeIdx, 1);
+        if (phase.onStart.length === 0) phase.onStart = undefined;
+        this.ablationManager.update(ablationName, { phases: ablation.phases });
+        this.logger.log('  ✓ onStart command removed.\n', { type: 'success' });
+      } else if (choice === '3') {
+        // Add onEnd command
+        const cmd = (await rl.question('  onEnd command: ')).trim();
+        if (!cmd) continue;
+        if (!phase.onEnd) phase.onEnd = [];
+        phase.onEnd.push(cmd);
+        this.ablationManager.update(ablationName, { phases: ablation.phases });
+        this.logger.log('  ✓ onEnd command added.\n', { type: 'success' });
+      } else if (choice === '4') {
+        // Remove onEnd command
+        if (!phase.onEnd || phase.onEnd.length === 0) {
+          this.logger.log('  No onEnd commands to remove.\n', { type: 'info' });
+          continue;
+        }
+        const removeStr = (await rl.question('  Enter command number to remove: ')).trim();
+        const removeIdx = parseInt(removeStr) - 1;
+        if (removeIdx < 0 || removeIdx >= phase.onEnd.length) {
+          this.logger.log('  ✗ Invalid selection.\n', { type: 'error' });
+          continue;
+        }
+        phase.onEnd.splice(removeIdx, 1);
+        if (phase.onEnd.length === 0) phase.onEnd = undefined;
+        this.ablationManager.update(ablationName, { phases: ablation.phases });
+        this.logger.log('  ✓ onEnd command removed.\n', { type: 'success' });
+      } else if (choice === '5' || choice.toLowerCase() === 'q') {
+        return;
+      } else {
+        this.logger.log('  ✗ Invalid option.\n', { type: 'error' });
+      }
+    }
+  }
+
+  /**
+   * Handler to edit dynamic arguments for an ablation
+   */
+  private async handleEditArguments(ablationName: string): Promise<void> {
+    const rl = this.callbacks.getReadline();
+    if (!rl) return;
+
+    const ablation = this.ablationManager.load(ablationName);
+    if (!ablation) return;
+
+    while (true) {
+      const args = ablation.arguments ?? [];
+
+      // Display current arguments
+      this.logger.log('\n  Current arguments:\n', { type: 'info' });
+      if (args.length === 0) {
+        this.logger.log('    (none)\n', { type: 'info' });
+      } else {
+        for (let i = 0; i < args.length; i++) {
+          const arg = args[i];
+          const required = arg.required !== false ? 'required' : 'optional';
+          const defaultStr = arg.default ? `, default: ${arg.default}` : '';
+          this.logger.log(
+            `    ${i + 1}. {{${arg.name}}} (${arg.type}, ${required}${defaultStr})${arg.description ? ` - ${arg.description}` : ''}\n`,
+            { type: 'info' },
+          );
+        }
+      }
+
+      // Show placeholders found in commands
+      const placeholders = this.ablationManager.extractPlaceholders(ablation);
+      if (placeholders.length > 0) {
+        const undefinedPlaceholders = placeholders.filter(p => !args.some(a => a.name === p));
+        if (undefinedPlaceholders.length > 0) {
+          this.logger.log(`\n  Undefined placeholders in commands: ${undefinedPlaceholders.map(p => `{{${p}}}`).join(', ')}\n`, { type: 'warning' });
+        }
+      }
+
+      this.logger.log('\n  Options:\n', { type: 'info' });
+      this.logger.log('    1. Add argument\n', { type: 'info' });
+      this.logger.log('    2. Edit argument\n', { type: 'info' });
+      this.logger.log('    3. Remove argument\n', { type: 'info' });
+      this.logger.log('    4. Auto-detect from commands\n', { type: 'info' });
+      this.logger.log('    5. Done\n', { type: 'info' });
+
+      const choice = (await rl.question('\n  Select option: ')).trim();
+
+      if (choice === '1') {
+        // Add argument
+        const argName = (await rl.question('  Argument name: ')).trim();
+        if (!argName) continue;
+
+        if (args.some(a => a.name === argName)) {
+          this.logger.log(`  ✗ Argument "${argName}" already exists.\n`, { type: 'error' });
+          continue;
+        }
+
+        const argDescription = (await rl.question('  Description (optional): ')).trim();
+
+        this.logger.log('  Type:\n', { type: 'info' });
+        this.logger.log('    1. string - Text input\n', { type: 'info' });
+        this.logger.log('    2. attachment - File picker\n', { type: 'info' });
+        const typeChoice = (await rl.question('  Select type (1): ')).trim();
+        const argType: AblationArgumentType = typeChoice === '2' ? 'attachment' : 'string';
+
+        const requiredInput = (await rl.question('  Required? (Y/n): ')).trim().toLowerCase();
+        const argRequired = requiredInput !== 'n' && requiredInput !== 'no';
+
+        let argDefault: string | undefined;
+        if (!argRequired) {
+          argDefault = (await rl.question('  Default value (optional): ')).trim() || undefined;
+        }
+
+        const arg: AblationArgument = { name: argName, type: argType };
+        if (argDescription) arg.description = argDescription;
+        if (!argRequired) arg.required = false;
+        if (argDefault) arg.default = argDefault;
+
+        args.push(arg);
+        ablation.arguments = args;
+        this.ablationManager.update(ablationName, { arguments: args });
+        this.logger.log(`  ✓ Argument {{${argName}}} added.\n`, { type: 'success' });
+      } else if (choice === '2') {
+        // Edit argument
+        if (args.length === 0) {
+          this.logger.log('  No arguments to edit.\n', { type: 'info' });
+          continue;
+        }
+
+        const editStr = (await rl.question('  Argument number to edit: ')).trim();
+        const editIdx = parseInt(editStr) - 1;
+        if (editIdx < 0 || editIdx >= args.length) {
+          this.logger.log('  ✗ Invalid selection.\n', { type: 'error' });
+          continue;
+        }
+
+        const arg = args[editIdx];
+        this.logger.log(`\n  Editing {{${arg.name}}}:\n`, { type: 'info' });
+
+        const newDesc = (await rl.question(`  Description [${arg.description || ''}]: `)).trim();
+        if (newDesc) arg.description = newDesc;
+
+        this.logger.log('  Type:\n', { type: 'info' });
+        this.logger.log(`    1. string${arg.type === 'string' ? ' (current)' : ''}\n`, { type: 'info' });
+        this.logger.log(`    2. attachment${arg.type === 'attachment' ? ' (current)' : ''}\n`, { type: 'info' });
+        const newType = (await rl.question('  Select type (enter to keep): ')).trim();
+        if (newType === '1') arg.type = 'string';
+        else if (newType === '2') arg.type = 'attachment';
+
+        const currentRequired = arg.required !== false;
+        const newRequired = (await rl.question(`  Required? (${currentRequired ? 'Y/n' : 'y/N'}): `)).trim().toLowerCase();
+        if (newRequired === 'y' || newRequired === 'yes') arg.required = undefined; // default is true
+        else if (newRequired === 'n' || newRequired === 'no') arg.required = false;
+
+        if (arg.required === false) {
+          const newDefault = (await rl.question(`  Default value [${arg.default || ''}]: `)).trim();
+          if (newDefault) arg.default = newDefault;
+        } else {
+          arg.default = undefined;
+        }
+
+        ablation.arguments = args;
+        this.ablationManager.update(ablationName, { arguments: args });
+        this.logger.log(`  ✓ Argument {{${arg.name}}} updated.\n`, { type: 'success' });
+      } else if (choice === '3') {
+        // Remove argument
+        if (args.length === 0) {
+          this.logger.log('  No arguments to remove.\n', { type: 'info' });
+          continue;
+        }
+
+        const removeStr = (await rl.question('  Argument number to remove: ')).trim();
+        const removeIdx = parseInt(removeStr) - 1;
+        if (removeIdx < 0 || removeIdx >= args.length) {
+          this.logger.log('  ✗ Invalid selection.\n', { type: 'error' });
+          continue;
+        }
+
+        const removed = args.splice(removeIdx, 1)[0];
+        ablation.arguments = args.length > 0 ? args : undefined;
+        this.ablationManager.update(ablationName, { arguments: ablation.arguments });
+        this.logger.log(`  ✓ Argument {{${removed.name}}} removed.\n`, { type: 'success' });
+      } else if (choice === '4') {
+        // Auto-detect from commands
+        const detected = this.ablationManager.extractPlaceholders(ablation);
+        const existing = new Set(args.map(a => a.name));
+        const newPlaceholders = detected.filter(p => !existing.has(p));
+
+        if (newPlaceholders.length === 0) {
+          this.logger.log('  No new placeholders found in commands.\n', { type: 'info' });
+          continue;
+        }
+
+        this.logger.log(`  Found ${newPlaceholders.length} new placeholder(s): ${newPlaceholders.map(p => `{{${p}}}`).join(', ')}\n`, { type: 'info' });
+
+        for (const name of newPlaceholders) {
+          const addIt = (await rl.question(`  Add {{${name}}} as argument? (Y/n): `)).trim().toLowerCase();
+          if (addIt === 'n' || addIt === 'no') continue;
+
+          this.logger.log('  Type:\n', { type: 'info' });
+          this.logger.log('    1. string - Text input\n', { type: 'info' });
+          this.logger.log('    2. attachment - File picker\n', { type: 'info' });
+          const typeChoice = (await rl.question('  Select type (1): ')).trim();
+          const argType: AblationArgumentType = typeChoice === '2' ? 'attachment' : 'string';
+
+          const arg: AblationArgument = { name, type: argType };
+          args.push(arg);
+          this.logger.log(`  ✓ Added {{${name}}} (${argType})\n`, { type: 'success' });
+        }
+
+        ablation.arguments = args.length > 0 ? args : undefined;
+        this.ablationManager.update(ablationName, { arguments: ablation.arguments });
+      } else if (choice === '5' || choice.toLowerCase() === 'q') {
+        return;
+      } else {
+        this.logger.log('  ✗ Invalid option.\n', { type: 'error' });
       }
     }
   }

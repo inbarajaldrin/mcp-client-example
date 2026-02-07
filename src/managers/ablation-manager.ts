@@ -20,13 +20,32 @@ export interface AblationModel {
   model: string;
 }
 
+export interface PostToolHook {
+  after: string;     // Full tool name to match (e.g. "ros-mcp-server__verify_assembly")
+  run: string;       // Command to execute (e.g. "@tool-exec:ros2-video-recorder__capture_camera_image(...)")
+}
+
+export type AblationArgumentType = 'string' | 'attachment';
+
+export interface AblationArgument {
+  name: string;                   // Used in {{name}} placeholders
+  description?: string;           // Shown to user during collection
+  type: AblationArgumentType;     // 'string' = text input, 'attachment' = file picker
+  required?: boolean;             // Default: true
+  default?: string;               // Fallback value for optional args
+}
+
 export interface AblationPhase {
   name: string;
   commands: string[];
+  hooks?: PostToolHook[];   // Post-tool hooks for this phase only (in addition to top-level)
+  onStart?: string[];       // Commands to run before phase commands
+  onEnd?: string[];         // Commands to run after phase commands
 }
 
 export interface AblationSettings {
   maxIterations: number;      // Max agent iterations per run
+  mcpConfigPath?: string;     // Optional path to custom MCP config file
 }
 
 export interface AblationDefinition {
@@ -35,20 +54,24 @@ export interface AblationDefinition {
   created: string;
   updated?: string;
   dryRun?: boolean;        // When true, skip model switching - execute tool calls directly
+  runs?: number;           // Number of times to repeat the full ablation (default 1)
+  arguments?: AblationArgument[];  // Dynamic placeholders resolved at runtime
   phases: AblationPhase[];
   models: AblationModel[];
   settings: AblationSettings;
-  mcpConfigPath?: string;  // Optional path to custom MCP config file
+  hooks?: PostToolHook[];  // Post-tool hooks applied to all phases
 }
 
 export interface AblationRunResult {
   phase: string;
   model: AblationModel;
+  run?: number;           // Only populated when runs > 1
   status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'aborted';
   tokens?: number;
   duration?: number; // milliseconds
   durationFormatted?: string; // human-readable (e.g. "4m 5s")
   chatFile?: string;
+  logFile?: string;       // Path to tool-exec log (dry run only)
   error?: string;
 }
 
@@ -56,10 +79,36 @@ export interface AblationRun {
   ablationName: string;
   startedAt: string;
   completedAt?: string;
+  resolvedArguments?: Record<string, string>;  // Argument values used for this run
   results: AblationRunResult[];
   totalTokens?: number;
   totalDuration?: number;
   totalDurationFormatted?: string; // human-readable (e.g. "1h 23m 45s")
+}
+
+export interface ToolExecLogEntry {
+  commandIndex: number;
+  command: string;
+  toolName: string;
+  args: Record<string, unknown>;
+  timestamp: string;
+  duration: number;        // milliseconds
+  durationFormatted: string;
+  success: boolean;
+  displayText?: string;
+  error?: string;
+  isHook?: boolean;        // True if this entry was triggered by a post-tool hook
+  triggeredBy?: string;    // Tool name that triggered this hook
+}
+
+export interface AblationCommandResult {
+  toolExecResult?: {
+    toolName: string;
+    args: Record<string, unknown>;
+    displayText?: string;
+    success: boolean;
+    error?: string;
+  };
 }
 
 // ==================== Manager ====================
@@ -117,11 +166,25 @@ export class AblationManager {
   }
 
   /**
-   * Save an ablation definition
+   * Save an ablation definition.
+   * Constructs a canonical field order for clean, consistent YAML output.
    */
   save(ablation: AblationDefinition): void {
     const path = this.getAblationPath(ablation.name);
-    const yamlContent = yaml.stringify(ablation);
+    const ordered: Record<string, unknown> = {
+      name: ablation.name,
+      description: ablation.description,
+      created: ablation.created,
+    };
+    if (ablation.updated) ordered.updated = ablation.updated;
+    ordered.models = ablation.models;
+    if (ablation.dryRun !== undefined) ordered.dryRun = ablation.dryRun;
+    if (ablation.runs !== undefined) ordered.runs = ablation.runs;
+    if (ablation.arguments && ablation.arguments.length > 0) ordered.arguments = ablation.arguments;
+    ordered.settings = ablation.settings;
+    ordered.phases = ablation.phases;
+    if (ablation.hooks && ablation.hooks.length > 0) ordered.hooks = ablation.hooks;
+    const yamlContent = yaml.stringify(ordered);
     writeFileSync(path, yamlContent, 'utf-8');
   }
 
@@ -330,13 +393,25 @@ export class AblationManager {
   }
 
   /**
-   * Get total number of runs for an ablation (phases × models)
+   * Get merged hooks for a phase (top-level + phase-specific).
+   * Phase hooks come after top-level hooks.
+   */
+  getHooksForPhase(ablation: AblationDefinition, phaseName: string): PostToolHook[] {
+    const topLevel = ablation.hooks ?? [];
+    const phase = ablation.phases.find(p => p.name === phaseName);
+    const phaseLevel = phase?.hooks ?? [];
+    return [...topLevel, ...phaseLevel];
+  }
+
+  /**
+   * Get total number of runs for an ablation (phases × models × runs)
    */
   getTotalRuns(ablation: AblationDefinition): number {
+    const iterations = ablation.runs ?? 1;
     if (ablation.dryRun) {
-      return ablation.phases.length;
+      return ablation.phases.length * iterations;
     }
-    return ablation.phases.length * ablation.models.length;
+    return ablation.phases.length * ablation.models.length * iterations;
   }
 
   /**
@@ -376,11 +451,14 @@ export class AblationManager {
 
   /**
    * Create phase directory within a run
+   * When runIteration is provided (runs > 1), creates chats/run-{N}/{phase}/
    */
-  createPhaseDirectory(runDir: string, phaseName: string): string {
-    const phaseDir = join(runDir, 'chats', sanitizeFolderName(phaseName));
-    mkdirSync(phaseDir, { recursive: true });
-    return phaseDir;
+  createPhaseDirectory(runDir: string, phaseName: string, runIteration?: number): string {
+    const basePath = runIteration !== undefined
+      ? join(runDir, 'chats', `run-${runIteration}`, sanitizeFolderName(phaseName))
+      : join(runDir, 'chats', sanitizeFolderName(phaseName));
+    mkdirSync(basePath, { recursive: true });
+    return basePath;
   }
 
   /**
@@ -486,13 +564,93 @@ export class AblationManager {
     return `${sanitizeFolderName(model.model)}.json`;
   }
 
+  // ==================== Argument Placeholders ====================
+
+  /**
+   * Extract all {{name}} placeholders from all phase commands (including hooks and lifecycle commands).
+   * Returns unique placeholder names in order of first appearance.
+   */
+  extractPlaceholders(ablation: AblationDefinition): string[] {
+    const seen = new Set<string>();
+    const ordered: string[] = [];
+    const regex = /\{\{([^}]+)\}\}/g;
+
+    const scanCommands = (commands: string[]) => {
+      for (const cmd of commands) {
+        let match;
+        while ((match = regex.exec(cmd)) !== null) {
+          const name = match[1].trim();
+          if (!seen.has(name)) {
+            seen.add(name);
+            ordered.push(name);
+          }
+        }
+      }
+    };
+
+    for (const phase of ablation.phases) {
+      scanCommands(phase.commands);
+      if (phase.onStart) scanCommands(phase.onStart);
+      if (phase.onEnd) scanCommands(phase.onEnd);
+      if (phase.hooks) {
+        for (const hook of phase.hooks) {
+          scanCommands([hook.run]);
+        }
+      }
+    }
+    if (ablation.hooks) {
+      for (const hook of ablation.hooks) {
+        scanCommands([hook.run]);
+      }
+    }
+
+    return ordered;
+  }
+
+  /**
+   * Validate argument definitions against placeholders found in commands.
+   * Returns warnings for: placeholders without definitions, definitions without placeholders.
+   */
+  validateArguments(ablation: AblationDefinition): string[] {
+    const warnings: string[] = [];
+    const placeholders = this.extractPlaceholders(ablation);
+    const definedNames = new Set((ablation.arguments ?? []).map(a => a.name));
+
+    for (const name of placeholders) {
+      if (!definedNames.has(name)) {
+        warnings.push(`Placeholder {{${name}}} has no argument definition`);
+      }
+    }
+
+    const placeholderSet = new Set(placeholders);
+    for (const arg of (ablation.arguments ?? [])) {
+      if (!placeholderSet.has(arg.name)) {
+        warnings.push(`Argument "${arg.name}" is defined but not used in any command`);
+      }
+    }
+
+    return warnings;
+  }
+
+  /**
+   * Replace {{name}} placeholders in command strings with resolved values.
+   */
+  substituteArguments(commands: string[], values: Record<string, string>): string[] {
+    return commands.map(cmd => {
+      return cmd.replace(/\{\{([^}]+)\}\}/g, (_match, name: string) => {
+        const trimmed = name.trim();
+        return values[trimmed] ?? `{{${trimmed}}}`;
+      });
+    });
+  }
+
   // ==================== Attachments Management ====================
 
   /**
    * Copy referenced attachments to the run directory
    * Only copies attachments that are used in /attachment-insert commands in the ablation
    */
-  copyAttachmentsToRun(runDir: string, ablation: AblationDefinition): number {
+  copyAttachmentsToRun(runDir: string, ablation: AblationDefinition, resolvedArguments?: Record<string, string>): number {
     const runAttachmentsDir = join(runDir, 'attachments');
 
     try {
@@ -501,9 +659,13 @@ export class AblationManager {
       }
 
       // Parse commands to find /attachment-insert references (by filename)
+      // Substitute placeholders first so dynamic attachment names are resolved
       const referencedFiles = new Set<string>();
       for (const phase of ablation.phases) {
-        for (const command of phase.commands) {
+        const commands = resolvedArguments
+          ? this.substituteArguments(phase.commands, resolvedArguments)
+          : phase.commands;
+        for (const command of commands) {
           // Match /attachment-insert followed by filename
           const match = command.match(/^\/attachment-insert\s+(.+)$/i);
           if (match) {
@@ -625,10 +787,14 @@ export class AblationManager {
   /**
    * Capture outputs written during a run and save to run results
    * Identifies new/modified files by comparing against snapshot
+   * When runIteration is provided (runs > 1), saves to outputs/run-{N}/{phase}/{model}/
    */
-  captureRunOutputs(runDir: string, phaseName: string, model: AblationModel): number {
+  captureRunOutputs(runDir: string, phaseName: string, model: AblationModel, runIteration?: number): number {
     const snapshotDir = this.getSnapshotDir(runDir);
-    const runOutputsDir = join(runDir, 'outputs', sanitizeFolderName(phaseName), sanitizeFolderName(model.model));
+    const outputsBase = runIteration !== undefined
+      ? join(runDir, 'outputs', `run-${runIteration}`, sanitizeFolderName(phaseName), sanitizeFolderName(model.model))
+      : join(runDir, 'outputs', sanitizeFolderName(phaseName), sanitizeFolderName(model.model));
+    const runOutputsDir = outputsBase;
 
     try {
       if (!existsSync(OUTPUTS_DIR)) {
@@ -766,10 +932,184 @@ export class AblationManager {
   }
 
   /**
+   * Capture all outputs produced during an entire iteration.
+   * Identifies new/modified files by comparing against the initial snapshot.
+   * When runIteration is provided (runs > 1), saves to outputs/run-{N}/
+   * Otherwise saves to outputs/
+   */
+  captureIterationOutputs(runDir: string, runIteration?: number): number {
+    const snapshotDir = this.getSnapshotDir(runDir);
+    const runOutputsDir = runIteration !== undefined
+      ? join(runDir, 'outputs', `run-${runIteration}`)
+      : join(runDir, 'outputs');
+
+    try {
+      if (!existsSync(OUTPUTS_DIR)) {
+        return 0;
+      }
+
+      const currentItems = this.getDirectoryContents(OUTPUTS_DIR);
+      const snapshotItems = existsSync(snapshotDir) && !existsSync(join(snapshotDir, '.empty'))
+        ? this.getDirectoryContents(snapshotDir)
+        : new Map<string, { size: number }>();
+
+      // Find new or modified items (compare by path existence and file size)
+      const newItems: string[] = [];
+      for (const [relativePath, stats] of currentItems) {
+        const snapshotStats = snapshotItems.get(relativePath);
+        if (!snapshotStats || stats.size !== snapshotStats.size) {
+          newItems.push(relativePath);
+        }
+      }
+
+      if (newItems.length === 0) {
+        return 0;
+      }
+
+      mkdirSync(runOutputsDir, { recursive: true });
+
+      for (const relativePath of newItems) {
+        const sourcePath = join(OUTPUTS_DIR, relativePath);
+        const destPath = join(runOutputsDir, relativePath);
+        mkdirSync(dirname(destPath), { recursive: true });
+        cpSync(sourcePath, destPath);
+      }
+
+      return newItems.length;
+    } catch (error) {
+      this.logger.log(`Failed to capture iteration outputs: ${error}\n`, { type: 'error' });
+      return 0;
+    }
+  }
+
+  /**
    * Get the outputs directory for a specific run result
    */
-  getRunOutputsDir(runDir: string, phaseName: string, model: AblationModel): string {
+  getRunOutputsDir(runDir: string, phaseName: string, model: AblationModel, runIteration?: number): string {
+    if (runIteration !== undefined) {
+      return join(runDir, 'outputs', `run-${runIteration}`, sanitizeFolderName(phaseName), sanitizeFolderName(model.model));
+    }
     return join(runDir, 'outputs', sanitizeFolderName(phaseName), sanitizeFolderName(model.model));
+  }
+
+  // ==================== Tool Execution Logs ====================
+
+  /**
+   * Create logs directory for a phase within a run.
+   * When runIteration is provided (runs > 1), creates logs/run-{N}/{phase}/
+   * Otherwise creates logs/{phase}/
+   */
+  createLogsDirectory(runDir: string, phaseName: string, runIteration?: number): string {
+    const logsDir = runIteration !== undefined
+      ? join(runDir, 'logs', `run-${runIteration}`, sanitizeFolderName(phaseName))
+      : join(runDir, 'logs', sanitizeFolderName(phaseName));
+    mkdirSync(logsDir, { recursive: true });
+    return logsDir;
+  }
+
+  /**
+   * Save tool execution log entries as both JSON and Markdown.
+   * @returns The relative path to the log file (for storing in AblationRunResult)
+   */
+  saveToolExecLog(runDir: string, logsDir: string, entries: ToolExecLogEntry[], phaseName: string): string {
+    const jsonPath = join(logsDir, 'tool-exec-log.json');
+    const mdPath = join(logsDir, 'tool-exec-log.md');
+
+    writeFileSync(jsonPath, JSON.stringify(entries, null, 2), 'utf-8');
+    writeFileSync(mdPath, this.formatToolExecLogAsMarkdown(entries, phaseName), 'utf-8');
+
+    // Return relative path from runDir
+    const relativePath = logsDir.replace(runDir + '/', '');
+    return `${relativePath}/tool-exec-log.json`;
+  }
+
+  /**
+   * Format tool execution log entries as a human-readable Markdown report.
+   * Follows the same style as chat log markdown (generateMarkdownChat).
+   */
+  private formatToolExecLogAsMarkdown(entries: ToolExecLogEntry[], phaseName: string): string {
+    let md = `# Tool Execution Log\n\n`;
+
+    // Header metadata (same style as chat logs)
+    md += `**Phase:** ${phaseName}\n`;
+    md += `**Generated:** ${new Date().toISOString()}\n`;
+    const hookCount = entries.filter(e => e.isHook).length;
+    const commandCount = entries.length - hookCount;
+    md += `**Total Commands:** ${commandCount}\n`;
+    if (hookCount > 0) {
+      md += `**Hook Executions:** ${hookCount}\n`;
+    }
+
+    const successCount = entries.filter(e => e.success).length;
+    const failCount = entries.length - successCount;
+    md += `**Succeeded:** ${successCount}\n`;
+    if (failCount > 0) {
+      md += `**Failed:** ${failCount}\n`;
+    }
+
+    // Total duration
+    const totalDuration = entries.reduce((sum, e) => sum + e.duration, 0);
+    md += `**Total Duration:** ${this.formatDuration(totalDuration)}\n`;
+
+    md += '\n---\n\n';
+
+    // Tool calls (same style as chat log tool messages)
+    md += '## Execution Log\n\n';
+
+    for (const entry of entries) {
+      const time = new Date(entry.timestamp).toLocaleTimeString();
+      const statusIndicator = entry.success ? '' : ' *Failed*';
+
+      if (entry.isHook) {
+        md += `### Hook → Tool: ${entry.toolName}${statusIndicator}\n\n`;
+        md += `Triggered by: \`${entry.triggeredBy}\` | Duration: ${entry.durationFormatted}\n\n`;
+      } else {
+        md += `### Tool: ${entry.toolName}${statusIndicator}\n\n`;
+        md += `Command ${entry.commandIndex + 1}: \`${entry.command}\` | Duration: ${entry.durationFormatted}\n\n`;
+      }
+
+      // Input (same format as chat logs)
+      md += `**Input (${time}):**\n\`\`\`json\n${JSON.stringify(entry.args, null, 2)}\n\`\`\`\n\n`;
+
+      // Output or error (same format as chat logs)
+      if (entry.error) {
+        const endTime = new Date(new Date(entry.timestamp).getTime() + entry.duration).toLocaleTimeString();
+        md += `**Error (${endTime}):**\n\`\`\`\n${entry.error}\n\`\`\`\n\n`;
+      } else if (entry.displayText) {
+        const endTime = new Date(new Date(entry.timestamp).getTime() + entry.duration).toLocaleTimeString();
+
+        // Try to parse output as JSON for consistent formatting (same as chat logs)
+        let outputFormatted = entry.displayText;
+        let outputLang = '';
+        try {
+          const cleanOutput = entry.displayText.replace(/\u001b\[[0-9;]*m/g, '');
+          const parsed = JSON.parse(cleanOutput);
+          outputFormatted = JSON.stringify(parsed, null, 2);
+          outputLang = 'json';
+        } catch {
+          // Not JSON, use as-is
+        }
+
+        md += `**Output (${endTime}):**\n\`\`\`${outputLang ? ' ' + outputLang : ''}\n${outputFormatted}\n\`\`\`\n\n`;
+      }
+    }
+
+    return md;
+  }
+
+  /**
+   * Format milliseconds as a human-readable duration string
+   */
+  private formatDuration(ms: number): string {
+    if (ms < 1000) return `${ms}ms`;
+    const seconds = Math.floor(ms / 1000);
+    if (seconds < 60) return `${seconds}s`;
+    const minutes = Math.floor(seconds / 60);
+    const remainingSeconds = seconds % 60;
+    if (minutes < 60) return `${minutes}m ${remainingSeconds}s`;
+    const hours = Math.floor(minutes / 60);
+    const remainingMinutes = minutes % 60;
+    return `${hours}h ${remainingMinutes}m ${remainingSeconds}s`;
   }
 
   // ==================== MCP Config Path Methods ====================
@@ -787,11 +1127,11 @@ export class AblationManager {
    * @returns Absolute path to the config file
    */
   resolveMcpConfigPath(ablation: AblationDefinition): string | null {
-    if (!ablation.mcpConfigPath) {
+    if (!ablation.settings.mcpConfigPath) {
       return null;
     }
 
-    const configPath = ablation.mcpConfigPath;
+    const configPath = ablation.settings.mcpConfigPath;
 
     // If absolute path, use as-is
     if (configPath.startsWith('/')) {

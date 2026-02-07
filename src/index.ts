@@ -18,7 +18,7 @@ import { TodoManager } from './managers/todo-manager.js';
 import { ROS2VideoRecordingManager } from './managers/ros2-video-recording-manager.js';
 import { ToolManager } from './managers/tool-manager.js';
 import { PromptManager } from './managers/prompt-manager.js';
-import { ChatHistoryManager } from './managers/chat-history-manager.js';
+import { ChatHistoryManager, type ChatSession } from './managers/chat-history-manager.js';
 import { AttachmentManager } from './managers/attachment-manager.js';
 import { PreferencesManager } from './managers/preferences-manager.js';
 import type {
@@ -303,14 +303,8 @@ export class MCPClient {
 
     const connectionErrors: Array<{ name: string; error: any }> = [];
 
-    // Connect only to enabled servers (respect disabled flag)
-    // Disabled servers can be connected on-demand via /todo-on or /orchestrator-on
     for (const serverConfig of this.serverConfigs) {
-      // Skip disabled servers - they can be connected on-demand
-      if (serverConfig.disabledInConfig) {
-        continue;
-      }
-      
+
       try {
         this.logger.log(`Connecting to server "${serverConfig.name}"...\n`, {
           type: 'info',
@@ -782,7 +776,7 @@ export class MCPClient {
     }
   }
 
-  async refreshServers(options?: { includeDisabled?: boolean }) {
+  async refreshServers() {
     // Reload config from disk to pick up any changes
     this.reloadConfigFromDisk();
 
@@ -800,12 +794,7 @@ export class MCPClient {
     const connectionErrors: Array<{ name: string; error: any }> = [];
 
     // Reconnect to servers
-    // When includeDisabled is true (e.g. ablation mode), connect ALL servers
     for (const serverConfig of this.serverConfigs) {
-      // Skip disabled servers unless includeDisabled is set
-      if (serverConfig.disabledInConfig && !options?.includeDisabled) {
-        continue;
-      }
 
       try {
         this.logger.log(`Connecting to server "${serverConfig.name}"...\n`, {
@@ -890,14 +879,6 @@ export class MCPClient {
       `✓ Refreshed ${this.servers.size} server(s): ${Array.from(this.servers.keys()).join(', ')}\n`,
       { type: 'success' },
     );
-  }
-
-  /**
-   * Check if all configured servers (including disabled) are currently connected.
-   * Used by ablation to skip redundant refreshes.
-   */
-  areAllServersConnected(): boolean {
-    return this.serverConfigs.every(config => this.servers.has(config.name));
   }
 
   private async initMCPTools() {
@@ -1309,13 +1290,14 @@ export class MCPClient {
    * Save current chat state (messages and session) for later restoration
    * Used by ablation to preserve the original chat while running tests
    */
-  saveState(): { messages: Message[]; tokenCount: number } {
-    // End current session to save it to disk
-    this.chatHistoryManager.endSession('Session paused for ablation');
+  saveState(): { messages: Message[]; tokenCount: number; chatSession: { session: ChatSession; startTime: Date; toolUseCount: number } | null } {
+    // Pause the chat history session (preserves state in memory without saving to disk)
+    const chatSession = this.chatHistoryManager.pauseSession();
 
     return {
-      messages: [...this.messages], // Clone the messages array
+      messages: [...this.messages],
       tokenCount: this.currentTokenCount,
+      chatSession,
     };
   }
 
@@ -1324,7 +1306,7 @@ export class MCPClient {
    * Optionally accepts provider/model to restore to original configuration
    */
   async restoreState(
-    state: { messages: Message[]; tokenCount: number },
+    state: { messages: Message[]; tokenCount: number; chatSession: { session: ChatSession; startTime: Date; toolUseCount: number } | null },
     provider?: ModelProvider,
     model?: string
   ): Promise<void> {
@@ -1340,14 +1322,10 @@ export class MCPClient {
     this.messages = state.messages;
     this.currentTokenCount = state.tokenCount;
 
-    // Start a new session (continuation of the original)
-    const serverNames = Array.from(this.servers.keys());
-    const enabledTools = this.toolManager.getEnabledTools(this.tools).map(t => ({
-      name: t.name,
-      description: t.description || '',
-      input_schema: t.input_schema,
-    }));
-    this.chatHistoryManager.startSession(this.model, serverNames, enabledTools);
+    // Resume the original chat history session (preserves all pre-ablation messages)
+    if (state.chatSession) {
+      this.chatHistoryManager.resumeSession(state.chatSession);
+    }
 
     if (this.messages.length > 0) {
       this.logger.log(`Restored chat with ${this.messages.length} messages\n`, { type: 'info' });
