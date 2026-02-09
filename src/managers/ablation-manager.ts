@@ -419,7 +419,8 @@ export class AblationManager {
    */
   getRunDirectory(ablationName: string, timestamp?: string): string {
     const ts = timestamp || this.formatTimestamp(new Date());
-    return join(RUNS_DIR, sanitizeFolderName(ablationName), ts);
+    const dateFolder = ts.substring(0, 10); // YYYY-MM-DD
+    return join(RUNS_DIR, dateFolder, sanitizeFolderName(ablationName), ts);
   }
 
   /**
@@ -492,24 +493,25 @@ export class AblationManager {
    * List all runs for an ablation
    */
   listRuns(ablationName: string): { timestamp: string; run: AblationRun }[] {
-    const ablationRunsDir = join(RUNS_DIR, sanitizeFolderName(ablationName));
     const runs: { timestamp: string; run: AblationRun }[] = [];
 
-    if (!existsSync(ablationRunsDir)) {
-      return runs;
-    }
-
     try {
-      const folders = readdirSync(ablationRunsDir);
+      if (!existsSync(RUNS_DIR)) return runs;
 
-      for (const folder of folders) {
-        const folderPath = join(ablationRunsDir, folder);
-        const stats = statSync(folderPath);
+      // Scan date folders (YYYY-MM-DD) under runs/
+      const dateFolders = readdirSync(RUNS_DIR);
+      for (const dateFolder of dateFolders) {
+        const ablationDir = join(RUNS_DIR, dateFolder, sanitizeFolderName(ablationName));
+        if (!existsSync(ablationDir) || !statSync(ablationDir).isDirectory()) continue;
 
-        if (stats.isDirectory()) {
+        const timestampFolders = readdirSync(ablationDir);
+        for (const tsFolder of timestampFolders) {
+          const folderPath = join(ablationDir, tsFolder);
+          if (!statSync(folderPath).isDirectory()) continue;
+
           const run = this.loadRunResults(folderPath);
           if (run) {
-            runs.push({ timestamp: folder, run });
+            runs.push({ timestamp: tsFolder, run });
           }
         }
       }
