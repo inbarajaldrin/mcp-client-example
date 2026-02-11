@@ -5,6 +5,7 @@
 import readline from 'readline/promises';
 import { cpSync, existsSync } from 'fs';
 import { join } from 'path';
+import { execSync } from 'child_process';
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import { MCPClient } from '../index.js';
 import { Logger } from '../logger.js';
@@ -521,6 +522,10 @@ export class AblationCLI {
         '  Use @tool-exec for execution without context injection.\n',
         { type: 'info' },
       );
+      this.logger.log(
+        '  Use @shell:<command> to run a CLI command in the system shell.\n',
+        { type: 'info' },
+      );
       this.logger.log('  Type "done" to finish the phase.\n', { type: 'info' });
       const commands: string[] = [];
       let pendingCommand: string | null = null; // Track commands waiting for an argument
@@ -623,6 +628,13 @@ export class AblationCLI {
               this.logger.log(`    ℹ️  Tool call: ${parsed.toolName}${injectInfo}\n`, { type: 'info' });
             } else {
               this.logger.log(`    ⚠️  Warning: Invalid tool call syntax\n`, { type: 'warning' });
+            }
+          } else if (input.startsWith('@shell:')) {
+            const shellCmd = input.slice('@shell:'.length).trim();
+            if (shellCmd) {
+              this.logger.log(`    ℹ️  Shell command: ${shellCmd}\n`, { type: 'info' });
+            } else {
+              this.logger.log(`    ⚠️  Warning: Empty shell command\n`, { type: 'warning' });
             }
           }
         }
@@ -759,28 +771,38 @@ export class AblationCLI {
       }
     }
 
-    // Step 6: Post-Tool Hooks (optional)
-    this.logger.log('\nStep 6: Post-Tool Hooks (optional)\n', { type: 'info' });
-    this.logger.log('  Automatically run a command after a specific tool call.\n', { type: 'info' });
+    // Step 6: Tool Hooks (optional)
+    this.logger.log('\nStep 6: Tool Hooks (optional)\n', { type: 'info' });
+    this.logger.log('  Automatically run a command before or after a specific tool call.\n', { type: 'info' });
 
     const topLevelHooks: PostToolHook[] = [];
     const phaseHooksMap = new Map<string, PostToolHook[]>();
 
     const addHooks = (
-      await rl.question('  Add post-tool hooks? (y/N): ')
+      await rl.question('  Add tool hooks? (y/N): ')
     ).trim().toLowerCase();
 
     if (addHooks === 'y' || addHooks === 'yes') {
       while (true) {
-        const afterTool = (
+        this.logger.log('  Timing:\n', { type: 'info' });
+        this.logger.log('    1. After (run after tool completes)\n', { type: 'info' });
+        this.logger.log('    2. Before (run before tool executes)\n', { type: 'info' });
+        const timingStr = (await rl.question('  Select timing: ')).trim();
+        const isBefore = timingStr === '2';
+
+        const toolName = (
           await rl.question('  Tool name to watch (e.g. ros-mcp-server__verify_assembly): ')
         ).trim();
-        if (!afterTool) break;
+        if (!toolName) break;
 
         const runCmd = (
-          await rl.question('  Command to run after (e.g. @tool-exec:server__tool(arg=\'val\')): ')
+          await rl.question(`  Command to run ${isBefore ? 'before' : 'after'} (e.g. @tool-exec:server__tool(arg='val')): `)
         ).trim();
         if (!runCmd) break;
+
+        const newHook: PostToolHook = isBefore
+          ? { before: toolName, run: runCmd }
+          : { after: toolName, run: runCmd };
 
         // Ask where to apply
         this.logger.log('  Apply to:\n', { type: 'info' });
@@ -794,15 +816,16 @@ export class AblationCLI {
         ).trim();
         const scopeIdx = parseInt(scopeStr);
 
+        const trigger = isBefore ? `before ${toolName}` : `after ${toolName}`;
         if (scopeIdx === 1) {
-          topLevelHooks.push({ after: afterTool, run: runCmd });
-          this.logger.log(`  ✓ Hook added (all phases): after ${afterTool}\n`, { type: 'success' });
+          topLevelHooks.push(newHook);
+          this.logger.log(`  ✓ Hook added (all phases): ${trigger}\n`, { type: 'success' });
         } else if (scopeIdx >= 2 && scopeIdx <= phases.length + 1) {
           const targetPhase = phases[scopeIdx - 2].name;
           const existing = phaseHooksMap.get(targetPhase) || [];
-          existing.push({ after: afterTool, run: runCmd });
+          existing.push(newHook);
           phaseHooksMap.set(targetPhase, existing);
-          this.logger.log(`  ✓ Hook added (phase: ${targetPhase}): after ${afterTool}\n`, { type: 'success' });
+          this.logger.log(`  ✓ Hook added (phase: ${targetPhase}): ${trigger}\n`, { type: 'success' });
         } else {
           this.logger.log('  ✗ Invalid selection, skipping hook.\n', { type: 'error' });
           continue;
@@ -942,13 +965,15 @@ export class AblationCLI {
       const totalHooks = (ablation.hooks?.length ?? 0)
         + ablation.phases.reduce((sum, p) => sum + (p.hooks?.length ?? 0), 0);
       if (totalHooks > 0) {
-        this.logger.log(`\n  Post-tool hooks: ${totalHooks}\n`, { type: 'info' });
+        this.logger.log(`\n  Tool hooks: ${totalHooks}\n`, { type: 'info' });
         for (const hook of (ablation.hooks ?? [])) {
-          this.logger.log(`    • [all phases] after ${hook.after} → ${hook.run}\n`, { type: 'info' });
+          const trigger = hook.before ? `before ${hook.before}` : `after ${hook.after}`;
+          this.logger.log(`    • [all phases] ${trigger} → ${hook.run}\n`, { type: 'info' });
         }
         for (const phase of ablation.phases) {
           for (const hook of (phase.hooks ?? [])) {
-            this.logger.log(`    • [${phase.name}] after ${hook.after} → ${hook.run}\n`, { type: 'info' });
+            const trigger = hook.before ? `before ${hook.before}` : `after ${hook.after}`;
+            this.logger.log(`    • [${phase.name}] ${trigger} → ${hook.run}\n`, { type: 'info' });
           }
         }
       }
@@ -1245,6 +1270,57 @@ export class AblationCLI {
       }
     }
 
+    // Handle @shell: commands - run CLI commands in system environment
+    if (trimmedCommand.startsWith('@shell:')) {
+      const shellCommand = trimmedCommand.slice('@shell:'.length).trim();
+      if (!shellCommand) {
+        throw new Error('Empty shell command. Usage: @shell:<command>');
+      }
+
+      this.logger.log(`    Executing shell: ${shellCommand}\n`, { type: 'info' });
+
+      try {
+        const output = execSync(shellCommand, {
+          encoding: 'utf-8',
+          timeout: 300_000, // 5 minute timeout
+          stdio: ['pipe', 'pipe', 'pipe'],
+        });
+
+        const displayText = output.trim();
+        if (displayText) {
+          const truncated = displayText.length > 500
+            ? displayText.substring(0, 500) + '...'
+            : displayText;
+          this.logger.log(`    Shell output: ${truncated}\n`, { type: 'info' });
+        }
+
+        return {
+          toolExecResult: {
+            toolName: '@shell',
+            args: { command: shellCommand },
+            displayText: displayText || undefined,
+            success: true,
+          },
+        };
+      } catch (error: any) {
+        // execSync throws on non-zero exit codes; capture stderr + stdout
+        const stderr = error.stderr?.toString().trim() || '';
+        const stdout = error.stdout?.toString().trim() || '';
+        const combinedOutput = [stdout, stderr].filter(Boolean).join('\n');
+        const errorMessage = combinedOutput || error.message;
+
+        this.logger.log(`    Shell command failed: ${errorMessage}\n`, { type: 'error' });
+        throw Object.assign(new Error(errorMessage), {
+          _toolExecResult: {
+            toolName: '@shell',
+            args: { command: shellCommand },
+            success: false,
+            error: errorMessage,
+          },
+        });
+      }
+    }
+
     // Handle slash commands
     if (trimmedCommand.startsWith('/')) {
       // Parse the command
@@ -1424,8 +1500,10 @@ export class AblationCLI {
 
     for (let i = 0; i < ablations.length; i++) {
       const ablation = ablations[i];
-      const totalRuns = this.ablationManager.getTotalRuns(ablation);
-      this.logger.log(`  ${i + 1}. ${ablation.name} (${totalRuns} runs)\n`, {
+      const phaseCount = ablation.phases.length;
+      const iterations = ablation.runs ?? 1;
+      const runsLabel = iterations > 1 ? `, ${iterations} runs` : '';
+      this.logger.log(`  ${i + 1}. ${ablation.name} (${phaseCount} phase${phaseCount !== 1 ? 's' : ''}${runsLabel})\n`, {
         type: 'info',
       });
     }
@@ -1448,17 +1526,19 @@ export class AblationCLI {
     }
 
     // Display summary of all selected ablations
-    const totalAblationRuns = selectedAblations.reduce(
-      (sum, a) => sum + this.ablationManager.getTotalRuns(a), 0,
+    const totalAblationPhases = selectedAblations.reduce(
+      (sum, a) => sum + a.phases.length, 0,
     );
     if (selectedAblations.length > 1) {
       this.logger.log(
-        `\n  Selected ${selectedAblations.length} ablation(s) (${totalAblationRuns} total runs):\n`,
+        `\n  Selected ${selectedAblations.length} ablation(s) (${totalAblationPhases} total phases):\n`,
         { type: 'info' },
       );
       for (const a of selectedAblations) {
-        const runs = this.ablationManager.getTotalRuns(a);
-        this.logger.log(`    - ${a.name} (${runs} runs)\n`, { type: 'info' });
+        const phaseCount = a.phases.length;
+        const iterations = a.runs ?? 1;
+        const runsLabel = iterations > 1 ? `, ${iterations} runs` : '';
+        this.logger.log(`    - ${a.name} (${phaseCount} phase${phaseCount !== 1 ? 's' : ''}${runsLabel})\n`, { type: 'info' });
       }
     }
 
@@ -2067,6 +2147,48 @@ export class AblationCLI {
                 continue;
               }
 
+              // Execute before-hooks (only for @tool-exec/@tool commands)
+              const trimmedCmd = command.trim();
+              if (trimmedCmd.startsWith('@tool:') || trimmedCmd.startsWith('@tool-exec:')) {
+                const parsed = parseDirectToolCall(trimmedCmd);
+                if (parsed) {
+                  const hooks = this.ablationManager.getHooksForPhase(ablation, phase.name);
+                  for (const hook of hooks) {
+                    if (hook.before === parsed.toolName) {
+                      if (this.callbacks.isAbortRequested()) break;
+
+                      const hookCmd = resolvedArguments
+                        ? this.ablationManager.substituteArguments([hook.run], resolvedArguments)[0]
+                        : hook.run;
+                      this.logger.log(`  ↳ Before hook: executing ${hookCmd}\n`, { type: 'info' });
+                      const hookStartTime = Date.now();
+                      const hookResult = await this.executeAblationCommand(
+                        hookCmd,
+                        ablation.settings.maxIterations,
+                        ablation.dryRun || false,
+                      );
+
+                      if (ablation.dryRun && hookResult.toolExecResult) {
+                        const hookDuration = Date.now() - hookStartTime;
+                        toolExecLog.push({
+                          commandIndex: i,
+                          command: hook.run,
+                          toolName: hookResult.toolExecResult.toolName,
+                          args: hookResult.toolExecResult.args,
+                          timestamp: new Date(hookStartTime).toISOString(),
+                          duration: hookDuration,
+                          durationFormatted: formatDuration(hookDuration),
+                          success: hookResult.toolExecResult.success,
+                          displayText: hookResult.toolExecResult.displayText,
+                          isHook: true,
+                          triggeredBy: parsed.toolName,
+                        });
+                      }
+                    }
+                  }
+                }
+              }
+
               const cmdStartTime = Date.now();
               const cmdResult = await this.executeAblationCommand(
                 command,
@@ -2090,7 +2212,7 @@ export class AblationCLI {
                 });
               }
 
-              // Execute post-tool hooks (only for @tool-exec/@tool commands, no recursion)
+              // Execute after-hooks (only for @tool-exec/@tool commands, no recursion)
               if (cmdResult.toolExecResult) {
                 const hooks = this.ablationManager.getHooksForPhase(ablation, phase.name);
                 for (const hook of hooks) {
@@ -2962,22 +3084,24 @@ export class AblationCLI {
 
       const allHooks: { label: string; isTopLevel: boolean; phase?: string; index: number }[] = [];
 
-      this.logger.log('\n  Current post-tool hooks:\n', { type: 'info' });
+      this.logger.log('\n  Current tool hooks:\n', { type: 'info' });
       if (topHooks.length === 0 && phaseHooks.length === 0) {
         this.logger.log('    (none)\n', { type: 'info' });
       } else {
         let num = 1;
         for (let i = 0; i < topHooks.length; i++) {
           const h = topHooks[i];
-          this.logger.log(`    ${num}. [all phases] after ${h.after} → ${h.run}\n`, { type: 'info' });
-          allHooks.push({ label: `[all phases] ${h.after}`, isTopLevel: true, index: i });
+          const trigger = h.before ? `before ${h.before}` : `after ${h.after}`;
+          this.logger.log(`    ${num}. [all phases] ${trigger} → ${h.run}\n`, { type: 'info' });
+          allHooks.push({ label: `[all phases] ${trigger}`, isTopLevel: true, index: i });
           num++;
         }
         for (const ph of phaseHooks) {
           const phaseObj = ablation.phases.find(p => p.name === ph.phase);
           const hookIdx = phaseObj?.hooks?.indexOf(ph.hook) ?? 0;
-          this.logger.log(`    ${num}. [${ph.phase}] after ${ph.hook.after} → ${ph.hook.run}\n`, { type: 'info' });
-          allHooks.push({ label: `[${ph.phase}] ${ph.hook.after}`, isTopLevel: false, phase: ph.phase, index: hookIdx });
+          const trigger = ph.hook.before ? `before ${ph.hook.before}` : `after ${ph.hook.after}`;
+          this.logger.log(`    ${num}. [${ph.phase}] ${trigger} → ${ph.hook.run}\n`, { type: 'info' });
+          allHooks.push({ label: `[${ph.phase}] ${trigger}`, isTopLevel: false, phase: ph.phase, index: hookIdx });
           num++;
         }
       }
@@ -3000,24 +3124,34 @@ export class AblationCLI {
       }
 
       this.logger.log('\n  Options:\n', { type: 'info' });
-      this.logger.log('    1. Add post-tool hook\n', { type: 'info' });
-      this.logger.log('    2. Remove post-tool hook\n', { type: 'info' });
+      this.logger.log('    1. Add tool hook\n', { type: 'info' });
+      this.logger.log('    2. Remove tool hook\n', { type: 'info' });
       this.logger.log('    3. Edit lifecycle hooks (onStart/onEnd)\n', { type: 'info' });
       this.logger.log('    4. Done\n', { type: 'info' });
 
       const choice = (await rl.question('\n  Select option: ')).trim();
 
       if (choice === '1') {
-        // Add post-tool hook
-        const afterTool = (
+        // Add tool hook
+        this.logger.log('  Timing:\n', { type: 'info' });
+        this.logger.log('    1. After (run after tool completes)\n', { type: 'info' });
+        this.logger.log('    2. Before (run before tool executes)\n', { type: 'info' });
+        const timingStr = (await rl.question('  Select timing: ')).trim();
+        const isBefore = timingStr === '2';
+
+        const toolName = (
           await rl.question('  Tool name to watch (e.g. ros-mcp-server__verify_assembly): ')
         ).trim();
-        if (!afterTool) continue;
+        if (!toolName) continue;
 
         const runCmd = (
-          await rl.question('  Command to run after (e.g. @tool-exec:server__tool(arg=\'val\')): ')
+          await rl.question(`  Command to run ${isBefore ? 'before' : 'after'} (e.g. @tool-exec:server__tool(arg='val')): `)
         ).trim();
         if (!runCmd) continue;
+
+        const newHook: PostToolHook = isBefore
+          ? { before: toolName, run: runCmd }
+          : { after: toolName, run: runCmd };
 
         this.logger.log('  Apply to:\n', { type: 'info' });
         this.logger.log('    1. All phases\n', { type: 'info' });
@@ -3030,13 +3164,13 @@ export class AblationCLI {
 
         if (scopeIdx === 1) {
           if (!ablation.hooks) ablation.hooks = [];
-          ablation.hooks.push({ after: afterTool, run: runCmd });
+          ablation.hooks.push(newHook);
           this.ablationManager.update(ablationName, { hooks: ablation.hooks });
           this.logger.log('  ✓ Top-level hook added.\n', { type: 'success' });
         } else if (scopeIdx >= 2 && scopeIdx <= ablation.phases.length + 1) {
           const phase = ablation.phases[scopeIdx - 2];
           if (!phase.hooks) phase.hooks = [];
-          phase.hooks.push({ after: afterTool, run: runCmd });
+          phase.hooks.push(newHook);
           this.ablationManager.update(ablationName, { phases: ablation.phases });
           this.logger.log(`  ✓ Hook added to phase: ${phase.name}\n`, { type: 'success' });
         } else {

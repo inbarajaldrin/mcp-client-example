@@ -21,7 +21,8 @@ export interface AblationModel {
 }
 
 export interface PostToolHook {
-  after: string;     // Full tool name to match (e.g. "ros-mcp-server__verify_assembly")
+  after?: string;    // Full tool name to match AFTER execution (e.g. "ros-mcp-server__verify_assembly")
+  before?: string;   // Full tool name to match BEFORE execution (only for @tool-exec/@tool commands)
   run: string;       // Command to execute (e.g. "@tool-exec:ros2-video-recorder__capture_camera_image(...)")
 }
 
