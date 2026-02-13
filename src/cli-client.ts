@@ -15,13 +15,14 @@ import { ChatHistoryCLI } from './cli/chat-history-cli.js';
 import { PromptCLI } from './cli/prompt-cli.js';
 import { AblationCLI } from './cli/ablation-cli.js';
 import { ToolReplayCLI } from './cli/tool-replay-cli.js';
+import { ServerRefreshCLI } from './cli/server-refresh-cli.js';
 import { HumanInTheLoopManager } from './managers/hil-manager.js';
 
 // Command list for tab autocomplete
 const CLI_COMMANDS = [
   '/help', '/exit', '/clear', '/clear-context',
   '/token-status', '/tokens', '/summarize', '/summarize-now',
-  '/settings', '/refresh', '/refresh-servers',
+  '/settings', '/refresh', '/refresh-servers', '/refresh-select',
   '/set-timeout', '/set-max-iterations',
   '/todo-on', '/todo-off',
   '/orchestrator-on', '/orchestrator-off',
@@ -52,6 +53,7 @@ export class MCPClientCLI {
   private promptCLI: PromptCLI;
   private ablationCLI: AblationCLI;
   private toolReplayCLI: ToolReplayCLI;
+  private serverRefreshCLI: ServerRefreshCLI;
   private hilManager: HumanInTheLoopManager;
   private escapeKeyHandler: ((_str: string, key: { name?: string }) => void) | null = null;
 
@@ -185,6 +187,8 @@ export class MCPClientCLI {
       },
       getCompleter: () => this.completer.bind(this),
     });
+
+    this.serverRefreshCLI = new ServerRefreshCLI(this.client, this.logger, () => this.rl);
 
     // Set up signal handlers for graceful shutdown
     this.signalHandler = new SignalHandler(this.logger, async () => {
@@ -683,7 +687,8 @@ export class MCPClientCLI {
       `  /token-status or /tokens - Show current token usage\n` +
       `  /summarize or /summarize-now - Manually trigger summarization\n` +
       `  /settings - View and modify client preferences\n` +
-      `  /refresh or /refresh-servers - Refresh MCP server connections without restarting\n` +
+      `  /refresh or /refresh-servers - Refresh all MCP server connections\n` +
+      `  /refresh-select - Interactive selection for refreshing specific servers\n` +
       `  /set-timeout <seconds> - Set MCP tool timeout (1-3600, or "infinity"/"unlimited")\n` +
       `  /set-max-iterations <number> - Set max iterations between agent calls (1-10000, or "infinity"/"unlimited")\n` +
       `  /hil - Toggle human-in-the-loop tool approval\n` +
@@ -929,6 +934,18 @@ export class MCPClientCLI {
           } catch (error) {
             this.logger.log(
               `\nFailed to refresh servers: ${error}\n`,
+              { type: 'error' },
+            );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/refresh-select') {
+          try {
+            await this.serverRefreshCLI.interactiveServerSelection();
+          } catch (error) {
+            this.logger.log(
+              `\nFailed to open server refresh selection: ${error}\n`,
               { type: 'error' },
             );
           }

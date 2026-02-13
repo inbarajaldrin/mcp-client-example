@@ -894,6 +894,74 @@ export class MCPClient {
     );
   }
 
+  /**
+   * Refresh a specific server by name.
+   */
+  async refreshServer(serverName: string) {
+    // Find the server config
+    const serverConfig = this.serverConfigs.find((c) => c.name === serverName);
+    if (!serverConfig) {
+      throw new Error(`Server "${serverName}" not found in configuration`);
+    }
+
+    // Close the existing connection
+    const existingConnection = this.servers.get(serverName);
+    if (existingConnection) {
+      try {
+        await existingConnection.client.close().catch(() => {
+          // Ignore errors during cleanup
+        });
+      } catch (error) {
+        // Ignore
+      }
+      this.servers.delete(serverName);
+    }
+
+    // Reconnect to the server
+    try {
+      // Inject IPC URL into mcp-tools-orchestrator's environment
+      const config = { ...serverConfig.config };
+      if (serverName === 'mcp-tools-orchestrator' && process.env.MCP_CLIENT_IPC_URL) {
+        config.env = {
+          ...config.env,
+          MCP_CLIENT_IPC_URL: process.env.MCP_CLIENT_IPC_URL,
+        };
+      }
+
+      const client = new Client(
+        { name: 'cli-client', version: '1.0.0' },
+        { capabilities: { elicitation: { form: {} } } },
+      );
+      const transport = new StdioClientTransport(config);
+
+      await client.connect(transport);
+
+      // Register elicitation request handler
+      client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
+        return this.elicitationHandler.handleElicitation(request);
+      });
+
+      // Give the server process a moment to fully initialize
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      const connection: ServerConnection = {
+        name: serverName,
+        client,
+        transport,
+        tools: [],
+        prompts: [],
+      };
+
+      this.servers.set(serverName, connection);
+
+      // Reinitialize tools and prompts for just this server
+      await this.initMCPTools();
+      await this.initMCPPrompts();
+    } catch (error) {
+      throw new Error(`Failed to refresh server "${serverName}": ${error}`);
+    }
+  }
+
   private async initMCPTools() {
     const allTools: Tool[] = [];
     const serversWithTools = new Set<string>();
