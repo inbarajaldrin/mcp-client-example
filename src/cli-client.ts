@@ -156,6 +156,7 @@ export class MCPClientCLI {
         setAbortMode: (enabled: boolean) => this.signalHandler.setAbortMode(enabled),
         startKeyboardMonitor: () => this.keyboardMonitor.start(),
         stopKeyboardMonitor: () => this.keyboardMonitor.stop(),
+        getHILManager: () => this.hilManager,
       },
     );
 

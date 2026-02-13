@@ -230,6 +230,8 @@ export interface AblationCLICallbacks {
   startKeyboardMonitor: () => void;
   /** Stop keyboard monitor */
   stopKeyboardMonitor: () => void;
+  /** Get HIL manager */
+  getHILManager: () => any; // HumanInTheLoopManager
 }
 
 /**
@@ -1623,6 +1625,22 @@ export class AblationCLI {
       return;
     }
 
+    // Check if HIL is enabled and offer to disable for automation
+    const hilManager = this.callbacks.getHILManager();
+    const originalHILState = hilManager.isEnabled();
+    let disabledHILForAblation = false;
+
+    if (originalHILState) {
+      const hilDisableAnswer = (await rl.question('\nHuman-in-the-loop is enabled. Disable for ablation automation? (Y/n): '))
+        .trim()
+        .toLowerCase();
+      if (hilDisableAnswer !== 'n' && hilDisableAnswer !== 'no') {
+        hilManager.setEnabled(false);
+        disabledHILForAblation = true;
+        this.logger.log('  Disabled HIL for ablation run\n', { type: 'info' });
+      }
+    }
+
     // Save original provider/model and chat state to restore after all ablations
     const originalProviderName = this.client.getProviderName();
     const originalModel = this.client.getModel();
@@ -1694,6 +1712,13 @@ export class AblationCLI {
         `  ✓ Restored to ${originalProviderName}/${originalModel}\n`,
         { type: 'success' },
       );
+    }
+
+    // Restore HIL state if we disabled it
+    if (disabledHILForAblation) {
+      hilManager.setEnabled(originalHILState);
+      this.preferencesManager.setHILEnabled(originalHILState);
+      this.logger.log('  ✓ Restored human-in-the-loop to original state\n', { type: 'success' });
     }
   }
 
