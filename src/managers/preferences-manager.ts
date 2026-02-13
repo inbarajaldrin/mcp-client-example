@@ -14,6 +14,7 @@ export interface ClientPreferences {
   promptStates?: Record<string, boolean>;
   mcpTimeout?: number; // MCP tool call timeout in seconds
   maxIterations?: number; // Maximum iterations between agent calls
+  hilEnabled?: boolean; // Human-in-the-loop confirmations
 }
 
 interface ClientConfig {
@@ -23,6 +24,7 @@ interface ClientConfig {
   promptStates?: Record<string, boolean>;
   mcpTimeout?: number;
   maxIterations?: number;
+  hilEnabled?: boolean;
 }
 
 export class PreferencesManager {
@@ -45,6 +47,7 @@ export class PreferencesManager {
       this.preferences = {
         mcpTimeout: 60, // Default: 60 seconds
         maxIterations: 100, // Default: 100 iterations
+        hilEnabled: true, // Default: enabled
       };
       return;
     }
@@ -58,6 +61,7 @@ export class PreferencesManager {
         promptStates: config.promptStates,
         mcpTimeout: config.mcpTimeout ?? 60,
         maxIterations: config.maxIterations ?? 100,
+        hilEnabled: config.hilEnabled ?? true,
       };
     } catch (error) {
       this.logger.log(
@@ -67,6 +71,7 @@ export class PreferencesManager {
       this.preferences = {
         mcpTimeout: 60,
         maxIterations: 100,
+        hilEnabled: true,
       };
     }
   }
@@ -100,6 +105,7 @@ export class PreferencesManager {
         promptStates: this.preferences.promptStates || existingConfig.promptStates,
         mcpTimeout: this.preferences.mcpTimeout,
         maxIterations: this.preferences.maxIterations,
+        hilEnabled: this.preferences.hilEnabled,
       };
 
       writeFileSync(this.configFile, JSON.stringify(config, null, 2));
@@ -227,6 +233,15 @@ export class PreferencesManager {
    */
   getPromptStates(): Record<string, boolean> {
     return this.preferences.promptStates || {};
+  }
+
+  getHILEnabled(): boolean {
+    return this.preferences.hilEnabled ?? true;
+  }
+
+  setHILEnabled(enabled: boolean): void {
+    this.preferences.hilEnabled = enabled;
+    this.savePreferences();
   }
 }
 

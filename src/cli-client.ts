@@ -15,6 +15,7 @@ import { ChatHistoryCLI } from './cli/chat-history-cli.js';
 import { PromptCLI } from './cli/prompt-cli.js';
 import { AblationCLI } from './cli/ablation-cli.js';
 import { ToolReplayCLI } from './cli/tool-replay-cli.js';
+import { HumanInTheLoopManager } from './managers/hil-manager.js';
 
 // Command list for tab autocomplete
 const CLI_COMMANDS = [
@@ -30,6 +31,7 @@ const CLI_COMMANDS = [
   '/chat-list', '/chat-search', '/chat-restore', '/chat-export', '/chat-rename', '/chat-clear',
   '/ablation-create', '/ablation-list', '/ablation-edit', '/ablation-run', '/ablation-delete', '/ablation-results',
   '/tool-replay',
+  '/hil',
 ];
 
 export class MCPClientCLI {
@@ -50,6 +52,7 @@ export class MCPClientCLI {
   private promptCLI: PromptCLI;
   private ablationCLI: AblationCLI;
   private toolReplayCLI: ToolReplayCLI;
+  private hilManager: HumanInTheLoopManager;
   private escapeKeyHandler: ((_str: string, key: { name?: string }) => void) | null = null;
 
   constructor(
@@ -72,6 +75,8 @@ export class MCPClientCLI {
     this.logger = new Logger({ mode: 'verbose' });
     this.attachmentManager = new AttachmentManager(this.logger);
     this.preferencesManager = new PreferencesManager(this.logger);
+    this.hilManager = new HumanInTheLoopManager(this.logger);
+    this.hilManager.setEnabled(this.preferencesManager.getHILEnabled());
     this.ablationManager = new AblationManager(this.logger);
 
     // Set up keyboard monitor for abort detection
@@ -275,6 +280,11 @@ export class MCPClientCLI {
         return this.askForceStopPrompt(toolName, elapsedSeconds, abortSignal);
       });
 
+      // Set human-in-the-loop approval callback
+      this.client.setToolApprovalCallback(async (toolName, toolInput) => {
+        return this.requestHILApproval(toolName, toolInput);
+      });
+
       await this.chat_loop();
     } catch (error) {
       if (!this.isShuttingDown) {
@@ -458,6 +468,42 @@ export class MCPClientCLI {
     }
   }
 
+  private async requestHILApproval(toolName: string, toolInput: Record<string, any>): Promise<'execute' | 'skip'> {
+    if (!this.hilManager.isEnabled()) {
+      return 'execute';
+    }
+
+    // Pause keyboard monitoring for readline prompt
+    const wasMonitoring = this.keyboardMonitor.isMonitoring;
+    if (wasMonitoring) {
+      this.keyboardMonitor.stop();
+    }
+    this.keyboardMonitor.clearPendingInput();
+
+    let tempRl: readline.Interface | null = null;
+    let rlToUse = this.rl;
+
+    if (!rlToUse) {
+      tempRl = readline.createInterface({
+        input: process.stdin,
+        output: process.stdout,
+      });
+      rlToUse = tempRl;
+    }
+
+    try {
+      const decision = await this.hilManager.requestToolConfirmation(toolName, toolInput, rlToUse);
+      return decision;
+    } finally {
+      if (tempRl) {
+        tempRl.close();
+      }
+      if (wasMonitoring) {
+        this.keyboardMonitor.start();
+      }
+    }
+  }
+
   /**
    * Ask user what to do with existing todos
    * Returns: 'clear' | 'skip' | 'leave'
@@ -634,6 +680,7 @@ export class MCPClientCLI {
       `  /refresh or /refresh-servers - Refresh MCP server connections without restarting\n` +
       `  /set-timeout <seconds> - Set MCP tool timeout (1-3600, or "infinity"/"unlimited")\n` +
       `  /set-max-iterations <number> - Set max iterations between agent calls (1-10000, or "infinity"/"unlimited")\n` +
+      `  /hil - Toggle human-in-the-loop tool approval\n` +
       `\n` +
       `Todo Management:\n` +
       `  /todo-on - Enable todo mode (agent will track tasks)\n` +
@@ -933,6 +980,18 @@ export class MCPClientCLI {
               { type: 'error' },
             );
           }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/hil') {
+          this.hilManager.toggle();
+          const enabled = this.hilManager.isEnabled();
+          this.preferencesManager.setHILEnabled(enabled);
+          const status = enabled ? 'enabled' : 'disabled';
+          this.logger.log(
+            `\n${enabled ? '🧑‍💻' : '🤖'} Human-in-the-loop tool approval ${status}\n`,
+            { type: enabled ? 'success' : 'warning' },
+          );
           continue;
         }
 
@@ -1346,6 +1405,8 @@ export class MCPClientCLI {
         this.client.getChatHistoryManager().addUserMessage(query, attachmentMetadata);
 
         try {
+          // Reset HIL session state for each new query
+          this.hilManager.resetSession();
           // Process query with attachments if any are pending (use finalQuery which includes system prompt if needed)
           // Pass cancellation check function
           await this.client.processQuery(

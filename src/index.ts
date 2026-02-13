@@ -97,6 +97,7 @@ export class MCPClient {
   private toolExecutor: MCPToolExecutor;
   private forceStopCallback?: (toolName: string, elapsedSeconds: number, abortSignal?: AbortSignal) => Promise<boolean>;
   private isAbortRequestedCallback?: () => boolean;
+  private toolApprovalCallback?: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | 'skip'>;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -173,8 +174,14 @@ export class MCPClient {
         return Promise.resolve(false); // Default: don't force stop
       },
       killAndRestartServer: (serverName) => this.killAndRestartServer(serverName),
+      requestToolApproval: (toolName, toolInput) => {
+        if (this.toolApprovalCallback) {
+          return this.toolApprovalCallback(toolName, toolInput);
+        }
+        return Promise.resolve('execute' as const);
+      },
     });
-    
+
     // Initialize prompt manager
     this.promptManager = new PromptManager(this.logger);
     
@@ -253,6 +260,12 @@ export class MCPClient {
         return Promise.resolve(false); // Default: don't force stop
       },
       killAndRestartServer: (serverName) => client.killAndRestartServer(serverName),
+      requestToolApproval: (toolName, toolInput) => {
+        if (client.toolApprovalCallback) {
+          return client.toolApprovalCallback(toolName, toolInput);
+        }
+        return Promise.resolve('execute' as const);
+      },
     });
     client.promptManager = new PromptManager(client.logger);
     client.chatHistoryManager = new ChatHistoryManager(client.logger);
@@ -1276,6 +1289,14 @@ export class MCPClient {
    */
   setAbortRequestedCallback(callback: () => boolean): void {
     this.isAbortRequestedCallback = callback;
+  }
+
+  /**
+   * Set callback for human-in-the-loop tool approval.
+   * Called before each tool execution. Returns 'execute' to proceed or 'skip' to skip.
+   */
+  setToolApprovalCallback(callback: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | 'skip'>): void {
+    this.toolApprovalCallback = callback;
   }
 
   /**
