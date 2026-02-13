@@ -44,7 +44,7 @@ export class HumanInTheLoopManager {
 
     // Display tool info
     this.logger.log(
-      '\n' + chalk.yellow.bold('  🧑‍💻 Human-in-the-Loop Confirmation') + '\n',
+      '\n' + chalk.yellow.bold('  Human-in-the-Loop Confirmation') + '\n',
     );
     this.logger.log(
       chalk.cyan('  Tool: ') + chalk.bold(toolName) + '\n',
@@ -76,13 +76,13 @@ export class HumanInTheLoopManager {
     switch (answer) {
       case 'n':
       case 'no':
-        this.logger.log(chalk.yellow('  ⏭️  Tool call skipped\n'));
+        this.logger.log(chalk.yellow('  Tool call skipped\n'));
         return 'skip';
 
       case 's':
       case 'session':
         this.sessionAutoExecute = true;
-        this.logger.log(chalk.magenta('  🧑‍💻 Auto-approving remaining tools this session\n'));
+        this.logger.log(chalk.magenta('  Auto-approving remaining tools this session\n'));
         return 'execute';
 
       default: // y, yes, or anything else → execute

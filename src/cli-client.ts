@@ -989,7 +989,7 @@ export class MCPClientCLI {
           this.preferencesManager.setHILEnabled(enabled);
           const status = enabled ? 'enabled' : 'disabled';
           this.logger.log(
-            `\n${enabled ? '🧑‍💻' : '🤖'} Human-in-the-loop tool approval ${status}\n`,
+            `\nHuman-in-the-loop tool approval ${status}\n`,
             { type: enabled ? 'success' : 'warning' },
           );
           continue;
