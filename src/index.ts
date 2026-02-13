@@ -97,7 +97,7 @@ export class MCPClient {
   private toolExecutor: MCPToolExecutor;
   private forceStopCallback?: (toolName: string, elapsedSeconds: number, abortSignal?: AbortSignal) => Promise<boolean>;
   private isAbortRequestedCallback?: () => boolean;
-  private toolApprovalCallback?: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | 'skip'>;
+  private toolApprovalCallback?: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | { decision: 'reject'; message?: string }>;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -1292,10 +1292,11 @@ export class MCPClient {
   }
 
   /**
-   * Set callback for human-in-the-loop tool approval.
-   * Called before each tool execution. Returns 'execute' to proceed or 'skip' to skip.
+   * Set callback for tool approval before execution.
+   * Called before first tool, and before each tool if persistent mode enabled.
+   * Returns 'execute' to proceed, or rejection with optional message.
    */
-  setToolApprovalCallback(callback: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | 'skip'>): void {
+  setToolApprovalCallback(callback: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | { decision: 'reject'; message?: string }>): void {
     this.toolApprovalCallback = callback;
   }
 

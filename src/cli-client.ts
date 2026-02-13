@@ -76,7 +76,7 @@ export class MCPClientCLI {
     this.attachmentManager = new AttachmentManager(this.logger);
     this.preferencesManager = new PreferencesManager(this.logger);
     this.hilManager = new HumanInTheLoopManager(this.logger);
-    this.hilManager.setEnabled(this.preferencesManager.getHILEnabled());
+    // HIL is off by default, enabled only if user selects 'persistent' on first tool
     this.ablationManager = new AblationManager(this.logger);
 
     // Set up keyboard monitor for abort detection
@@ -469,11 +469,10 @@ export class MCPClientCLI {
     }
   }
 
-  private async requestHILApproval(toolName: string, toolInput: Record<string, any>): Promise<'execute' | 'skip'> {
-    if (!this.hilManager.isEnabled()) {
-      return 'execute';
-    }
-
+  private async requestHILApproval(
+    toolName: string,
+    toolInput: Record<string, any>,
+  ): Promise<'execute' | { decision: 'reject'; message?: string }> {
     // Pause keyboard monitoring for readline prompt
     const wasMonitoring = this.keyboardMonitor.isMonitoring;
     if (wasMonitoring) {
@@ -494,6 +493,12 @@ export class MCPClientCLI {
 
     try {
       const decision = await this.hilManager.requestToolConfirmation(toolName, toolInput, rlToUse);
+
+      // If persistent mode was enabled, persist the preference
+      if (decision === 'execute' && this.hilManager.isEnabled()) {
+        this.preferencesManager.setHILEnabled(true);
+      }
+
       return decision;
     } finally {
       if (tempRl) {

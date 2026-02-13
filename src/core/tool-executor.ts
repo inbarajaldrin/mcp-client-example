@@ -76,9 +76,9 @@ export interface MCPToolExecutorCallbacks {
   askForceStop?: (toolName: string, elapsedSeconds: number, abortSignal?: AbortSignal) => Promise<boolean>;
   /**
    * Request human-in-the-loop approval before executing a tool.
-   * Returns 'execute' to proceed, 'skip' to skip this tool.
+   * Returns 'execute' to proceed, or rejection with optional message.
    */
-  requestToolApproval?: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | 'skip'>;
+  requestToolApproval?: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | { decision: 'reject'; message?: string }>;
   /**
    * Kill and restart an MCP server to forcefully stop its running operations.
    * This kills the server process (and its child processes) then reconnects.
@@ -291,10 +291,15 @@ export class MCPToolExecutor {
     // Human-in-the-loop approval check
     if (!fromIPC && this.callbacks.requestToolApproval) {
       const decision = await this.callbacks.requestToolApproval(toolName, toolInput);
-      if (decision === 'skip') {
+      if (decision !== 'execute') {
+        // Tool was rejected
+        const baseMessage = 'Tool call rejected by user';
+        const fullMessage = decision.message
+          ? `${baseMessage}: ${decision.message}`
+          : baseMessage;
         return {
-          displayText: '[Tool call skipped by user]',
-          contentBlocks: [{ type: 'text', text: '[Tool call skipped by user]' }],
+          displayText: `[${fullMessage}]`,
+          contentBlocks: [{ type: 'text', text: `[${fullMessage}]` }],
           hasImages: false,
         };
       }

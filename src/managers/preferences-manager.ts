@@ -47,7 +47,7 @@ export class PreferencesManager {
       this.preferences = {
         mcpTimeout: 60, // Default: 60 seconds
         maxIterations: 100, // Default: 100 iterations
-        hilEnabled: true, // Default: enabled
+        hilEnabled: false, // Default: disabled, enabled on-demand via 'persistent'
       };
       return;
     }
@@ -61,7 +61,7 @@ export class PreferencesManager {
         promptStates: config.promptStates,
         mcpTimeout: config.mcpTimeout ?? 60,
         maxIterations: config.maxIterations ?? 100,
-        hilEnabled: config.hilEnabled ?? true,
+        hilEnabled: config.hilEnabled ?? false,
       };
     } catch (error) {
       this.logger.log(
@@ -71,7 +71,7 @@ export class PreferencesManager {
       this.preferences = {
         mcpTimeout: 60,
         maxIterations: 100,
-        hilEnabled: true,
+        hilEnabled: false,
       };
     }
   }

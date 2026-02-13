@@ -2,11 +2,16 @@ import readline from 'readline/promises';
 import chalk from 'chalk';
 import { Logger } from '../logger.js';
 
-export type HILDecision = 'execute' | 'skip';
+export type HILDecision = 'execute' | 'reject';
+
+export interface ToolRejection {
+  decision: 'reject';
+  message?: string;
+}
 
 export class HumanInTheLoopManager {
-  private enabled: boolean = true;
-  private sessionAutoExecute: boolean = false;
+  private enabled: boolean = false; // Off by default
+  private firstToolOfSession: boolean = true;
   private logger: Logger;
 
   constructor(logger: Logger) {
@@ -26,25 +31,30 @@ export class HumanInTheLoopManager {
   }
 
   resetSession(): void {
-    this.sessionAutoExecute = false;
+    this.firstToolOfSession = true;
   }
 
   /**
    * Request user confirmation before executing a tool.
-   * Must be called with keyboard monitor paused and a working readline.
+   * - First tool of session: show y/n/p options
+   * - Subsequent tools: prompt only if persistent mode enabled
+   * Returns execution decision and optional rejection message
    */
   async requestToolConfirmation(
     toolName: string,
     toolArgs: Record<string, any>,
     rl: readline.Interface,
-  ): Promise<HILDecision> {
-    if (!this.enabled || this.sessionAutoExecute) {
+  ): Promise<'execute' | ToolRejection> {
+    const isFirstTool = this.firstToolOfSession;
+
+    // Not first tool, and not in persistent mode
+    if (!isFirstTool && !this.enabled) {
       return 'execute';
     }
 
     // Display tool info
     this.logger.log(
-      '\n' + chalk.yellow.bold('  Human-in-the-Loop Confirmation') + '\n',
+      '\n' + chalk.yellow.bold('  Tool Confirmation') + '\n',
     );
     this.logger.log(
       chalk.cyan('  Tool: ') + chalk.bold(toolName) + '\n',
@@ -63,26 +73,50 @@ export class HumanInTheLoopManager {
       }
     }
 
-    // Show options
     this.logger.log('\n');
     this.logger.log(chalk.cyan.bold('  Options:\n'));
-    this.logger.log(chalk.green('    y/yes') + ' - Execute this tool call\n');
-    this.logger.log(chalk.red('    n/no') + ' - Skip this tool call\n');
-    this.logger.log(chalk.magenta('    s/session') + ' - Auto-approve remaining tools this session\n');
+    this.logger.log(chalk.green('    y/yes') + ' - Execute this tool\n');
+    this.logger.log(chalk.red('    n/no') + ' - Reject this tool\n');
+
+    if (isFirstTool) {
+      this.logger.log(chalk.magenta('    p/persistent') + ' - Enable persistent approval mode\n');
+      this.logger.log(chalk.blue('    msg <text>') + ' - Reject with a message\n');
+    }
+
     this.logger.log('\n');
 
-    const answer = (await rl.question(chalk.bold('  Approve? [y/n/s] '))).trim().toLowerCase();
+    const prompt = isFirstTool
+      ? 'Action? [y/n/p/msg] '
+      : 'Action? [y/n] ';
+    const answer = (await rl.question(chalk.bold(`  ${prompt}`))).trim();
 
-    switch (answer) {
+    // Mark first tool as processed
+    if (isFirstTool) {
+      this.firstToolOfSession = false;
+    }
+
+    // Handle message/rejection with custom message
+    if (answer.toLowerCase().startsWith('msg ')) {
+      const message = answer.slice(4).trim();
+      this.logger.log(chalk.yellow(`  Tool rejected: ${message}\n`));
+      return { decision: 'reject', message };
+    }
+
+    const lowerAnswer = answer.toLowerCase();
+    switch (lowerAnswer) {
       case 'n':
       case 'no':
-        this.logger.log(chalk.yellow('  Tool call skipped\n'));
-        return 'skip';
+        this.logger.log(chalk.yellow('  Tool call rejected\n'));
+        return { decision: 'reject' };
 
-      case 's':
-      case 'session':
-        this.sessionAutoExecute = true;
-        this.logger.log(chalk.magenta('  Auto-approving remaining tools this session\n'));
+      case 'p':
+      case 'persistent':
+        if (!isFirstTool) {
+          // Not first tool, treat as execute
+          return 'execute';
+        }
+        this.enabled = true;
+        this.logger.log(chalk.magenta('  Persistent approval enabled for this session\n'));
         return 'execute';
 
       default: // y, yes, or anything else → execute
