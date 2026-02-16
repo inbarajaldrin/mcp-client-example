@@ -32,6 +32,7 @@ const CLI_COMMANDS = [
   '/chat-list', '/chat-search', '/chat-restore', '/chat-export', '/chat-rename', '/chat-clear',
   '/ablation-create', '/ablation-list', '/ablation-edit', '/ablation-run', '/ablation-delete', '/ablation-results',
   '/tool-replay',
+  '/rewind',
   '/hil',
 ];
 
@@ -40,6 +41,7 @@ export class MCPClientCLI {
   private client: MCPClient;
   private logger: Logger;
   private isShuttingDown = false;
+  private rewindPrefill: string | null = null;
   private signalHandler: SignalHandler;
   private attachmentManager: AttachmentManager;
   private preferencesManager: PreferencesManager;
@@ -682,6 +684,7 @@ export class MCPClientCLI {
       `  /help - Show this help message\n` +
       `  /exit or exit - Exit the application\n` +
       `  /clear or /clear-context - Clear current chat and start fresh (servers stay connected)\n` +
+      `  /rewind - Rewind conversation to a previous turn (removes messages after selected point)\n` +
       `\n` +
       `System & Status:\n` +
       `  /token-status or /tokens - Show current token usage\n` +
@@ -739,6 +742,58 @@ export class MCPClientCLI {
     );
   }
 
+  private async handleRewind(): Promise<void> {
+    if (!this.rl) return;
+
+    const turns = this.client.getUserTurns();
+    if (turns.length === 0) {
+      this.logger.log('\nNo user messages to rewind to.\n', { type: 'warning' });
+      return;
+    }
+
+    this.logger.log('\nConversation turns:\n', { type: 'info' });
+    for (const turn of turns) {
+      const preview = turn.content.length > 100
+        ? turn.content.substring(0, 100) + '...'
+        : turn.content;
+      // Strip newlines from preview for clean display
+      const cleanPreview = preview.replace(/\n/g, ' ');
+      this.logger.log(`  ${turn.turnNumber}. ${cleanPreview}\n`, { type: 'info' });
+    }
+
+    this.logger.log('\nEnter turn number to rewind to (removes that turn and everything after), or "cancel":\n', { type: 'info' });
+
+    const answer = await this.rl.question('> ');
+    const trimmed = answer.trim().toLowerCase();
+
+    if (trimmed === 'cancel' || trimmed === 'c' || trimmed === '') {
+      this.logger.log('Rewind cancelled.\n', { type: 'info' });
+      return;
+    }
+
+    const turnNum = parseInt(trimmed, 10);
+    if (isNaN(turnNum) || turnNum < 1 || turnNum > turns.length) {
+      this.logger.log(`Invalid turn number. Enter 1-${turns.length}.\n`, { type: 'error' });
+      return;
+    }
+
+    const selectedTurn = turns[turnNum - 1];
+    this.client.rewindToTurn({
+      messageIndex: selectedTurn.messageIndex,
+      historyIndex: selectedTurn.historyIndex,
+    });
+
+    // Store the original message so it gets prefilled in the next prompt
+    this.rewindPrefill = selectedTurn.content;
+
+    const remainingTurns = turnNum - 1;
+    this.logger.log(
+      `\nRewound to before turn ${turnNum}. ${remainingTurns} turn${remainingTurns !== 1 ? 's' : ''} remaining in context.\n`,
+      { type: 'success' },
+    );
+    this.logger.log('Your message has been prefilled - edit and press Enter to resend.\n', { type: 'info' });
+  }
+
   private async chat_loop() {
     if (!this.rl) {
       throw new Error('Readline interface not initialized');
@@ -753,9 +808,11 @@ export class MCPClientCLI {
         // Reset abort flag before reading next query to ensure clean state
         this.keyboardMonitor.abortRequested = false;
 
-        // Pre-fill prompt with any text typed during agent execution
-        const pendingText = this.keyboardMonitor.pendingInput;
-        this.keyboardMonitor.clearPendingInput();
+        // Pre-fill prompt with rewind content or text typed during agent execution
+        const rewindText = this.rewindPrefill;
+        this.rewindPrefill = null;
+        const pendingText = rewindText || this.keyboardMonitor.pendingInput;
+        if (!rewindText) this.keyboardMonitor.clearPendingInput();
         if (pendingText) {
           // Use setImmediate to write after the prompt is displayed
           setImmediate(() => {
@@ -1319,6 +1376,15 @@ export class MCPClientCLI {
               `\nFailed to show ablation results: ${error}\n`,
               { type: 'error' },
             );
+          }
+          continue;
+        }
+
+        if (query.toLowerCase() === '/rewind') {
+          try {
+            await this.handleRewind();
+          } catch (error) {
+            this.logger.log(`\nFailed to rewind: ${error}\n`, { type: 'error' });
           }
           continue;
         }

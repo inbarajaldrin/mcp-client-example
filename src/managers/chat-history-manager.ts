@@ -327,6 +327,47 @@ export class ChatHistoryManager {
   }
 
   /**
+   * Get user message indices from current session for rewind functionality.
+   * Returns an array of { index, content, timestamp } for each user message.
+   */
+  getUserTurns(): Array<{ index: number; content: string; timestamp: string }> {
+    if (!this.currentSession) return [];
+    return this.currentSession.messages
+      .map((msg, idx) => ({ index: idx, role: msg.role, content: msg.content, timestamp: msg.timestamp }))
+      .filter(msg => msg.role === 'user')
+      .map(msg => ({ index: msg.index, content: msg.content, timestamp: msg.timestamp }));
+  }
+
+  /**
+   * Truncate session messages to rewind to a specific point.
+   * Removes all messages from the given index onward and recalculates metadata.
+   */
+  rewindToIndex(messageIndex: number): void {
+    if (!this.currentSession) return;
+
+    this.currentSession.messages = this.currentSession.messages.slice(0, messageIndex);
+
+    // Recalculate metadata from remaining messages
+    const remaining = this.currentSession.messages;
+    this.currentSession.metadata.messageCount = remaining.length;
+    this.currentSession.metadata.toolUseCount = remaining.filter(
+      m => m.role === 'tool' && m.isIPCCall !== true
+    ).length;
+    this.currentSession.metadata.ipcCallCount = remaining.filter(
+      m => m.role === 'tool' && m.isIPCCall === true
+    ).length;
+    this.toolUseCount = this.currentSession.metadata.toolUseCount;
+
+    // Trim tokenUsagePerCallback if it has more entries than remaining assistant messages
+    if (this.currentSession.tokenUsagePerCallback) {
+      const assistantCount = remaining.filter(m => m.role === 'assistant').length;
+      if (this.currentSession.tokenUsagePerCallback.length > assistantCount) {
+        this.currentSession.tokenUsagePerCallback = this.currentSession.tokenUsagePerCallback.slice(0, assistantCount);
+      }
+    }
+  }
+
+  /**
    * Get replayable tool calls from current session (excludes IPC calls).
    * Returns most recent first.
    */

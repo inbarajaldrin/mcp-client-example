@@ -1277,6 +1277,50 @@ export class MCPClient {
   }
 
   /**
+   * Get user turns from the conversation for rewind functionality.
+   * Returns user messages from both the in-memory messages array and chat history.
+   */
+  getUserTurns(): Array<{ turnNumber: number; messageIndex: number; historyIndex: number; content: string; timestamp: string }> {
+    const historyTurns = this.chatHistoryManager.getUserTurns();
+    const messageTurns: Array<{ index: number; content: string }> = [];
+    this.messages.forEach((msg, idx) => {
+      if (msg.role === 'user') {
+        messageTurns.push({ index: idx, content: msg.content });
+      }
+    });
+
+    // Match user turns between messages array and history by order
+    const turns: Array<{ turnNumber: number; messageIndex: number; historyIndex: number; content: string; timestamp: string }> = [];
+    const count = Math.min(messageTurns.length, historyTurns.length);
+    for (let i = 0; i < count; i++) {
+      turns.push({
+        turnNumber: i + 1,
+        messageIndex: messageTurns[i].index,
+        historyIndex: historyTurns[i].index,
+        content: messageTurns[i].content,
+        timestamp: historyTurns[i].timestamp,
+      });
+    }
+    return turns;
+  }
+
+  /**
+   * Rewind conversation to just before a specific user turn.
+   * Removes the user message and everything after it from both
+   * the in-memory messages array and the chat history session.
+   */
+  rewindToTurn(turn: { messageIndex: number; historyIndex: number }): void {
+    // Truncate in-memory messages
+    this.messages = this.messages.slice(0, turn.messageIndex);
+
+    // Truncate chat history session
+    this.chatHistoryManager.rewindToIndex(turn.historyIndex);
+
+    // Reset token count (will be recalculated on next API call)
+    this.currentTokenCount = 0;
+  }
+
+  /**
    * Clear the current chat context and start a new session
    * This discards the current session without saving and clears all messages
    */

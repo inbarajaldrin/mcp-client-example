@@ -354,6 +354,7 @@ The client automatically manages conversation context to prevent hitting token l
 While in the interactive CLI, you can use these special commands:
 
 - `/clear` or `/clear-context` - Clear current chat and start fresh (servers stay connected, discarded chat is not saved)
+- `/rewind` - Rewind conversation to a previous turn (select which turn to remove and re-enter)
 - `/token-status` or `/tokens` - Show current token usage statistics
 - `/summarize` or `/summarize-now` - Manually trigger summarization (useful for testing)
 - `/settings` - View and modify client preferences (timeout, max iterations)
@@ -380,6 +381,39 @@ Discarded chat session: session-abc123
 ✓ Chat context cleared. Starting fresh session.
 Started chat session: session-xyz789
 ```
+
+### Conversation Rewind
+
+Rewind your conversation to a previous turn. This removes the selected user message and everything after it (assistant responses, tool calls), then prefills your prompt with the original message so you can edit and resend it.
+
+**Command:**
+- `/rewind` - Show a numbered list of user turns, select one to rewind to
+
+**Usage:**
+
+```bash
+You: /rewind
+
+Conversation turns:
+  1. Assemble the red line objects onto the base
+  2. Now disassemble everything
+  3. Move the gripper to home position
+
+Enter turn number to rewind to (removes that turn and everything after), or "cancel":
+> 2
+
+Rewound to before turn 2. 1 turn remaining in context.
+Your message has been prefilled - edit and press Enter to resend.
+
+You: Now disassemble only the blue objects
+```
+
+**How it works:**
+- Shows all user messages in the current session as numbered turns
+- Selecting a turn removes it and all subsequent messages from context
+- The selected message is prefilled in the readline input for editing
+- Token count resets and is recalculated on the next API call
+- Chat history session metadata is updated to reflect the truncated state
 
 ### Todo Mode
 
