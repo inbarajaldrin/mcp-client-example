@@ -12,6 +12,7 @@ export interface ToolRejection {
 export class HumanInTheLoopManager {
   private enabled: boolean = false; // Off by default
   private firstToolOfSession: boolean = true;
+  private approveAllMode: boolean = false; // Persists across session resets
   private logger: Logger;
 
   constructor(logger: Logger) {
@@ -30,8 +31,13 @@ export class HumanInTheLoopManager {
     this.enabled = !this.enabled;
   }
 
+  setApproveAllMode(value: boolean): void {
+    this.approveAllMode = value;
+  }
+
   resetSession(): void {
     this.firstToolOfSession = true;
+    // approveAllMode persists across resets
   }
 
   /**
@@ -46,6 +52,11 @@ export class HumanInTheLoopManager {
     rl: readline.Interface,
   ): Promise<'execute' | ToolRejection> {
     const isFirstTool = this.firstToolOfSession;
+
+    // If approve-all mode is enabled, skip all prompts
+    if (this.approveAllMode) {
+      return 'execute';
+    }
 
     // Not first tool, and not in persistent mode
     if (!isFirstTool && !this.enabled) {
@@ -79,14 +90,15 @@ export class HumanInTheLoopManager {
     this.logger.log(chalk.red('    n/no') + ' - Reject this tool\n');
 
     if (isFirstTool) {
+      this.logger.log(chalk.blue('    a/all') + ' - Approve all remaining tools (disable HIL)\n');
       this.logger.log(chalk.magenta('    p/persistent') + ' - Enable persistent approval mode\n');
-      this.logger.log(chalk.blue('    msg <text>') + ' - Reject with a message\n');
+      this.logger.log(chalk.cyan('    msg <text>') + ' - Reject with a message\n');
     }
 
     this.logger.log('\n');
 
     const prompt = isFirstTool
-      ? 'Action? [y/n/p/msg] '
+      ? 'Action? [y/n/a/p/msg] '
       : 'Action? [y/n] ';
     const answer = (await rl.question(chalk.bold(`  ${prompt}`))).trim();
 
@@ -108,6 +120,16 @@ export class HumanInTheLoopManager {
       case 'no':
         this.logger.log(chalk.yellow('  Tool call rejected\n'));
         return { decision: 'reject' };
+
+      case 'a':
+      case 'all':
+        if (!isFirstTool) {
+          // Not first tool, treat as execute
+          return 'execute';
+        }
+        this.approveAllMode = true;
+        this.logger.log(chalk.blue('  Approval for all tools enabled for this session (HIL disabled)\n'));
+        return 'execute';
 
       case 'p':
       case 'persistent':
