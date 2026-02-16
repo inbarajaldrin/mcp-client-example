@@ -1325,8 +1325,12 @@ export class MCPClient {
    * This discards the current session without saving and clears all messages
    */
   clearContext(): void {
-    // Discard the current session without saving
-    this.chatHistoryManager.discardSession();
+    // Save the current session if it has messages, otherwise discard
+    if (this.messages.length > 0) {
+      this.chatHistoryManager.endSession('context-cleared');
+    } else {
+      this.chatHistoryManager.discardSession();
+    }
 
     // Clear all messages
     this.messages = [];

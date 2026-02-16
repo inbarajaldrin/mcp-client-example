@@ -1392,10 +1392,11 @@ export class MCPClientCLI {
         if (query.toLowerCase() === '/clear' || query.toLowerCase() === '/clear-context') {
           try {
             this.client.clearContext();
-            this.logger.log(
-              '\n✓ Chat context cleared. Starting fresh session.\n',
-              { type: 'success' },
-            );
+            // Clear the terminal screen
+            process.stdout.write('\x1B[2J\x1B[3J\x1B[H');
+            this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
+            this.logger.log('✓ Context cleared. Starting fresh session.\n', { type: 'success' });
+            this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
           } catch (error) {
             this.logger.log(
               `\nFailed to clear context: ${error}\n`,
