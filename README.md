@@ -916,6 +916,54 @@ phases:
 
 Note: Direct tool calls work even if the tool is disabled in the tool manager - they bypass agent filtering and execute directly on the MCP server.
 
+**Post-Tool Hooks:**
+
+Hooks let you automatically run a command before or after a specific tool executes. They can be scoped to all phases or a single phase.
+
+```yaml
+hooks:
+  - after: "ros-mcp-server__signal_phase_complete"
+    run: "@tool-exec:ros2-video-recorder__capture_camera_image()"
+```
+
+**Conditional Hooks (`when`):**
+
+Add an optional `when` field to only fire a hook when the tool result JSON contains specific key/value pairs. This enables result-based triggering — the hook checks each key in `when` against the parsed tool result and only fires if all match.
+
+```yaml
+hooks:
+  # Only fires when signal_phase_complete returns action="randomize"
+  - after: "ros-mcp-server__signal_phase_complete"
+    when:
+      type: "phase_action"
+      action: "randomize"
+    run: "@tool-exec:isaac-sim__randomize_object_poses()"
+
+  # Only fires when phase 3 completes
+  - after: "ros-mcp-server__signal_phase_complete"
+    when:
+      type: "phase_complete"
+      phase: 3
+    run: "@tool-exec:ros2-video-recorder__capture_camera_image()"
+```
+
+Multiple hooks can fire for the same tool call if their `when` conditions all match. Hooks without `when` fire on every name match (existing behavior).
+
+**Lifecycle Hooks:**
+
+Phases can also have `onStart` and `onEnd` commands that run before and after the phase's main commands:
+
+```yaml
+phases:
+  - name: assembly
+    onStart:
+      - '@tool-exec:isaac-sim__play_scene()'
+    commands:
+      - 'Assemble all objects onto the base'
+    onEnd:
+      - '@tool-exec:ros2-video-recorder__capture_camera_image()'
+```
+
 **Configuration:**
 
 Ablation definitions are stored as YAML files in `.mcp-client-data/ablations/`:
