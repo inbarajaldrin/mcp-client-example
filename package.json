@@ -17,7 +17,8 @@
     "dist"
   ],
   "scripts": {
-    "build": "tsc && node -e \"require('fs').chmodSync('dist/bin.js', '755')\" && node -e \"require('fs').chmodSync('dist/index.js', '755')\"",
+    "build": "tsc && node -e \"require('fs').chmodSync('dist/bin.js', '755')\" && node -e \"require('fs').chmodSync('dist/index.js', '755')\" && npm run build:web",
+    "build:web": "cd src/web/frontend && npx vite build",
     "prepare": "npm run build",
     "watch": "tsc-watch --onSuccess \"chmod 755 dist/bin.js && chmod 755 dist/index.js\"",
     "format": "prettier --write .",
@@ -34,15 +35,21 @@
     "express": "^5.2.1",
     "ollama": "^0.6.3",
     "openai": "^6.9.0",
+    "react": "^19.2.4",
+    "react-dom": "^19.2.4",
     "tiktoken": "^1.0.22",
     "yaml": "^2.8.2",
     "zod": "^3.24.1"
   },
   "devDependencies": {
     "@types/node": "^22.10.2",
+    "@types/react": "^19.2.14",
+    "@types/react-dom": "^19.2.3",
+    "@vitejs/plugin-react": "^5.1.4",
     "bun": "^1.1.38",
     "prettier": "^3.4.1",
     "tsc-watch": "^6.2.1",
-    "typescript": "^5.7.2"
+    "typescript": "^5.7.2",
+    "vite": "^7.3.1"
   }
 }

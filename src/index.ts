@@ -28,6 +28,18 @@ import type {
   SummarizationConfig,
   MessageStreamEvent,
 } from './model-provider.js';
+
+export type WebStreamEvent =
+  | { type: 'text_delta'; text: string }
+  | { type: 'tool_start'; toolName: string; toolInput: Record<string, any>; toolId: string }
+  | { type: 'tool_complete'; toolName: string; result: string; toolId: string }
+  | { type: 'token_usage'; inputTokens: number; outputTokens: number; totalTokens: number }
+  | { type: 'warning'; message: string }
+  | { type: 'info'; message: string }
+  | { type: 'error'; message: string }
+  | { type: 'done' };
+
+export type StreamObserver = (event: WebStreamEvent) => void;
 import { AnthropicProvider, type ToolExecutor } from './providers/anthropic.js';
 import { OrchestratorIPCServer } from './ipc-server.js';
 import { ElicitationHandler } from './handlers/elicitation-handler.js';
@@ -2032,6 +2044,7 @@ export class MCPClient {
     stream: AsyncIterable<any>,
     cancellationCheck?: () => boolean,
     initialTokenCount?: number,
+    observer?: StreamObserver,
   ): Promise<{
     pendingToolResults: Array<{ toolUseId?: string; toolCallId?: string; content: string }>;
     lastTokenUsage: {
@@ -2097,6 +2110,7 @@ export class MCPClient {
           `\n⚠️  Maximum iterations reached (${chunk.iterations}/${chunk.maxIterations}). Stopping agent loop.\n`,
           { type: 'warning' },
         );
+        observer?.({ type: 'warning', message: `Maximum iterations reached (${chunk.iterations}/${chunk.maxIterations}). Stopping agent loop.` });
         continue;
       }
 
@@ -2105,6 +2119,7 @@ export class MCPClient {
         // Display with distinct styling to differentiate from model output
         const provider = chunk.provider ? `[${chunk.provider}] ` : '';
         this.logger.log(`\nℹ️  ${provider}${chunk.message}\n`, { type: 'info' });
+        observer?.({ type: 'info', message: `${provider}${chunk.message}` });
         continue;
       }
 
@@ -2122,7 +2137,14 @@ export class MCPClient {
           { type: 'info' },
         );
         hasOutputContent = true;
-        
+
+        observer?.({
+          type: 'tool_complete',
+          toolName: chunk.toolName,
+          result: chunk.result || '',
+          toolId: (chunk as any).toolUseId || (chunk as any).toolCallId || '',
+        });
+
         // Track tool result to add to messages
         // For Anthropic: Tool results will be added when we see the next assistant message or end_turn
         // For OpenAI: Add tool message immediately (assistant message with tool_calls was already added at message_stop)
@@ -2226,6 +2248,10 @@ export class MCPClient {
           const toolId = chunk.content_block.id;
           this.toolInputTimes.set(toolId, new Date().toISOString());
 
+          // For Anthropic: tool_start is emitted from the complete response handler
+          // (chunk.content Array.isArray path) which has the full input available.
+          // For non-Anthropic: tool_start is emitted at message_stop when tool_calls are finalized.
+
           // For non-Anthropic providers: track tool calls to include in assistant message
           // OpenAI requires assistant messages to have tool_calls before tool role messages
           // Gemini provides args upfront in content_block_start (not via streaming deltas)
@@ -2251,6 +2277,7 @@ export class MCPClient {
           this.logger.log(`\n[DEBUG] Text delta: "${chunk.delta.text.substring(0, 20)}..."\n`, { type: 'info' });
         }
         this.logger.log(chunk.delta.text);
+        observer?.({ type: 'text_delta', text: chunk.delta.text });
         hasOutputContent = true;
         continue;
       }
@@ -2301,6 +2328,12 @@ export class MCPClient {
         // For Anthropic, input_tokens already includes the full conversation history
         // input_tokens = all messages sent to API, output_tokens = tokens generated in this response
         this.currentTokenCount = chunk.input_tokens + chunk.output_tokens;
+        observer?.({
+          type: 'token_usage',
+          inputTokens: chunk.input_tokens,
+          outputTokens: chunk.output_tokens,
+          totalTokens: chunk.input_tokens + chunk.output_tokens,
+        });
         continue;
       }
 
@@ -2330,6 +2363,20 @@ export class MCPClient {
                 arguments: tc.arguments,
               }))
             : undefined;
+
+          // Emit tool_start for non-Anthropic tool calls (args are now finalized)
+          if (observer && toolCallsArray) {
+            for (const tc of toolCallsArray) {
+              let parsedInput: Record<string, any> = {};
+              try { parsedInput = JSON.parse(tc.arguments); } catch { /* ignore */ }
+              observer({
+                type: 'tool_start',
+                toolName: tc.name,
+                toolInput: parsedInput,
+                toolId: tc.id,
+              });
+            }
+          }
 
           // Build content_blocks for providers that need them (Gemini uses function_call format)
           // This also serves as the canonical format for chat history storage
@@ -2480,7 +2527,19 @@ export class MCPClient {
           this.logger.log('\n');
           hasOutputContent = true;
         }
-        
+
+        // Emit tool_start for Anthropic complete response tool_use blocks
+        if (observer) {
+          for (const block of toolUseBlocks) {
+            observer({
+              type: 'tool_start',
+              toolName: block.name,
+              toolInput: block.input || {},
+              toolId: block.id,
+            });
+          }
+        }
+
         // Extract text content (but don't display it - it was already streamed in real-time)
         const textBlocks = chunk.content.filter((block: any) => block.type === 'text');
         const textContent = textBlocks.length > 0
@@ -2698,7 +2757,7 @@ export class MCPClient {
     return { pendingToolResults, lastTokenUsage };
   }
 
-  async processQuery(query: string, isSystemPrompt: boolean = false, attachments?: Array<{ path: string; fileName: string; ext: string; mediaType: string }>, cancellationCheck?: () => boolean) {
+  async processQuery(query: string, isSystemPrompt: boolean = false, attachments?: Array<{ path: string; fileName: string; ext: string; mediaType: string }>, cancellationCheck?: () => boolean, observer?: StreamObserver) {
     // Track message count before adding new message (for cleanup on abort)
     const messagesBeforeQuery = this.messages.length;
     const tokenCountBeforeQuery = this.currentTokenCount;
@@ -2784,7 +2843,7 @@ export class MCPClient {
       // Process the stream and collect final assistant message
       // Don't break immediately on cancellation - let current chunk finish
       // Pass initial token count for tracking
-      const { pendingToolResults, lastTokenUsage } = await this.processToolUseStream(stream, cancellationCheck, tokenCountBeforeStream);
+      const { pendingToolResults, lastTokenUsage } = await this.processToolUseStream(stream, cancellationCheck, tokenCountBeforeStream, observer);
 
       // Flush any remaining pending tool results (in case we aborted before they were added)
       if (pendingToolResults && pendingToolResults.length > 0) {
@@ -2906,6 +2965,7 @@ export class MCPClient {
 
         // Keep messages and token count as-is so user can see the partial response
         // Note: IPC server already logs abort message when orchestrator mode is active
+        observer?.({ type: 'done' });
         return this.messages;
       }
 
@@ -3004,7 +3064,7 @@ export class MCPClient {
         })(), // maxIterations
             cancellationCheck, // Pass cancellation check to provider
           );
-          const { pendingToolResults: continuePendingToolResults, lastTokenUsage: continueLastTokenUsage } = await this.processToolUseStream(continueStream, cancellationCheck, continueTokenCountBeforeStream);
+          const { pendingToolResults: continuePendingToolResults, lastTokenUsage: continueLastTokenUsage } = await this.processToolUseStream(continueStream, cancellationCheck, continueTokenCountBeforeStream, observer);
 
           // Flush any remaining pending tool results
           if (continuePendingToolResults && continuePendingToolResults.length > 0) {
@@ -3120,6 +3180,7 @@ export class MCPClient {
         }
       }
 
+      observer?.({ type: 'done' });
       return this.messages;
     } catch (error) {
       // Extract clean error message
@@ -3167,7 +3228,8 @@ export class MCPClient {
       this.logger.log('\nError during query processing: ' + cleanErrorMessage + '\n', {
         type: 'error',
       });
-      
+      observer?.({ type: 'error', message: cleanErrorMessage });
+
       if (error instanceof Error) {
         // Check if it's a PDF-related error for OpenAI
         if (
@@ -3202,4 +3264,89 @@ export class MCPClient {
   getProviderName(): string {
     return this.modelProvider.getProviderName();
   }
+
+  /**
+   * Get info about connected servers and their enabled tools (for web UI)
+   * Only includes servers that have at least one enabled tool.
+   */
+  getServersInfo(): Array<{ name: string; tools: Array<{ name: string; description: string }> }> {
+    const result: Array<{ name: string; tools: Array<{ name: string; description: string }> }> = [];
+    for (const [name, connection] of this.servers) {
+      const enabledTools = connection.tools
+        .filter(t => this.toolManager.isToolEnabled(t.name))
+        .map(t => ({
+          name: t.name,
+          description: t.description || '',
+        }));
+      if (enabledTools.length > 0) {
+        result.push({ name, tools: enabledTools });
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Get conversation messages (for web UI history)
+   */
+  getMessages(): Message[] {
+    return this.messages;
+  }
+
+  /**
+   * Re-filter tools based on current toolManager state without re-querying servers.
+   * Used after toggling tools on/off via the web UI.
+   */
+  reapplyToolFilter(): void {
+    const allTools: Tool[] = [];
+    for (const connection of this.servers.values()) {
+      allTools.push(...connection.tools);
+    }
+    this.tools = this.toolManager.filterTools(allTools);
+  }
+
+  /**
+   * Get all tools across all servers with their enabled/disabled state (for web UI tool management).
+   */
+  getAllToolsWithState(): Array<{ name: string; server: string; description: string; enabled: boolean }> {
+    const result: Array<{ name: string; server: string; description: string; enabled: boolean }> = [];
+    for (const [serverName, connection] of this.servers) {
+      for (const tool of connection.tools) {
+        result.push({
+          name: tool.name,
+          server: serverName,
+          description: tool.description || '',
+          enabled: this.toolManager.isToolEnabled(tool.name),
+        });
+      }
+    }
+    return result;
+  }
+
+  /**
+   * Restore a chat session by loading its messages into the current conversation.
+   */
+  restoreChat(sessionId: string): boolean {
+    const chatData = this.chatHistoryManager.loadChat(sessionId);
+    if (!chatData) return false;
+
+    // Clear current context first
+    this.clearContext();
+
+    // Convert chat history messages to conversation messages
+    for (const msg of chatData.messages) {
+      if (msg.role === 'user') {
+        this.messages.push({ role: 'user', content: msg.content });
+      } else if (msg.role === 'assistant') {
+        if (msg.content_blocks) {
+          this.messages.push({ role: 'assistant', content: msg.content, content_blocks: msg.content_blocks });
+        } else {
+          this.messages.push({ role: 'assistant', content: msg.content });
+        }
+      } else if (msg.role === 'tool' && msg.tool_use_id) {
+        this.messages.push({ role: 'tool', content: msg.content, tool_call_id: msg.tool_use_id });
+      }
+    }
+    return true;
+  }
+
 }

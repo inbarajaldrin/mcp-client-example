@@ -518,6 +518,7 @@ async function main() {
         'provider': { type: 'string' },
         'model': { type: 'string' },
         'select-model': { type: 'boolean' },
+        'web': { type: 'boolean' },
       },
       allowPositionals: true,
     });
@@ -665,6 +666,16 @@ async function main() {
         console.error('Error: No servers found.');
         console.error('Use --list-servers to see available servers.');
         process.exit(1);
+      }
+
+      // Handle --web flag: launch web UI instead of CLI
+      if (args.values['web']) {
+        const { startWebServer } = await import('./web/server.js');
+        await startWebServer(allServerConfigs, {
+          provider: finalProvider,
+          model: selectedModel,
+        });
+        return;
       }
 
       const cli = new MCPClientCLI(allServerConfigs, {
