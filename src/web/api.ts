@@ -1,12 +1,14 @@
 // Reference: Plan for web frontend API routes
 import { Router, type Request, type Response } from 'express';
 import multer from 'multer';
+import crypto from 'crypto';
 import { tmpdir } from 'os';
 import path from 'path';
 import fs from 'fs';
 import type { MCPClient, WebStreamEvent } from '../index.js';
 import type { AttachmentInfo } from '../managers/attachment-manager.js';
 import { createProvider, PROVIDERS } from '../bin.js';
+import { AblationManager } from '../managers/ablation-manager.js';
 
 const upload = multer({ dest: path.join(tmpdir(), 'mcp-client-uploads') });
 
@@ -84,6 +86,10 @@ export function createApiRouter(client: MCPClient): Router {
   let isProcessing = false;
   let cancelRequested = false;
 
+  // Pending approval/elicitation maps — keyed by requestId, value is resolve callback
+  const pendingApprovals = new Map<string, (result: 'execute' | { decision: 'reject'; message?: string }) => void>();
+  const pendingElicitations = new Map<string, (result: { action: 'accept' | 'decline' | 'cancel'; content?: Record<string, any> }) => void>();
+
   // POST /api/chat/cancel — signal cancellation without closing the SSE stream
   // This mirrors how the CLI handles abort: set a flag, let remaining events flow through
   router.post('/chat/cancel', (_req: Request, res: Response) => {
@@ -92,6 +98,40 @@ export function createApiRouter(client: MCPClient): Router {
       return;
     }
     cancelRequested = true;
+    res.json({ ok: true });
+  });
+
+  // POST /api/chat/approval-response — respond to a pending tool approval request
+  router.post('/chat/approval-response', (req: Request, res: Response) => {
+    const { requestId, decision, message } = req.body;
+    if (!requestId) {
+      res.status(400).json({ error: 'requestId is required' });
+      return;
+    }
+    const resolve = pendingApprovals.get(requestId);
+    if (!resolve) {
+      res.status(404).json({ error: 'No pending approval for this requestId' });
+      return;
+    }
+    pendingApprovals.delete(requestId);
+    resolve(decision === 'execute' ? 'execute' : { decision: 'reject', message });
+    res.json({ ok: true });
+  });
+
+  // POST /api/chat/elicitation-response — respond to a pending elicitation request
+  router.post('/chat/elicitation-response', (req: Request, res: Response) => {
+    const { requestId, action, content } = req.body;
+    if (!requestId || !action) {
+      res.status(400).json({ error: 'requestId and action are required' });
+      return;
+    }
+    const resolve = pendingElicitations.get(requestId);
+    if (!resolve) {
+      res.status(404).json({ error: 'No pending elicitation for this requestId' });
+      return;
+    }
+    pendingElicitations.delete(requestId);
+    resolve({ action, content });
     res.json({ ok: true });
   });
 
@@ -132,6 +172,15 @@ export function createApiRouter(client: MCPClient): Router {
     res.on('close', () => {
       connectionClosed = true;
       cancelRequested = true; // Also cancel if browser disconnects
+      // Clean up pending approvals/elicitations on disconnect
+      for (const [id, resolve] of pendingApprovals) {
+        resolve({ decision: 'reject', message: 'Browser disconnected' });
+      }
+      pendingApprovals.clear();
+      for (const [id, resolve] of pendingElicitations) {
+        resolve({ action: 'cancel' });
+      }
+      pendingElicitations.clear();
     });
 
     const { observer, stream } = createStreamBridge<WebStreamEvent>();
@@ -139,6 +188,39 @@ export function createApiRouter(client: MCPClient): Router {
     // Record user message to chat history
     const histMgr = client.getChatHistoryManager();
     histMgr.addUserMessage(content);
+
+    // Wire HIL tool approval callback — emits SSE event and waits for POST response
+    client.setToolApprovalCallback(async (toolName, toolInput) => {
+      const requestId = crypto.randomUUID();
+      return new Promise((resolve) => {
+        pendingApprovals.set(requestId, resolve);
+        observer({ type: 'approval_request', toolName, toolInput, requestId });
+      });
+    });
+
+    // Wire web elicitation callback — emits SSE event and waits for POST response
+    client.setWebElicitationCallback(async (request) => {
+      const params = request.params as { message: string; requestedSchema: any; url?: string };
+      if (params.url) return { action: 'decline' as const };
+      const requestId = crypto.randomUUID();
+      return new Promise((resolve) => {
+        pendingElicitations.set(requestId, resolve);
+        observer({ type: 'elicitation_request', message: params.message, requestedSchema: params.requestedSchema, requestId });
+      });
+    });
+
+    // Wire IPC event listeners to forward orchestrator tool calls into SSE stream
+    const ipcServer = client.getOrchestratorIPCServer();
+    const ipcStartHandler = (event: { toolName: string; args: Record<string, any> }) => {
+      observer({ type: 'ipc_tool_start', toolName: event.toolName, args: event.args });
+    };
+    const ipcEndHandler = (event: { toolName: string; args: Record<string, any>; result?: any; error?: string }) => {
+      observer({ type: 'ipc_tool_end', toolName: event.toolName, args: event.args, result: event.result, error: event.error });
+    };
+    if (ipcServer) {
+      ipcServer.on('toolCallStart', ipcStartHandler);
+      ipcServer.on('toolCallEnd', ipcEndHandler);
+    }
 
     // Start processQuery in background — it pushes events via observer
     // Cancel check uses cancelRequested (set by /cancel endpoint or connection close)
@@ -174,6 +256,11 @@ export function createApiRouter(client: MCPClient): Router {
       } catch {
         // Ignore history recording errors
       }
+      // Clean up IPC listeners
+      if (ipcServer) {
+        ipcServer.removeListener('toolCallStart', ipcStartHandler);
+        ipcServer.removeListener('toolCallEnd', ipcEndHandler);
+      }
       isProcessing = false;
       res.end();
     }
@@ -187,12 +274,13 @@ export function createApiRouter(client: MCPClient): Router {
   // GET /api/chat/history — returns conversation messages
   router.get('/chat/history', (_req: Request, res: Response) => {
     const messages = client.getMessages();
-    res.json(messages.map(m => ({
+    res.json(messages.map((m: any) => ({
       role: m.role,
       content: m.content,
       content_blocks: m.content_blocks,
       tool_calls: m.tool_calls,
       tool_results: m.tool_results,
+      tool_call_id: m.tool_call_id,
     })));
   });
 
@@ -208,10 +296,26 @@ export function createApiRouter(client: MCPClient): Router {
     res.json({ ok: true });
   });
 
-  // GET /api/status — returns provider, model, token usage
+  // GET /api/status — returns provider, model, token usage, cost
   router.get('/status', (_req: Request, res: Response) => {
     try {
       const tokenUsage = client.getTokenUsage();
+      const histMgr = client.getChatHistoryManager();
+      const session = histMgr.getCurrentSession();
+
+      const totalCost = session?.metadata?.totalCost ?? 0;
+      const cumulativeTokens = session?.metadata?.cumulativeTokens ?? 0;
+      const toolUseCount = session?.metadata?.toolUseCount ?? 0;
+      const allCalls: any[] = session?.tokenUsagePerCallback ?? [];
+      const recentCalls = allCalls.slice(-10).map((c: any) => ({
+        timestamp: c.timestamp,
+        inputTokens: c.inputTokens ?? 0,
+        outputTokens: c.outputTokens ?? 0,
+        cacheCreationTokens: c.cacheCreationTokens ?? 0,
+        cacheReadTokens: c.cacheReadTokens ?? 0,
+        estimatedCost: c.estimatedCost ?? 0,
+      }));
+
       res.json({
         provider: client.getProviderName(),
         model: client.getModel(),
@@ -219,17 +323,92 @@ export function createApiRouter(client: MCPClient): Router {
           current: tokenUsage.current,
           contextWindow: tokenUsage.limit,
           percentage: tokenUsage.percentage,
+          suggestion: tokenUsage.suggestion,
+        },
+        cost: {
+          totalCost,
+          cumulativeTokens,
+          toolUseCount,
+          callCount: allCalls.length,
+          recentCalls,
         },
         isProcessing,
+        orchestrator: {
+          enabled: client.isOrchestratorModeEnabled(),
+          configured: client.isOrchestratorServerConfigured(),
+        },
+        todo: {
+          enabled: client.isTodoModeEnabled(),
+          configured: client.isTodoServerConfigured(),
+        },
       });
     } catch {
-      // Token counter may not be initialized yet
       res.json({
         provider: client.getProviderName(),
         model: client.getModel(),
-        tokenUsage: { current: 0, contextWindow: 0, percentage: 0 },
+        tokenUsage: { current: 0, contextWindow: 0, percentage: 0, suggestion: 'continue' },
+        cost: { totalCost: 0, cumulativeTokens: 0, toolUseCount: 0, callCount: 0, recentCalls: [] },
         isProcessing,
+        orchestrator: {
+          enabled: false,
+          configured: client.isOrchestratorServerConfigured(),
+        },
+        todo: {
+          enabled: false,
+          configured: client.isTodoServerConfigured(),
+        },
       });
+    }
+  });
+
+  // ─── Orchestrator ───
+
+  router.post('/orchestrator/enable', async (_req: Request, res: Response) => {
+    try {
+      if (!client.isOrchestratorServerConfigured()) {
+        res.status(400).json({ error: 'mcp-tools-orchestrator server not configured' });
+        return;
+      }
+      await client.enableOrchestratorMode();
+      res.json({ ok: true, enabled: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  router.post('/orchestrator/disable', async (_req: Request, res: Response) => {
+    try {
+      await client.disableOrchestratorMode();
+      res.json({ ok: true, enabled: false });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // ─── Todo Mode ───
+
+  router.post('/todo/enable', async (_req: Request, res: Response) => {
+    try {
+      if (!client.isTodoServerConfigured()) {
+        res.status(400).json({ error: 'Todo server not configured' });
+        return;
+      }
+      await client.enableTodoMode(
+        async () => 'leave' as const,
+        async () => 'leave' as const,
+      );
+      res.json({ ok: true, enabled: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  router.post('/todo/disable', async (_req: Request, res: Response) => {
+    try {
+      await client.disableTodoMode();
+      res.json({ ok: true, enabled: false });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
     }
   });
 
@@ -529,6 +708,30 @@ export function createApiRouter(client: MCPClient): Router {
     res.json({ ok: true, name: name.trim() });
   });
 
+  // ─── Server Refresh ───
+
+  // POST /api/servers/refresh — refresh all server connections
+  router.post('/servers/refresh', async (_req: Request, res: Response) => {
+    try {
+      await client.refreshServers();
+      const servers = client.getServersInfo();
+      res.json({ ok: true, servers });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // POST /api/servers/refresh/:name — refresh a single server connection
+  router.post('/servers/refresh/:name', async (req: Request, res: Response) => {
+    try {
+      await client.refreshServer(req.params.name);
+      const servers = client.getServersInfo();
+      res.json({ ok: true, servers });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
   // ─── Conversation Rewind ───
 
   // GET /api/chat/turns — returns user turns for rewind UI
@@ -663,6 +866,439 @@ export function createApiRouter(client: MCPClient): Router {
     } else {
       res.status(400).json({ error: 'Rename failed' });
     }
+  });
+
+  // ─── Ablation Studies ───
+
+  const ablationManager = new AblationManager();
+
+  // GET /api/ablations — list all ablation studies
+  router.get('/ablations', (_req: Request, res: Response) => {
+    try {
+      const ablations = ablationManager.list();
+      res.json(ablations.map(a => ({
+        name: a.name,
+        description: a.description,
+        created: a.created,
+        updated: a.updated,
+        dryRun: a.dryRun,
+        runs: a.runs,
+        phases: a.phases.map(p => ({ name: p.name, commandCount: p.commands.length })),
+        models: a.models,
+        settings: a.settings,
+        totalRuns: ablationManager.getTotalRuns(a),
+        providers: ablationManager.getProviders(a),
+      })));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // GET /api/ablations/:name — get a single ablation study
+  router.get('/ablations/:name', (req: Request, res: Response) => {
+    try {
+      const ablation = ablationManager.load(req.params.name);
+      if (!ablation) {
+        res.status(404).json({ error: 'Ablation not found' });
+        return;
+      }
+      res.json(ablation);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // POST /api/ablations — create a new ablation study
+  router.post('/ablations', (req: Request, res: Response) => {
+    const { name, description, phases, models, settings, dryRun, runs, hooks, arguments: args } = req.body;
+    if (!name || !description || !phases || !models || !settings) {
+      res.status(400).json({ error: 'name, description, phases, models, and settings are required' });
+      return;
+    }
+    try {
+      const ablation = ablationManager.create({
+        name,
+        description,
+        phases,
+        models,
+        settings,
+        dryRun,
+        runs,
+        hooks,
+        arguments: args,
+      });
+      res.json({ ok: true, ablation });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || String(err) });
+    }
+  });
+
+  // PUT /api/ablations/:name — update an ablation study
+  router.put('/ablations/:name', (req: Request, res: Response) => {
+    const { description, phases, models, settings, dryRun, runs, hooks, arguments: args } = req.body;
+    try {
+      const ablation = ablationManager.update(req.params.name, {
+        description,
+        phases,
+        models,
+        settings,
+        dryRun,
+        runs,
+        hooks,
+        arguments: args,
+      });
+      if (!ablation) {
+        res.status(404).json({ error: 'Ablation not found' });
+        return;
+      }
+      res.json({ ok: true, ablation });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || String(err) });
+    }
+  });
+
+  // DELETE /api/ablations/:name — delete an ablation study
+  router.delete('/ablations/:name', (req: Request, res: Response) => {
+    try {
+      const ok = ablationManager.delete(req.params.name);
+      if (!ok) {
+        res.status(404).json({ error: 'Ablation not found' });
+        return;
+      }
+      res.json({ ok: true });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // GET /api/ablations/:name/runs — list runs for an ablation
+  router.get('/ablations/:name/runs', (req: Request, res: Response) => {
+    try {
+      const ablation = ablationManager.load(req.params.name);
+      if (!ablation) {
+        res.status(404).json({ error: 'Ablation not found' });
+        return;
+      }
+      const runs = ablationManager.listRuns(req.params.name);
+      res.json(runs.map(r => ({
+        timestamp: r.timestamp,
+        startedAt: r.run.startedAt,
+        completedAt: r.run.completedAt,
+        totalTokens: r.run.totalTokens,
+        totalDuration: r.run.totalDuration,
+        totalDurationFormatted: r.run.totalDurationFormatted,
+        resultCount: r.run.results.length,
+        completedCount: r.run.results.filter(res => res.status === 'completed').length,
+        failedCount: r.run.results.filter(res => res.status === 'failed').length,
+      })));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // GET /api/ablations/:name/runs/:timestamp — get detailed results for a run
+  router.get('/ablations/:name/runs/:timestamp', (req: Request, res: Response) => {
+    try {
+      const runDir = ablationManager.getRunDirectory(req.params.name, req.params.timestamp);
+      const run = ablationManager.loadRunResults(runDir);
+      if (!run) {
+        res.status(404).json({ error: 'Run not found' });
+        return;
+      }
+      res.json({
+        ablationName: run.ablationName,
+        startedAt: run.startedAt,
+        completedAt: run.completedAt,
+        totalTokens: run.totalTokens,
+        totalDuration: run.totalDuration,
+        totalDurationFormatted: run.totalDurationFormatted,
+        resolvedArguments: run.resolvedArguments,
+        results: run.results.map(r => ({
+          phase: r.phase,
+          model: r.model,
+          run: r.run,
+          status: r.status,
+          tokens: r.tokens,
+          duration: r.duration,
+          durationFormatted: r.durationFormatted,
+          error: r.error,
+        })),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // ────────────────────────────────────────────────────────────────
+  // POST /api/ablations/:name/run — Execute an ablation study (SSE)
+  // ────────────────────────────────────────────────────────────────
+
+  let ablationRunning = false;
+  let ablationCancelRequested = false;
+
+  router.post('/ablations/:name/run', async (req: Request, res: Response) => {
+    const ablationName = req.params.name;
+    const { resolvedArguments } = req.body as { resolvedArguments?: Record<string, string> };
+
+    if (ablationRunning) {
+      res.status(409).json({ error: 'An ablation is already running' });
+      return;
+    }
+    if (isProcessing) {
+      res.status(409).json({ error: 'A chat message is being processed' });
+      return;
+    }
+
+    const ablation = ablationManager.load(ablationName);
+    if (!ablation) {
+      res.status(404).json({ error: `Ablation not found: ${ablationName}` });
+      return;
+    }
+
+    ablationRunning = true;
+    ablationCancelRequested = false;
+
+    // SSE headers
+    res.setHeader('Content-Type', 'text/event-stream');
+    res.setHeader('Cache-Control', 'no-cache');
+    res.setHeader('Connection', 'keep-alive');
+    res.setHeader('X-Accel-Buffering', 'no');
+    res.flushHeaders();
+
+    let connectionClosed = false;
+    res.on('close', () => {
+      connectionClosed = true;
+      ablationCancelRequested = true;
+    });
+
+    const send = (data: Record<string, unknown>) => {
+      if (!connectionClosed) {
+        res.write(`data: ${JSON.stringify(data)}\n\n`);
+      }
+    };
+
+    // Helper: format duration
+    const fmtDur = (ms: number) => {
+      const s = Math.floor(ms / 1000);
+      const h = Math.floor(s / 3600);
+      const m = Math.floor((s % 3600) / 60);
+      const sec = s % 60;
+      if (h > 0) return `${h}h ${m}m ${sec}s`;
+      if (m > 0) return `${m}m ${sec}s`;
+      return `${sec}s`;
+    };
+
+    // Helper: parse @tool: / @tool-exec: commands
+    const parseToolCall = (cmd: string) => {
+      let inject = true;
+      let rest: string;
+      if (cmd.startsWith('@tool-exec:')) { inject = false; rest = cmd.slice(11).trim(); }
+      else if (cmd.startsWith('@tool:')) { inject = true; rest = cmd.slice(6).trim(); }
+      else return null;
+      // JSON syntax: tool_name {"arg": "value"}
+      const m = rest.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*(\{.*\})?\s*$/);
+      if (m) {
+        try {
+          return { toolName: m[1], args: JSON.parse(m[2] || '{}'), inject };
+        } catch { return null; }
+      }
+      // Simple tool name
+      const sm = rest.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*$/);
+      if (sm) return { toolName: sm[1], args: {}, inject };
+      return null;
+    };
+
+    // Helper: execute a single ablation command
+    const execCmd = async (command: string, dryRun: boolean) => {
+      const trimmed = command.trim();
+
+      // @tool: / @tool-exec:
+      if (trimmed.startsWith('@tool:') || trimmed.startsWith('@tool-exec:')) {
+        const parsed = parseToolCall(trimmed);
+        if (!parsed) throw new Error(`Invalid tool call syntax: ${trimmed}`);
+        const result = await client.executeMCPTool(parsed.toolName, parsed.args as Record<string, unknown>);
+        if (parsed.inject && result.contentBlocks?.length > 0) {
+          client.injectToolResult(parsed.toolName, parsed.args, result);
+        }
+        return;
+      }
+
+      // @shell:
+      if (trimmed.startsWith('@shell:')) {
+        const { execSync } = await import('child_process');
+        const shellCmd = trimmed.slice(7).trim();
+        if (!shellCmd) throw new Error('Empty shell command');
+        execSync(shellCmd, { encoding: 'utf-8', timeout: 300_000, stdio: ['pipe', 'pipe', 'pipe'] });
+        return;
+      }
+
+      // @wait:
+      const waitMatch = trimmed.match(/^@wait:(\d+(?:\.\d+)?)$/);
+      if (waitMatch) {
+        await new Promise(r => setTimeout(r, parseFloat(waitMatch[1]) * 1000));
+        return;
+      }
+
+      // Slash commands (skip for now — /add-prompt, /attachment-insert are complex)
+      if (trimmed.startsWith('/')) return;
+
+      // Plain text query → send to model (skip in dry run)
+      if (dryRun) return;
+      await client.processQuery(trimmed, false, undefined, () => ablationCancelRequested);
+    };
+
+    try {
+      // Save current state
+      const originalProviderName = client.getProviderName();
+      const originalModel = client.getModel();
+      const savedState = client.saveState();
+
+      // Create run directory
+      const { runDir } = ablationManager.createRunDirectory(ablationName);
+      ablationManager.snapshotOutputs(runDir);
+
+      // Substitute arguments
+      const sub = (cmds: string[]) =>
+        resolvedArguments ? ablationManager.substituteArguments(cmds, resolvedArguments) : cmds;
+
+      // Determine models and iterations
+      const dryRunModel = { provider: 'none', model: 'dry-run' };
+      const modelsToRun = ablation.dryRun ? [dryRunModel] : (ablation.models || []);
+      const iterations = ablation.runs ?? 1;
+      const hasMultiIter = iterations > 1;
+      const totalRuns = ablationManager.getTotalRuns(ablation);
+
+      interface RunResult { phase: string; model: { provider: string; model: string }; run?: number; status: string; tokens?: number; duration?: number; durationFormatted?: string; error?: string }
+      const results: RunResult[] = [];
+      const totalStartTime = Date.now();
+      let runNumber = 0;
+      let shouldBreak = false;
+
+      for (let iteration = 1; iteration <= iterations && !shouldBreak; iteration++) {
+        ablationManager.restoreOutputsFromSnapshot(runDir);
+
+        for (const phase of ablation.phases) {
+          if (shouldBreak || ablationCancelRequested) break;
+
+          ablationManager.createPhaseDirectory(runDir, phase.name, hasMultiIter ? iteration : undefined);
+
+          for (const model of modelsToRun) {
+            if (shouldBreak || ablationCancelRequested) break;
+            runNumber++;
+
+            const result: RunResult = { phase: phase.name, model, status: 'running' };
+            if (hasMultiIter) result.run = iteration;
+
+            send({ type: 'progress', runNumber, totalRuns, phase: phase.name, model, status: 'running', iteration: hasMultiIter ? iteration : undefined });
+
+            const startTime = Date.now();
+            const phaseCommands = sub(phase.commands);
+            const phaseOnStart = phase.onStart ? sub(phase.onStart) : undefined;
+            const phaseOnEnd = phase.onEnd ? sub(phase.onEnd) : undefined;
+
+            try {
+              // Switch model (skip in dry run)
+              if (!ablation.dryRun) {
+                const provider = createProvider(model.provider);
+                if (!provider) throw new Error(`Unknown provider: ${model.provider}`);
+                await client.switchProviderAndModel(provider, model.model);
+              }
+
+              // Execute onStart hooks
+              if (phaseOnStart) {
+                for (const cmd of phaseOnStart) {
+                  if (ablationCancelRequested) break;
+                  await execCmd(cmd, ablation.dryRun || false);
+                }
+              }
+
+              // Execute commands
+              for (let i = 0; i < phaseCommands.length; i++) {
+                if (ablationCancelRequested) break;
+                send({ type: 'command', runNumber, totalRuns, phase: phase.name, commandIndex: i, totalCommands: phaseCommands.length, command: phaseCommands[i] });
+                await execCmd(phaseCommands[i], ablation.dryRun || false);
+              }
+
+              // Execute onEnd hooks
+              if (!ablationCancelRequested && phaseOnEnd) {
+                for (const cmd of phaseOnEnd) {
+                  if (ablationCancelRequested) break;
+                  await execCmd(cmd, ablation.dryRun || false);
+                }
+              }
+
+              if (ablationCancelRequested) {
+                result.status = 'aborted';
+                shouldBreak = true;
+              } else {
+                result.status = 'completed';
+                if (!ablation.dryRun) {
+                  result.tokens = client.getTokenUsage().current;
+                }
+              }
+            } catch (err: any) {
+              result.status = 'failed';
+              result.error = err.message || String(err);
+              shouldBreak = true;
+            }
+
+            result.duration = Date.now() - startTime;
+            result.durationFormatted = fmtDur(result.duration);
+            results.push(result);
+
+            send({ type: 'result', runNumber, totalRuns, ...result });
+
+            // End chat session for this phase/model
+            if (!ablation.dryRun) {
+              try {
+                client.getChatHistoryManager().endSession(`Ablation: ${phase.name} with ${model.provider}/${model.model}`);
+              } catch { /* ignore */ }
+            }
+          }
+        }
+
+        // Capture iteration outputs
+        ablationManager.captureIterationOutputs(runDir, hasMultiIter ? iteration : undefined);
+      }
+
+      // Save run results
+      const totalDuration = Date.now() - totalStartTime;
+      const run = {
+        ablationName,
+        startedAt: new Date(totalStartTime).toISOString(),
+        completedAt: new Date().toISOString(),
+        ...(resolvedArguments && Object.keys(resolvedArguments).length > 0 ? { resolvedArguments } : {}),
+        results,
+        totalTokens: results.reduce((s, r) => s + (r.tokens || 0), 0),
+        totalDuration,
+        totalDurationFormatted: fmtDur(totalDuration),
+      };
+      ablationManager.saveRunResults(runDir, run as any);
+      ablationManager.cleanupOutputsSnapshot(runDir);
+
+      // Restore original state
+      try {
+        const originalProvider = createProvider(originalProviderName);
+        await client.restoreState(savedState, originalProvider, originalModel);
+      } catch { /* best effort */ }
+
+      send({ type: 'done', summary: run });
+    } catch (err: any) {
+      send({ type: 'error', message: err.message || String(err) });
+    } finally {
+      ablationRunning = false;
+      if (!connectionClosed) res.end();
+    }
+  });
+
+  // POST /api/ablations/cancel — Cancel a running ablation
+  router.post('/ablations/cancel', (_req: Request, res: Response) => {
+    if (!ablationRunning) {
+      res.status(404).json({ error: 'No ablation is currently running' });
+      return;
+    }
+    ablationCancelRequested = true;
+    res.json({ ok: true });
   });
 
   return router;

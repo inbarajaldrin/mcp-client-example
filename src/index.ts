@@ -37,7 +37,11 @@ export type WebStreamEvent =
   | { type: 'warning'; message: string }
   | { type: 'info'; message: string }
   | { type: 'error'; message: string }
-  | { type: 'done' };
+  | { type: 'done' }
+  | { type: 'approval_request'; toolName: string; toolInput: Record<string, any>; requestId: string }
+  | { type: 'elicitation_request'; message: string; requestedSchema: any; requestId: string }
+  | { type: 'ipc_tool_start'; toolName: string; args: Record<string, any> }
+  | { type: 'ipc_tool_end'; toolName: string; args: Record<string, any>; result?: any; error?: string };
 
 export type StreamObserver = (event: WebStreamEvent) => void;
 import { AnthropicProvider, type ToolExecutor } from './providers/anthropic.js';
@@ -110,6 +114,7 @@ export class MCPClient {
   private forceStopCallback?: (toolName: string, elapsedSeconds: number, abortSignal?: AbortSignal) => Promise<boolean>;
   private isAbortRequestedCallback?: () => boolean;
   private toolApprovalCallback?: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | { decision: 'reject'; message?: string }>;
+  private webElicitationCallback?: (request: ElicitRequest) => Promise<import('@modelcontextprotocol/sdk/types.js').ElicitResult>;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -329,6 +334,9 @@ export class MCPClient {
     const connectionErrors: Array<{ name: string; error: any }> = [];
 
     for (const serverConfig of this.serverConfigs) {
+      // Skip servers that are disabled in config — they're kept in serverConfigs
+      // so features like todo mode can connect them on-demand via enableTodoMode()
+      if (serverConfig.disabledInConfig) continue;
 
       try {
         this.logger.log(`Connecting to server "${serverConfig.name}"...\n`, {
@@ -354,6 +362,7 @@ export class MCPClient {
 
         // Register elicitation request handler
         client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
+          if (this.webElicitationCallback) return this.webElicitationCallback(request);
           return this.elicitationHandler.handleElicitation(request);
         });
 
@@ -525,6 +534,7 @@ export class MCPClient {
 
     // Register elicitation request handler
     client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
+      if (this.webElicitationCallback) return this.webElicitationCallback(request);
       return this.elicitationHandler.handleElicitation(request);
     });
 
@@ -820,6 +830,7 @@ export class MCPClient {
 
     // Reconnect to servers
     for (const serverConfig of this.serverConfigs) {
+      if (serverConfig.disabledInConfig) continue;
 
       try {
         this.logger.log(`Connecting to server "${serverConfig.name}"...\n`, {
@@ -845,6 +856,7 @@ export class MCPClient {
 
         // Register elicitation request handler
         client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
+          if (this.webElicitationCallback) return this.webElicitationCallback(request);
           return this.elicitationHandler.handleElicitation(request);
         });
 
@@ -950,6 +962,7 @@ export class MCPClient {
 
       // Register elicitation request handler
       client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
+        if (this.webElicitationCallback) return this.webElicitationCallback(request);
         return this.elicitationHandler.handleElicitation(request);
       });
 
@@ -1158,6 +1171,7 @@ export class MCPClient {
 
         // Register elicitation request handler
         client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
+          if (this.webElicitationCallback) return this.webElicitationCallback(request);
           return this.elicitationHandler.handleElicitation(request);
         });
 
@@ -1430,6 +1444,14 @@ export class MCPClient {
    */
   setToolApprovalCallback(callback: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | { decision: 'reject'; message?: string }>): void {
     this.toolApprovalCallback = callback;
+  }
+
+  /**
+   * Set callback for web-mode elicitation handling.
+   * When set, MCP elicitation requests are routed to this callback instead of readline.
+   */
+  setWebElicitationCallback(callback: (request: ElicitRequest) => Promise<import('@modelcontextprotocol/sdk/types.js').ElicitResult>): void {
+    this.webElicitationCallback = callback;
   }
 
   /**
@@ -1715,6 +1737,7 @@ export class MCPClient {
 
         // Register elicitation request handler
         client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
+          if (this.webElicitationCallback) return this.webElicitationCallback(request);
           return this.elicitationHandler.handleElicitation(request);
         });
 
@@ -3347,14 +3370,19 @@ export class MCPClient {
     this.clearContext();
 
     // Convert chat history messages to conversation messages
+    // Also replay into chat history manager so getUserTurns()/rewind work
+    const histMgr = this.chatHistoryManager;
     for (const msg of chatData.messages) {
       if (msg.role === 'user') {
         this.messages.push({ role: 'user', content: msg.content });
+        histMgr.addUserMessage(msg.content);
       } else if (msg.role === 'assistant') {
         if (msg.content_blocks) {
           this.messages.push({ role: 'assistant', content: msg.content, content_blocks: msg.content_blocks });
+          histMgr.addAssistantMessage(msg.content, msg.content_blocks);
         } else {
           this.messages.push({ role: 'assistant', content: msg.content });
+          histMgr.addAssistantMessage(msg.content);
         }
       } else if (msg.role === 'tool' && msg.tool_use_id) {
         this.messages.push({ role: 'tool', content: msg.content, tool_call_id: msg.tool_use_id });

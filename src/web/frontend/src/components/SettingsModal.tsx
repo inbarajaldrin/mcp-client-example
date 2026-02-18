@@ -7,9 +7,15 @@ interface SettingsModalProps {
   settings: Settings | null;
   onSave: (partial: Partial<Settings>) => Promise<boolean>;
   error: string | null;
+  orchestratorConfigured?: boolean;
+  orchestratorEnabled?: boolean;
+  onToggleOrchestrator?: () => void;
+  todoConfigured?: boolean;
+  todoEnabled?: boolean;
+  onToggleTodo?: () => void;
 }
 
-export function SettingsModal({ open, onClose, settings, onSave, error }: SettingsModalProps) {
+export function SettingsModal({ open, onClose, settings, onSave, error, orchestratorConfigured, orchestratorEnabled, onToggleOrchestrator, todoConfigured, todoEnabled, onToggleTodo }: SettingsModalProps) {
   const [mcpTimeout, setMcpTimeout] = useState('');
   const [maxIterations, setMaxIterations] = useState('');
   const [hilEnabled, setHilEnabled] = useState(false);
@@ -90,6 +96,46 @@ export function SettingsModal({ open, onClose, settings, onSave, error }: Settin
               <span className="toggle-switch__knob" />
             </button>
           </label>
+
+          {orchestratorConfigured && (
+            <label className="settings-field settings-field--toggle">
+              <span className="settings-field__label">
+                Orchestrator Mode
+                <span className="settings-field__hint" style={{ display: 'block', marginTop: 2 }}>
+                  Enable IPC server for sub-agent tool calls
+                </span>
+              </span>
+              <button
+                type="button"
+                className={`toggle-switch ${orchestratorEnabled ? 'toggle-switch--on' : ''}`}
+                onClick={onToggleOrchestrator}
+                role="switch"
+                aria-checked={orchestratorEnabled}
+              >
+                <span className="toggle-switch__knob" />
+              </button>
+            </label>
+          )}
+
+          {todoConfigured && (
+            <label className="settings-field settings-field--toggle">
+              <span className="settings-field__label">
+                Todo Mode
+                <span className="settings-field__hint" style={{ display: 'block', marginTop: 2 }}>
+                  Decompose tasks into actionable todos
+                </span>
+              </span>
+              <button
+                type="button"
+                className={`toggle-switch ${todoEnabled ? 'toggle-switch--on' : ''}`}
+                onClick={onToggleTodo}
+                role="switch"
+                aria-checked={todoEnabled}
+              >
+                <span className="toggle-switch__knob" />
+              </button>
+            </label>
+          )}
 
           {error && <div className="settings-error">{error}</div>}
         </div>

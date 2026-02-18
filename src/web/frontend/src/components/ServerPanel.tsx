@@ -24,6 +24,10 @@ interface ServerPanelProps {
   onTogglePrompt: (server: string, name: string, enabled: boolean) => void;
   onGetPrompt: (server: string, name: string, args?: Record<string, string>) => Promise<ResolvedPrompt | null>;
   onUsePrompt: (server: string, name: string, args?: Record<string, string>) => Promise<boolean>;
+  onRefreshAll?: () => void;
+  refreshing?: boolean;
+  onRefreshServer?: (serverName: string) => void;
+  refreshingServer?: string | null;
 }
 
 function ServerItem({
@@ -31,11 +35,15 @@ function ServerItem({
   serverTools,
   onToggleTool,
   onToggleServer,
+  onRefreshServer,
+  refreshingServer,
 }: {
   server: string;
   serverTools: ToolWithState[];
   onToggleTool: (toolName: string, enabled: boolean) => void;
   onToggleServer: (serverName: string, enabled: boolean) => void;
+  onRefreshServer?: (serverName: string) => void;
+  refreshingServer?: string | null;
 }) {
   const [open, setOpen] = useState(false);
 
@@ -65,6 +73,16 @@ function ServerItem({
         </span>
         <span className="server-item__name" onClick={() => setOpen(!open)}>{server}</span>
         <span className="server-item__badge">{enabledCount}/{serverTools.length}</span>
+        {onRefreshServer && (
+          <button
+            className={`server-item__refresh${refreshingServer === server ? ' server-item__refresh--spinning' : ''}`}
+            onClick={(e) => { e.stopPropagation(); onRefreshServer(server); }}
+            disabled={refreshingServer === server}
+            title={`Refresh ${server}`}
+          >
+            <svg width="12" height="12" viewBox="0 0 16 16" fill="currentColor"><path d="M13.65 2.35A8 8 0 1 0 16 8h-2a6 6 0 1 1-1.76-4.24L10 6h6V0l-2.35 2.35z"/></svg>
+          </button>
+        )}
       </div>
       <div className={`server-item__tools ${open ? 'server-item__tools--open' : ''}`}>
         {serverTools.map(tool => (
@@ -308,6 +326,7 @@ function PromptServerItem({
 export function ServerPanel({
   allTools, loading, onToggleTool, onToggleServer,
   prompts, promptsLoading, onTogglePrompt, onGetPrompt, onUsePrompt,
+  onRefreshAll, refreshing, onRefreshServer, refreshingServer,
 }: ServerPanelProps) {
   // Group tools by server
   const serverMap = new Map<string, ToolWithState[]>();
@@ -328,7 +347,19 @@ export function ServerPanel({
 
   return (
     <div className="server-panel">
-      <div className="server-panel__label">Servers</div>
+      <div className="server-panel__header">
+        <div className="server-panel__label">Servers</div>
+        {onRefreshAll && (
+          <button
+            className={`server-panel__refresh${refreshing ? ' server-panel__refresh--spinning' : ''}`}
+            onClick={onRefreshAll}
+            disabled={refreshing}
+            title="Refresh all servers"
+          >
+            <svg width="14" height="14" viewBox="0 0 16 16" fill="currentColor"><path d="M13.65 2.35A8 8 0 1 0 16 8h-2a6 6 0 1 1-1.76-4.24L10 6h6V0l-2.35 2.35z"/></svg>
+          </button>
+        )}
+      </div>
       {loading ? (
         <div className="server-panel__loading">Connecting...</div>
       ) : serverNames.length === 0 && prompts.length === 0 ? (
@@ -342,6 +373,8 @@ export function ServerPanel({
               serverTools={serverMap.get(name)!}
               onToggleTool={onToggleTool}
               onToggleServer={onToggleServer}
+              onRefreshServer={onRefreshServer}
+              refreshingServer={refreshingServer}
             />
           ))}
           {!promptsLoading && Array.from(promptsByServer.entries()).map(([server, serverPrompts]) => (

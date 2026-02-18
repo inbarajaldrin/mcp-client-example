@@ -23,6 +23,7 @@ export async function startWebServer(
   serverConfigs: Array<{ name: string; config: StdioServerParameters; disabledInConfig?: boolean }>,
   options: WebServerOptions,
   port?: number,
+  host?: string,
 ): Promise<void> {
   const logger = new Logger({ mode: 'verbose' });
 
@@ -33,12 +34,10 @@ export async function startWebServer(
   // Using 'pipe' would deadlock: nobody reads the PassThrough stream, the OS
   // pipe buffer fills up, and the child blocks on its next logging call.
   // Using 'ignore' discards stderr at the OS level — no buffer, no deadlock.
-  const patchedConfigs = serverConfigs
-    .filter(s => !s.disabledInConfig)
-    .map(s => ({
-      ...s,
-      config: { ...s.config, stderr: 'ignore' as const },
-    }));
+  const patchedConfigs = serverConfigs.map(s => ({
+    ...s,
+    config: { ...s.config, stderr: 'ignore' as const },
+  }));
 
   // Create MCPClient using the multi-server factory
   const client = MCPClient.createMultiServer(patchedConfigs, {
@@ -82,10 +81,12 @@ export async function startWebServer(
   const httpServer = createHttpServer(app);
 
   await new Promise<void>((resolve) => {
-    httpServer.listen(port ?? 0, () => {
+    const listenHost = host || '0.0.0.0';
+    httpServer.listen(port ?? 0, listenHost, () => {
       const addr = httpServer.address();
       const actualPort = typeof addr === 'object' && addr ? addr.port : port ?? 0;
-      console.log(`\n  Web UI: http://localhost:${actualPort}\n`);
+      const displayHost = listenHost === '0.0.0.0' ? 'localhost' : listenHost;
+      console.log(`\n  Web UI: http://${displayHost}:${actualPort}\n`);
       resolve();
     });
   });

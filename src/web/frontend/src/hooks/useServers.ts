@@ -59,5 +59,38 @@ export function useServers() {
     fetchAllTools();
   }, [fetchServers, fetchAllTools]);
 
-  return { servers, allTools, loading, toggleTool, toggleServer, refetch: fetchServers };
+  const [refreshing, setRefreshing] = useState(false);
+  const [refreshingServer, setRefreshingServer] = useState<string | null>(null);
+
+  const refreshAll = useCallback(async () => {
+    setRefreshing(true);
+    try {
+      const res = await fetch('/api/servers/refresh', { method: 'POST' });
+      if (res.ok) {
+        fetchServers();
+        fetchAllTools();
+      }
+    } catch {
+      // ignore
+    } finally {
+      setRefreshing(false);
+    }
+  }, [fetchServers, fetchAllTools]);
+
+  const refreshServer = useCallback(async (serverName: string) => {
+    setRefreshingServer(serverName);
+    try {
+      const res = await fetch(`/api/servers/refresh/${encodeURIComponent(serverName)}`, { method: 'POST' });
+      if (res.ok) {
+        fetchServers();
+        fetchAllTools();
+      }
+    } catch {
+      // ignore
+    } finally {
+      setRefreshingServer(null);
+    }
+  }, [fetchServers, fetchAllTools]);
+
+  return { servers, allTools, loading, toggleTool, toggleServer, refetch: fetchServers, refreshAll, refreshing, refreshServer, refreshingServer };
 }

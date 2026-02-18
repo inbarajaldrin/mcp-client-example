@@ -121,6 +121,10 @@ export class ChatHistoryManager {
     this.loadIndex();
   }
 
+  getCurrentSession(): ChatSession | null {
+    return this.currentSession;
+  }
+
   /**
    * Initialize chat directory structure
    */

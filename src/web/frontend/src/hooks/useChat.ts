@@ -22,7 +22,12 @@ export interface ChatMessage {
   blocks: ContentBlock[];
 }
 
-export function useChat() {
+interface UseChatOptions {
+  onApprovalRequest?: (toolName: string, toolInput: Record<string, any>, requestId: string) => void;
+  onElicitationRequest?: (message: string, requestedSchema: any, requestId: string) => void;
+}
+
+export function useChat(options?: UseChatOptions) {
   const [messages, setMessages] = useState<ChatMessage[]>([]);
   const [isStreaming, setIsStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
@@ -256,6 +261,63 @@ export function useChat() {
                   updatedLast = { ...last, content: last.content + errText, blocks: errBlocks };
                   break;
                 }
+                case 'ipc_tool_start': {
+                  const ipcId = `ipc_${Date.now()}_${Math.random().toString(36).slice(2, 7)}`;
+                  const ipcTool: ToolCallInfo = {
+                    toolId: ipcId,
+                    toolName: `⚡ ${event.toolName}`,
+                    toolInput: event.args,
+                    status: 'running',
+                  };
+                  updatedLast = {
+                    ...last,
+                    toolCalls: [...last.toolCalls, ipcTool],
+                    blocks: [...last.blocks, { type: 'tool', tool: ipcTool }],
+                  };
+                  break;
+                }
+                case 'ipc_tool_end': {
+                  const ipcName = `⚡ ${event.toolName}`;
+                  let ipcMatched = false;
+                  const ipcToolCalls = last.toolCalls.map(tc => {
+                    if (ipcMatched) return tc;
+                    if (tc.toolName === ipcName && tc.status === 'running') {
+                      ipcMatched = true;
+                      return {
+                        ...tc,
+                        status: (event.error ? 'cancelled' : 'complete') as 'complete' | 'cancelled',
+                        result: event.error || (typeof event.result === 'string' ? event.result : JSON.stringify(event.result, null, 2)),
+                      };
+                    }
+                    return tc;
+                  });
+                  let ipcBlockMatched = false;
+                  const ipcBlocks = last.blocks.map(b => {
+                    if (ipcBlockMatched || b.type !== 'tool') return b;
+                    if (b.tool.toolName === ipcName && b.tool.status === 'running') {
+                      ipcBlockMatched = true;
+                      return {
+                        ...b,
+                        tool: {
+                          ...b.tool,
+                          status: (event.error ? 'cancelled' : 'complete') as 'complete' | 'cancelled',
+                          result: event.error || (typeof event.result === 'string' ? event.result : JSON.stringify(event.result, null, 2)),
+                        },
+                      };
+                    }
+                    return b;
+                  });
+                  updatedLast = { ...last, toolCalls: ipcToolCalls, blocks: ipcBlocks };
+                  break;
+                }
+                case 'approval_request': {
+                  options?.onApprovalRequest?.(event.toolName, event.toolInput, event.requestId);
+                  return prev;
+                }
+                case 'elicitation_request': {
+                  options?.onElicitationRequest?.(event.message, event.requestedSchema, event.requestId);
+                  return prev;
+                }
                 default:
                   return prev;
               }
@@ -312,9 +374,13 @@ export function useChat() {
     }
   }, [isStreaming]);
 
-  const rewindToMessage = useCallback(async (frontendMsgIndex: number) => {
-    if (isStreaming) return;
+  const rewindToMessage = useCallback(async (frontendMsgIndex: number): Promise<string | null> => {
+    if (isStreaming) return null;
     try {
+      // Capture the message content before truncating
+      const rewindedMessage = messages[frontendMsgIndex];
+      const prefillText = rewindedMessage?.role === 'user' ? rewindedMessage.content : null;
+
       // Get backend turns to map frontend index to backend indices
       const turnsRes = await fetch('/api/chat/turns');
       const turns: Array<{ turnNumber: number; messageIndex: number; historyIndex: number }> = await turnsRes.json();
@@ -327,7 +393,7 @@ export function useChat() {
       }
 
       const turn = turns[userTurnIdx];
-      if (!turn) return;
+      if (!turn) return null;
 
       const res = await fetch('/api/chat/rewind', {
         method: 'POST',
@@ -337,10 +403,12 @@ export function useChat() {
       if (res.ok) {
         // Truncate frontend messages to match
         setMessages(prev => prev.slice(0, frontendMsgIndex));
+        return prefillText;
       }
     } catch {
       // Silently fail
     }
+    return null;
   }, [isStreaming, messages]);
 
   const clearChat = useCallback(async () => {
@@ -362,73 +430,113 @@ export function useChat() {
     });
   }, []);
 
-  // Load existing conversation from backend on mount
-  useEffect(() => {
-    (async () => {
-      try {
-        const res = await fetch('/api/chat/history');
-        if (!res.ok) return;
-        const history: Array<{
-          role: string;
-          content: string;
-          content_blocks?: Array<{ type: string; id?: string; name?: string; input?: any; text?: string }>;
-          tool_calls?: Array<{ id: string; name: string; arguments: string }>;
-        }> = await res.json();
+  // Load conversation history from backend and rebuild messages with tool visualization
+  const loadHistory = useCallback(async () => {
+    try {
+      const res = await fetch('/api/chat/history');
+      if (!res.ok) return;
+      const history: Array<{
+        role: string;
+        content: string;
+        content_blocks?: Array<{ type: string; id?: string; name?: string; input?: any; text?: string }>;
+        tool_calls?: Array<{ id: string; name: string; arguments: string }>;
+        tool_results?: Array<{ type: string; tool_use_id?: string; content?: string }>;
+        tool_call_id?: string;
+      }> = await res.json();
 
-        const restored: ChatMessage[] = [];
-        for (const msg of history) {
-          if (msg.role === 'user') {
-            const text = typeof msg.content === 'string' ? msg.content : '';
-            restored.push({
-              id: `user-restored-${restored.length}`,
-              role: 'user',
-              content: text,
-              toolCalls: [],
-              blocks: text ? [{ type: 'text', text }] : [],
-            });
-          } else if (msg.role === 'assistant') {
-            const text = typeof msg.content === 'string' ? msg.content : '';
-            const toolCalls: ToolCallInfo[] = (msg.tool_calls || []).map(tc => ({
+      // First pass: collect tool results from role:'tool' messages into a map
+      const toolResults = new Map<string, string>();
+      for (const msg of history) {
+        if (msg.role === 'tool' && msg.tool_call_id && typeof msg.content === 'string') {
+          toolResults.set(msg.tool_call_id, msg.content);
+        }
+        // Also collect from tool_results arrays on user messages (Anthropic format)
+        if (msg.role === 'user' && msg.tool_results) {
+          for (const tr of msg.tool_results) {
+            if (tr.tool_use_id && tr.content) {
+              toolResults.set(tr.tool_use_id, tr.content);
+            }
+          }
+        }
+      }
+
+      // Second pass: build ChatMessage array
+      const restored: ChatMessage[] = [];
+      let msgIdx = 0;
+      for (const msg of history) {
+        if (msg.role === 'user') {
+          const text = typeof msg.content === 'string' ? msg.content : '';
+          // Skip empty user messages that are just tool result carriers
+          if (!text && (msg.tool_results && msg.tool_results.length > 0)) continue;
+          if (!text) continue;
+          restored.push({
+            id: `restored-${msgIdx++}`,
+            role: 'user',
+            content: text,
+            toolCalls: [],
+            blocks: [{ type: 'text', text }],
+          });
+        } else if (msg.role === 'assistant') {
+          const text = typeof msg.content === 'string' ? msg.content : '';
+
+          // Build toolCalls from tool_calls (OpenAI format) OR content_blocks (Anthropic format)
+          let toolCalls: ToolCallInfo[];
+          if (msg.tool_calls && msg.tool_calls.length > 0) {
+            toolCalls = msg.tool_calls.map(tc => ({
               toolId: tc.id,
               toolName: tc.name,
               toolInput: (() => { try { return JSON.parse(tc.arguments); } catch { return {}; } })(),
               status: 'complete' as const,
+              result: toolResults.get(tc.id),
             }));
-            // Build blocks from content_blocks if available
-            const blocks: ContentBlock[] = [];
-            if (msg.content_blocks && msg.content_blocks.length > 0) {
-              for (const cb of msg.content_blocks) {
-                if (cb.type === 'text' && cb.text) {
-                  blocks.push({ type: 'text', text: cb.text });
-                } else if (cb.type === 'tool_use' && cb.name) {
-                  const tc = toolCalls.find(t => t.toolId === cb.id);
-                  if (tc) blocks.push({ type: 'tool', tool: tc });
-                }
+          } else {
+            // Extract from content_blocks (Anthropic/restored sessions)
+            toolCalls = (msg.content_blocks || [])
+              .filter(cb => cb.type === 'tool_use' && cb.name)
+              .map(cb => ({
+                toolId: cb.id || `tool-${Math.random().toString(36).slice(2)}`,
+                toolName: cb.name!,
+                toolInput: cb.input || {},
+                status: 'complete' as const,
+                result: cb.id ? toolResults.get(cb.id) : undefined,
+              }));
+          }
+
+          // Build blocks from content_blocks if available
+          const blocks: ContentBlock[] = [];
+          if (msg.content_blocks && msg.content_blocks.length > 0) {
+            for (const cb of msg.content_blocks) {
+              if (cb.type === 'text' && cb.text) {
+                blocks.push({ type: 'text', text: cb.text });
+              } else if (cb.type === 'tool_use' && cb.name) {
+                const tc = toolCalls.find(t => t.toolId === cb.id || t.toolName === cb.name);
+                if (tc) blocks.push({ type: 'tool', tool: tc });
               }
             }
-            // Fallback: text block + tool blocks
-            if (blocks.length === 0) {
-              if (text) blocks.push({ type: 'text', text });
-              for (const tc of toolCalls) blocks.push({ type: 'tool', tool: tc });
-            }
-            restored.push({
-              id: `assistant-restored-${restored.length}`,
-              role: 'assistant',
-              content: text,
-              toolCalls,
-              blocks,
-            });
           }
-          // Skip 'tool' role messages (results are shown inline)
+          // Fallback: text block + tool blocks
+          if (blocks.length === 0) {
+            if (text) blocks.push({ type: 'text', text });
+            for (const tc of toolCalls) blocks.push({ type: 'tool', tool: tc });
+          }
+          restored.push({
+            id: `restored-${msgIdx++}`,
+            role: 'assistant',
+            content: text,
+            toolCalls,
+            blocks,
+          });
         }
-        if (restored.length > 0) {
-          setMessages(restored);
-        }
-      } catch {
-        // Ignore load errors
+        // Skip 'tool' role messages — their results are attached to the matching tool_use blocks above
       }
-    })();
+      setMessages(restored);
+    } catch {
+      // Ignore load errors
+    }
   }, []);
 
-  return { messages, isStreaming, sendMessage, clearChat, stopStreaming, rewindToMessage };
+  // Load existing conversation from backend on mount
+  useEffect(() => { loadHistory(); }, [loadHistory]);
+
+  return { messages, isStreaming, sendMessage, clearChat, stopStreaming, rewindToMessage, loadHistory };
 }

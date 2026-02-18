@@ -12,6 +12,8 @@ interface ChatInputProps {
   onUploadFile: (file: File) => void;
   onRemoveAttachment: (fileName: string) => void;
   uploading: boolean;
+  prefill?: string | null;
+  onClearPrefill?: () => void;
 }
 
 export function ChatInput({
@@ -25,6 +27,8 @@ export function ChatInput({
   onUploadFile,
   onRemoveAttachment,
   uploading,
+  prefill,
+  onClearPrefill,
 }: ChatInputProps) {
   const [value, setValue] = useState('');
   const [isDragOver, setIsDragOver] = useState(false);
@@ -48,6 +52,22 @@ export function ChatInput({
       textareaRef.current?.focus();
     }
   }, [pendingContext]);
+
+  // Pre-fill input after rewind
+  useEffect(() => {
+    if (prefill) {
+      setValue(prefill);
+      onClearPrefill?.();
+      // Focus and move cursor to end
+      setTimeout(() => {
+        const ta = textareaRef.current;
+        if (ta) {
+          ta.focus();
+          ta.selectionStart = ta.selectionEnd = prefill.length;
+        }
+      }, 0);
+    }
+  }, [prefill, onClearPrefill]);
 
   const hasPending = pendingAttachments.length > 0;
 

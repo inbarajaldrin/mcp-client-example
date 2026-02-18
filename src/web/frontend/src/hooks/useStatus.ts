@@ -1,14 +1,39 @@
 import { useState, useEffect } from 'react';
 
-interface Status {
+export interface TokenCallEntry {
+  timestamp: string;
+  inputTokens: number;
+  outputTokens: number;
+  cacheCreationTokens: number;
+  cacheReadTokens: number;
+  estimatedCost: number;
+}
+
+export interface Status {
   provider: string;
   model: string;
   tokenUsage: {
     current: number;
     contextWindow: number;
     percentage: number;
+    suggestion: 'continue' | 'warn' | 'break';
+  };
+  cost: {
+    totalCost: number;
+    cumulativeTokens: number;
+    toolUseCount: number;
+    callCount: number;
+    recentCalls: TokenCallEntry[];
   };
   isProcessing: boolean;
+  orchestrator: {
+    enabled: boolean;
+    configured: boolean;
+  };
+  todo: {
+    enabled: boolean;
+    configured: boolean;
+  };
 }
 
 export function useStatus() {

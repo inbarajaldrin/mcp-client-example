@@ -519,6 +519,8 @@ async function main() {
         'model': { type: 'string' },
         'select-model': { type: 'boolean' },
         'web': { type: 'boolean' },
+        'web-port': { type: 'string' },
+        'web-host': { type: 'string' },
       },
       allowPositionals: true,
     });
@@ -671,10 +673,12 @@ async function main() {
       // Handle --web flag: launch web UI instead of CLI
       if (args.values['web']) {
         const { startWebServer } = await import('./web/server.js');
+        const webPort = args.values['web-port'] ? parseInt(args.values['web-port'], 10) : undefined;
+        const webHost = args.values['web-host'] || undefined;
         await startWebServer(allServerConfigs, {
           provider: finalProvider,
           model: selectedModel,
-        });
+        }, webPort, webHost);
         return;
       }
 
