@@ -583,25 +583,23 @@ export class OllamaProvider implements ModelProvider {
           const toolCall = chunk.message.tool_calls[i];
           
           if (!toolCallTracker.has(i)) {
-            toolCallTracker.set(i, { arguments: '' });
-            
+            const toolId = `ollama_tool_${Date.now()}_${i}`;
+            toolCallTracker.set(i, { arguments: '', id: toolId });
+
             // Emit tool use start
             yield {
               type: 'content_block_start',
               content_block: {
                 type: 'tool_use',
                 name: toolCall.function?.name,
-                id: `ollama_tool_${Date.now()}_${i}`,
+                id: toolId,
               },
             } as MessageStreamEvent;
           }
-          
+
           const tracker = toolCallTracker.get(i)!;
           if (!tracker.name && toolCall.function?.name) {
             tracker.name = toolCall.function.name;
-          }
-          if (!tracker.id) {
-            tracker.id = `ollama_tool_${Date.now()}_${i}`;
           }
           
           // Emit tool arguments

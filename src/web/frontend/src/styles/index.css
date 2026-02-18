@@ -336,6 +336,9 @@ body::before {
   scroll-behavior: smooth;
   scrollbar-width: thin;
   scrollbar-color: var(--border-default) transparent;
+  /* Flex column enables align-self shrink-wrap on message children */
+  display: flex;
+  flex-direction: column;
 }
 
 .chat-messages::-webkit-scrollbar {
@@ -356,7 +359,7 @@ body::before {
   flex-direction: column;
   align-items: center;
   justify-content: center;
-  height: 100%;
+  flex: 1;
   color: var(--text-muted);
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
@@ -378,7 +381,9 @@ body::before {
 /* ─── Message Bubbles ─── */
 .message {
   margin-bottom: var(--sp-5);
-  max-width: 85%;
+  width: fit-content;
+  min-width: 0;
+  overflow-wrap: anywhere;
   animation: message-enter 250ms cubic-bezier(0.16, 1, 0.3, 1);
 }
 
@@ -394,11 +399,15 @@ body::before {
 }
 
 .message--user {
-  margin-left: auto;
+  align-self: flex-end;
+  max-width: clamp(120px, 75%, 640px);
 }
 
 .message--assistant {
-  margin-right: auto;
+  align-self: flex-start;
+  max-width: clamp(200px, 90%, 960px);
+  /* Tool cards and code blocks need breathing room */
+  min-width: min(320px, 100%);
 }
 
 .message__label {
@@ -416,11 +425,14 @@ body::before {
 }
 
 .message__body {
-  padding: var(--sp-3) var(--sp-4);
+  padding: var(--sp-4);
   border-radius: var(--radius-lg);
   line-height: 1.6;
   font-size: var(--font-size-base);
   word-break: break-word;
+  display: flex;
+  flex-direction: column;
+  gap: var(--sp-3);
 }
 
 .message--user .message__body {
@@ -439,6 +451,7 @@ body::before {
 
 /* Markdown-like rendering within messages */
 .message__body p {
+  margin-top: 0;
   margin-bottom: var(--sp-2);
 }
 
@@ -504,9 +517,15 @@ body::before {
   text-decoration: underline;
 }
 
+.message__info-block {
+  color: var(--accent-red);
+  font-size: var(--font-size-sm);
+  font-weight: 500;
+  padding: var(--sp-1) 0;
+}
+
 /* ─── Tool Call Card ─── */
 .tool-call {
-  margin-top: var(--sp-3);
   border: 1px solid var(--border-default);
   border-radius: var(--radius-md);
   overflow: hidden;
@@ -560,6 +579,12 @@ body::before {
   line-height: 1;
 }
 
+.tool-call__cross {
+  color: var(--accent-red);
+  font-size: 13px;
+  line-height: 1;
+}
+
 .tool-call__name {
   font-family: var(--font-mono);
   font-size: var(--font-size-sm);
@@ -593,8 +618,12 @@ body::before {
 }
 
 .tool-call__section {
-  padding: var(--sp-2) var(--sp-3);
+  padding: var(--sp-1) var(--sp-3);
   border-top: 1px solid var(--border-muted);
+}
+
+.tool-call__section:has(+ .tool-call__section) {
+  padding-bottom: 0;
 }
 
 .tool-call__section-label {

@@ -1,5 +1,5 @@
 import { useMemo } from 'react';
-import type { ChatMessage as ChatMessageType } from '../hooks/useChat';
+import type { ChatMessage as ChatMessageType, ContentBlock } from '../hooks/useChat';
 import { ToolCall } from './ToolCall';
 
 interface ChatMessageProps {
@@ -100,8 +100,35 @@ function renderInline(text: string): (string | JSX.Element)[] {
   return parts;
 }
 
+function renderBlocks(blocks: ContentBlock[]): JSX.Element[] {
+  return blocks.map((block, idx) => {
+    if (block.type === 'text') {
+      const elements = renderContent(block.text);
+      return <div key={`text-${idx}`} className="message__text-block">{elements}</div>;
+    }
+    if (block.type === 'info') {
+      return <div key={`info-${idx}`} className="message__info-block">{block.text}</div>;
+    }
+    return <ToolCall key={block.tool.toolId} toolCall={block.tool} />;
+  });
+}
+
 export function ChatMessage({ message, onRewind }: ChatMessageProps) {
-  const rendered = useMemo(() => renderContent(message.content), [message.content]);
+  const rendered = useMemo(() => {
+    // Use blocks if available (interleaved order), fall back to legacy
+    if (message.blocks && message.blocks.length > 0) {
+      return renderBlocks(message.blocks);
+    }
+    // Legacy fallback: text first, then tools
+    const elements: JSX.Element[] = [];
+    if (message.content) {
+      elements.push(<div key="text">{renderContent(message.content)}</div>);
+    }
+    message.toolCalls.forEach(tc => {
+      elements.push(<ToolCall key={tc.toolId} toolCall={tc} />);
+    });
+    return elements;
+  }, [message.content, message.toolCalls, message.blocks]);
 
   return (
     <div className={`message message--${message.role}`}>
@@ -122,9 +149,6 @@ export function ChatMessage({ message, onRewind }: ChatMessageProps) {
       </div>
       <div className="message__body">
         {rendered}
-        {message.toolCalls.map(tc => (
-          <ToolCall key={tc.toolId} toolCall={tc} />
-        ))}
       </div>
     </div>
   );

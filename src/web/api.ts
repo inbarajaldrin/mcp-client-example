@@ -73,9 +73,27 @@ function createStreamBridge<T extends { type: string }>(): {
   return { observer, stream: generator() };
 }
 
+/** Strip ANSI escape codes from tool output strings */
+function stripAnsi(str: string): string {
+  // eslint-disable-next-line no-control-regex
+  return str.replace(/\u001b\[[0-9;]*m/g, '');
+}
+
 export function createApiRouter(client: MCPClient): Router {
   const router = Router();
   let isProcessing = false;
+  let cancelRequested = false;
+
+  // POST /api/chat/cancel — signal cancellation without closing the SSE stream
+  // This mirrors how the CLI handles abort: set a flag, let remaining events flow through
+  router.post('/chat/cancel', (_req: Request, res: Response) => {
+    if (!isProcessing) {
+      res.status(409).json({ error: 'No active request to cancel' });
+      return;
+    }
+    cancelRequested = true;
+    res.json({ ok: true });
+  });
 
   // POST /api/chat/message — SSE streaming endpoint
   router.post('/chat/message', async (req: Request, res: Response) => {
@@ -91,6 +109,7 @@ export function createApiRouter(client: MCPClient): Router {
     }
 
     isProcessing = true;
+    cancelRequested = false;
 
     // Resolve attachment file names to AttachmentInfo[]
     let attachments: AttachmentInfo[] | undefined;
@@ -109,19 +128,25 @@ export function createApiRouter(client: MCPClient): Router {
     res.setHeader('X-Accel-Buffering', 'no');
     res.flushHeaders();
 
-    let cancelled = false;
+    let connectionClosed = false;
     res.on('close', () => {
-      cancelled = true;
+      connectionClosed = true;
+      cancelRequested = true; // Also cancel if browser disconnects
     });
 
     const { observer, stream } = createStreamBridge<WebStreamEvent>();
 
+    // Record user message to chat history
+    const histMgr = client.getChatHistoryManager();
+    histMgr.addUserMessage(content);
+
     // Start processQuery in background — it pushes events via observer
+    // Cancel check uses cancelRequested (set by /cancel endpoint or connection close)
     const queryPromise = client.processQuery(
       content,
       false,        // isSystemPrompt
       attachments,
-      () => cancelled,
+      () => cancelRequested,
       observer,
     ).catch((error: any) => {
       // If processQuery throws before emitting error/done, ensure the bridge closes
@@ -130,11 +155,25 @@ export function createApiRouter(client: MCPClient): Router {
 
     try {
       for await (const event of stream) {
-        if (cancelled) break;
+        if (connectionClosed) break;
         res.write(`data: ${JSON.stringify(event)}\n\n`);
       }
     } finally {
       await queryPromise;
+      // Record assistant response to chat history
+      try {
+        const messages = client.getMessages();
+        const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
+        if (lastAssistant?.content) {
+          histMgr.addAssistantMessage(
+            typeof lastAssistant.content === 'string'
+              ? lastAssistant.content
+              : JSON.stringify(lastAssistant.content),
+          );
+        }
+      } catch {
+        // Ignore history recording errors
+      }
       isProcessing = false;
       res.end();
     }
@@ -159,6 +198,12 @@ export function createApiRouter(client: MCPClient): Router {
 
   // POST /api/chat/clear — clears conversation context
   router.post('/chat/clear', (_req: Request, res: Response) => {
+    // Save current session before clearing
+    try {
+      client.getChatHistoryManager().endSession('Chat cleared');
+    } catch {
+      // Ignore if no active session
+    }
     client.clearContext();
     res.json({ ok: true });
   });
@@ -548,7 +593,7 @@ export function createApiRouter(client: MCPClient): Router {
       client.setDisableHistoryRecording(false);
       res.json({
         ok: true,
-        result: typeof result?.displayText === 'string' ? result.displayText : JSON.stringify(result),
+        result: stripAnsi(typeof result?.displayText === 'string' ? result.displayText : JSON.stringify(result)),
       });
     } catch (err: any) {
       client.setDisableHistoryRecording(false);

@@ -8,15 +8,18 @@ interface ToolCallProps {
 export function ToolCall({ toolCall }: ToolCallProps) {
   const [expanded, setExpanded] = useState(false);
 
+  const stripAnsi = (s: string) => s.replace(/\u001b\[[0-9;]*m/g, '');
+
   const formatJson = (data: unknown): string => {
     try {
-      if (typeof data === 'string') {
-        const parsed = JSON.parse(data);
+      const raw = typeof data === 'string' ? stripAnsi(data) : data;
+      if (typeof raw === 'string') {
+        const parsed = JSON.parse(raw);
         return JSON.stringify(parsed, null, 2);
       }
-      return JSON.stringify(data, null, 2);
+      return JSON.stringify(raw, null, 2);
     } catch {
-      return String(data);
+      return stripAnsi(String(data));
     }
   };
 
@@ -31,6 +34,8 @@ export function ToolCall({ toolCall }: ToolCallProps) {
         <div className="tool-call__status">
           {toolCall.status === 'running' ? (
             <div className="tool-call__spinner" />
+          ) : toolCall.status === 'cancelled' ? (
+            <span className="tool-call__cross">&#10007;</span>
           ) : (
             <span className="tool-call__check">&#10003;</span>
           )}

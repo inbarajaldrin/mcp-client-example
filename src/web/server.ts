@@ -98,6 +98,12 @@ export async function startWebServer(
     isShuttingDown = true;
 
     httpServer.close();
+    // Save chat session before stopping (like CLI does on Ctrl+C)
+    try {
+      client.getChatHistoryManager().endSession('Web UI session ended');
+    } catch {
+      // Ignore if no active session
+    }
     await client.stop();
   });
 

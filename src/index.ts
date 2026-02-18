@@ -32,7 +32,7 @@ import type {
 export type WebStreamEvent =
   | { type: 'text_delta'; text: string }
   | { type: 'tool_start'; toolName: string; toolInput: Record<string, any>; toolId: string }
-  | { type: 'tool_complete'; toolName: string; result: string; toolId: string }
+  | { type: 'tool_complete'; toolName: string; toolInput: Record<string, any>; result: string; toolId: string; cancelled?: boolean }
   | { type: 'token_usage'; inputTokens: number; outputTokens: number; totalTokens: number }
   | { type: 'warning'; message: string }
   | { type: 'info'; message: string }
@@ -2142,11 +2142,15 @@ export class MCPClient {
         );
         hasOutputContent = true;
 
+        const isCancelledTool = chunk.result === '[Tool execution cancelled by user]'
+          || chunk.result === '[Tool execution cancelled - abort requested]';
         observer?.({
           type: 'tool_complete',
           toolName: chunk.toolName,
+          toolInput: (chunk as any).toolInput || {},
           result: chunk.result || '',
           toolId: (chunk as any).toolUseId || (chunk as any).toolCallId || '',
+          ...(isCancelledTool && { cancelled: true }),
         });
 
         // Track tool result to add to messages
@@ -2252,9 +2256,23 @@ export class MCPClient {
           const toolId = chunk.content_block.id;
           this.toolInputTimes.set(toolId, new Date().toISOString());
 
-          // For Anthropic: tool_start is emitted from the complete response handler
-          // (chunk.content Array.isArray path) which has the full input available.
-          // For non-Anthropic: tool_start is emitted at message_stop when tool_calls are finalized.
+          // For Anthropic: emit tool_start immediately so the web UI can show the
+          // tool card while it's still executing. The tool name and id are available
+          // at content_block_start time; input will be empty (filled by input_json_delta
+          // later) but the UI just needs to know a tool is running.
+          if (isAnthropic && observer) {
+            const inputArgs = chunk.content_block.input;
+            let parsedInput: Record<string, any> = {};
+            if (inputArgs) {
+              parsedInput = typeof inputArgs === 'object' ? inputArgs as Record<string, any> : {};
+            }
+            observer({
+              type: 'tool_start',
+              toolName: chunk.content_block.name || '',
+              toolInput: parsedInput,
+              toolId,
+            });
+          }
 
           // For non-Anthropic providers: track tool calls to include in assistant message
           // OpenAI requires assistant messages to have tool_calls before tool role messages
@@ -2532,17 +2550,9 @@ export class MCPClient {
           hasOutputContent = true;
         }
 
-        // Emit tool_start for Anthropic complete response tool_use blocks
-        if (observer) {
-          for (const block of toolUseBlocks) {
-            observer({
-              type: 'tool_start',
-              toolName: block.name,
-              toolInput: block.input || {},
-              toolId: block.id,
-            });
-          }
-        }
+        // tool_start for Anthropic is now emitted at content_block_start time
+        // (during streaming, before tool execution) so the web UI shows tools
+        // as running immediately rather than after they complete.
 
         // Extract text content (but don't display it - it was already streamed in real-time)
         const textBlocks = chunk.content.filter((block: any) => block.type === 'text');
