@@ -1,0 +1,283 @@
+WEB UI FEATURE IMPLEMENTATION INSTRUCTIONS
+============================================
+Use these instructions when asked to add a missing CLI feature to the web UI.
+Read WEB_UI_FEATURE_TRACKER.txt first to see what's implemented and what's missing.
+
+
+WORKFLOW
+--------
+1. Read WEB_UI_FEATURE_TRACKER.txt to understand the feature's scope and priority
+2. Find the existing CLI backend logic (see Backend Managers below)
+3. Check reference repos for UI inspiration (see Reference Repos below)
+4. Use the feature-dev:feature-dev skill to analyze the codebase and architect the feature
+5. Use the frontend-design:frontend-design skill for all UI component work
+6. Implement backend API routes, then frontend hook, then UI components
+7. Build and verify with: npm run build
+8. Launch the web UI and use Playwright MCP tools to test the feature end-to-end
+9. Update WEB_UI_FEATURE_TRACKER.txt — mark the feature as [x] implemented
+
+
+ARCHITECTURE OVERVIEW
+---------------------
+The web UI is a React + Vite frontend served by an Express backend.
+The CLI already has full feature implementations — you are NOT reimplementing logic,
+you are routing existing backend managers through REST API endpoints and building
+frontend components to interact with them.
+
+Pattern for every feature:
+  CLI Manager (exists) → API Route (add) → Frontend Hook (add) → UI Component (add/update)
+
+
+PROJECT PATHS
+-------------
+Root:          /home/aaugus11/Documents/mcp-client-example
+Backend:       src/web/server.ts          — Express server setup, mounts API router
+API Routes:    src/web/api.ts             — All REST/SSE endpoints, pattern: createApiRouter(client)
+Frontend App:  src/web/frontend/src/App.tsx        — Root component, wires hooks to components
+Frontend:      src/web/frontend/src/components/    — React components
+Hooks:         src/web/frontend/src/hooks/         — Custom hooks (one per feature)
+Styles:        src/web/frontend/src/styles/index.css — All CSS (single file, BEM naming)
+Vite Config:   src/web/frontend/vite.config.ts
+TS Config:     src/web/frontend/tsconfig.json      — Separate from backend tsconfig
+
+
+BACKEND MANAGERS (src/managers/)
+--------------------------------
+These contain ALL the backend logic. Do NOT rewrite — just call their methods from API routes.
+
+  attachment-manager.ts   — File upload, list, rename, delete, create content blocks
+  ablation-manager.ts     — Ablation study CRUD and execution
+  chat-history-manager.ts — Chat session persistence, search, export
+  hil-manager.ts          — Human-in-the-loop approval flow
+  preferences-manager.ts  — User settings (timeout, max iterations, etc.)
+  prompt-manager.ts       — MCP prompt listing, argument handling, execution
+  todo-manager.ts         — Todo mode state management
+  tool-manager.ts         — Tool enable/disable, filtering
+
+To access a manager from API routes, MCPClient exposes public getters:
+  client.getAttachmentManager()
+  client.getPreferencesManager()
+  client.getToolManager()
+  client.getChatHistoryManager()
+  etc.
+
+If a getter doesn't exist for the manager you need, add one to src/index.ts
+following the pattern of the existing getters.
+
+
+CORE CLIENT (src/index.ts)
+--------------------------
+MCPClient is the central class. Key methods:
+  processQuery(query, isSystemPrompt, attachments?, cancellationCheck?, observer?)
+  getServersInfo()          — connected servers and their tools
+  getMessages()             — conversation history
+  getAllToolsWithState()     — all tools with enabled/disabled state
+  reapplyToolFilter()       — re-filter tools after toggling
+  restoreChat(sessionId)    — restore a saved chat session
+  clearContext()            — reset conversation
+
+The StreamObserver callback emits WebStreamEvent types for real-time streaming:
+  text_delta, tool_start, tool_complete, token_usage, warning, info, error, done
+
+
+CLI ENTRY POINT (src/bin.ts)
+----------------------------
+All slash commands are implemented here. When adding a feature, find the
+corresponding /command handler in bin.ts to understand what backend methods
+it calls and what UX flow it provides. Then replicate that flow through
+API endpoints and frontend components.
+
+
+API ROUTE PATTERNS
+------------------
+All routes are in src/web/api.ts inside createApiRouter(client: MCPClient).
+Mounted at /api prefix.
+
+Existing route examples to follow:
+  GET  /api/status              — simple read, returns JSON
+  POST /api/settings            — body validation, call manager, return result
+  POST /api/chat/message        — SSE streaming with observer pattern
+  POST /api/tools/toggle        — toggle state, call reapplyToolFilter()
+  GET  /api/chats               — list from chat history manager
+  GET  /api/chats/search?q=     — query parameter search
+
+Pattern for new routes:
+  1. Validate request body/params
+  2. try/catch around manager method calls
+  3. Return { ok: true, ...data } on success
+  4. Return { error: message } with appropriate status code on failure
+  5. Never expose server filesystem paths in responses
+
+
+FRONTEND PATTERNS
+-----------------
+Each feature follows this structure:
+
+Hook (src/web/frontend/src/hooks/useXxx.ts):
+  - useState for local state
+  - useCallback for API calls (fetch to /api/xxx endpoints)
+  - Return state + actions object
+  - Follow useServers.ts or useAttachments.ts as templates
+
+Component (src/web/frontend/src/components/Xxx.tsx):
+  - Receive data and callbacks as props from App.tsx
+  - Use existing CSS variables and BEM naming from index.css
+  - Match the visual style of existing components (dark theme, monospace font)
+
+App.tsx wiring:
+  - Import and call the hook
+  - Pass hook state/actions as props to the relevant component
+  - Handle cross-feature interactions (e.g., clearing attachments after send)
+
+CSS (src/web/frontend/src/styles/index.css):
+  - Single stylesheet, BEM naming convention
+  - Use existing CSS custom properties: --bg-primary, --bg-secondary, --bg-tertiary,
+    --bg-elevated, --text-primary, --text-secondary, --text-muted,
+    --accent-blue, --accent-cyan, --accent-amber, --accent-red,
+    --border-default, --border-subtle, --radius-sm, --radius-md, --radius-lg,
+    --sp-1 through --sp-6, --font-mono, --font-size-xs/sm/base/lg
+  - Add new styles after the relevant component's existing styles
+
+
+REFERENCE REPOS (for UI inspiration)
+-------------------------------------
+Located at: /home/aaugus11/Documents/mcp-client-example/reference-repos/
+
+  mcp-client-chatbot/   — BEST reference. Has file attachments (drag-drop, previews,
+                          upload progress), rich chat UI, tool visualization.
+                          Key files:
+                            src/hooks/use-file-drag-overlay.ts
+                            src/hooks/use-thread-file-uploader.ts
+                            src/components/prompt-input.tsx
+                            src/components/message-parts.tsx
+                            src/components/chat-bot.tsx
+
+  chatmcp/              — Flutter-based, less relevant for React patterns
+  mcp-chat/             — Simple text-only chat
+  mcp-ui/               — UI framework components
+  open-mcp-client/      — Simple client implementation
+
+When implementing a feature, search the reference repos for similar UI patterns:
+  grep -r "keyword" reference-repos/ --include="*.tsx" --include="*.ts"
+
+
+TESTING WITH PLAYWRIGHT
+-----------------------
+After implementing a feature, test it using the Playwright MCP tools.
+These instructions are based on real testing sessions — follow them exactly.
+
+1. Build the project:
+     npm run build
+
+2. Launch the web UI server in background using the Bash tool:
+     Command:  node dist/index.js --web --provider anthropic 2>&1 | tee /tmp/mcp-web.log
+     IMPORTANT: Use `run_in_background: true` on the Bash tool call.
+     This returns a task_id you can use later to check output.
+
+3. Extract the web UI port:
+     The server auto-selects a random port. Poll the log file until you see the
+     "Web UI: http://localhost:XXXXX" line:
+       Read /tmp/mcp-web.log (or use `tail /tmp/mcp-web.log`)
+     Wait a few seconds if the line hasn't appeared yet. The server needs time to
+     connect to MCP servers before the web UI port is printed.
+
+4. Navigate to the VITE DEV SERVER port, NOT the Express API port:
+     In dev mode, two ports exist:
+       - Express API (e.g., localhost:43261) — returns "Cannot GET /" for browser requests
+       - Vite dev server (e.g., localhost:46433) — serves the actual React frontend
+     The "Web UI:" line in the log shows the correct port to use.
+     Use: browser_navigate with that URL.
+
+5. Use Playwright MCP tools to test:
+     browser_navigate         — open the web UI URL
+     browser_snapshot         — capture accessibility tree to find element refs
+     browser_click            — click buttons, links, toggles (requires ref from snapshot)
+     browser_type             — type into inputs
+     browser_fill_form        — fill form fields
+     browser_file_upload      — upload files (see file upload notes below)
+     browser_take_screenshot  — capture visual state for verification
+     browser_wait_for         — wait for text to appear/disappear
+     browser_console_messages — check for JS errors
+     browser_run_code         — run arbitrary Playwright code for complex interactions
+
+6. Test the full user flow:
+     - Navigate to the web UI
+     - Take a snapshot to find element refs
+     - Interact with the new feature
+     - Verify elements appear correctly via snapshot or screenshot
+     - Check for console errors
+     - Take screenshots to confirm visual state
+
+FILE UPLOAD TESTING (important gotchas):
+     The browser_file_upload tool alone is NOT enough. You must handle the file
+     chooser dialog properly. Use browser_run_code with this pattern:
+
+       async (page) => {
+         const [fileChooser] = await Promise.all([
+           page.waitForEvent('filechooser'),
+           page.locator('SELECTOR_FOR_FILE_INPUT_TRIGGER').click()
+         ]);
+         await fileChooser.setFiles('/absolute/path/to/test-file.txt');
+       }
+
+     This works because:
+     - Clicking a file input trigger opens a native file chooser dialog
+     - browser_click + browser_file_upload has a race condition (chooser may dismiss)
+     - Promise.all ensures the filechooser event is caught before the click resolves
+
+     If browser_file_upload prompts appear after a cancelled chooser, call
+     browser_file_upload with no paths to dismiss.
+
+     PREFERRED ALTERNATIVE — setInputFiles (avoids file chooser entirely):
+     Use browser_run_code to set files directly on the hidden <input type="file">:
+
+       async (page) => {
+         const fileInput = page.locator('input[type="file"]');
+         await fileInput.setInputFiles('/absolute/path/to/test-file.txt');
+         await page.waitForTimeout(1500);
+       }
+
+     NOTE: The file MUST be inside the project directory (the Playwright
+     sandbox blocks access to /tmp and other paths outside the allowed root).
+     Copy test files into the project root before uploading.
+
+MULTER FILENAME NOTE:
+     When testing file uploads through multer, the temp file gets a hash name
+     (e.g., 80bcdb2249b081d8c39166cf23eeac02). The API route must rename the
+     temp file to file.originalname before passing to copyFileToAttachments(),
+     otherwise the attachment will have the hash as its filename.
+
+SERVER SHUTDOWN:
+     After testing, stop the background server using the TaskStop tool with the
+     task_id from step 2. Or it will be cleaned up when the session ends.
+
+
+BUILD AND VERIFY
+----------------
+Always run after changes:
+  npm run build
+
+This runs:
+  1. tsc (TypeScript compilation for backend)
+  2. vite build (frontend bundle)
+
+If TypeScript errors occur, fix them before proceeding.
+The frontend is excluded from the backend tsconfig (tsconfig.json excludes src/web/frontend/**)
+and has its own tsconfig at src/web/frontend/tsconfig.json.
+
+
+FEATURE IMPLEMENTATION CHECKLIST
+---------------------------------
+For each new feature:
+  [ ] Read the feature scope in WEB_UI_FEATURE_TRACKER.txt
+  [ ] Find CLI implementation in src/bin.ts (slash command handler)
+  [ ] Find backend manager in src/managers/
+  [ ] Add MCPClient getter if needed (src/index.ts)
+  [ ] Add API routes (src/web/api.ts)
+  [ ] Create frontend hook (src/web/frontend/src/hooks/)
+  [ ] Create or update UI component (src/web/frontend/src/components/)
+  [ ] Wire hook in App.tsx and pass props
+  [ ] Add CSS styles (src/web/frontend/src/styles/index.css)
+  [ ] npm run build — verify no errors
+  [ ] Test with Playwright MCP tools
+  [ ] Update WEB_UI_FEATURE_TRACKER.txt — mark as [x]

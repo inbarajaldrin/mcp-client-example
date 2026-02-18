@@ -20,7 +20,7 @@ export function useChat() {
   const [isStreaming, setIsStreaming] = useState(false);
   const abortRef = useRef<AbortController | null>(null);
 
-  const sendMessage = useCallback(async (content: string) => {
+  const sendMessage = useCallback(async (content: string, attachmentFileNames?: string[]) => {
     if (isStreaming) return;
 
     const userMsg: ChatMessage = {
@@ -44,10 +44,15 @@ export function useChat() {
     abortRef.current = abortController;
 
     try {
+      const body: { content: string; attachmentFileNames?: string[] } = { content };
+      if (attachmentFileNames && attachmentFileNames.length > 0) {
+        body.attachmentFileNames = attachmentFileNames;
+      }
+
       const response = await fetch('/api/chat/message', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ content }),
+        body: JSON.stringify(body),
         signal: abortController.signal,
       });
 

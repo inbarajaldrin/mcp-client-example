@@ -6,6 +6,7 @@ import { useSettings } from './hooks/useSettings';
 import { useProviderModel } from './hooks/useProviderModel';
 import { useChatHistory } from './hooks/useChatHistory';
 import { usePrompts } from './hooks/usePrompts';
+import { useAttachments } from './hooks/useAttachments';
 import { ChatMessage } from './components/ChatMessage';
 import { ChatInput } from './components/ChatInput';
 import { ServerPanel } from './components/ServerPanel';
@@ -34,6 +35,9 @@ export function App() {
   // Prompts
   const pr = usePrompts();
 
+  // Attachments
+  const att = useAttachments();
+
   // Pending prompt context — shown above chat input after "Use"
   const [pendingContext, setPendingContext] = useState<{ name: string; text: string } | null>(null);
 
@@ -50,18 +54,23 @@ export function App() {
     return true;
   }, [pr]);
 
-  // Wrap sendMessage to include pending context
+  // Wrap sendMessage to include pending context and attachments
   const handleSend = useCallback((content: string) => {
+    const attachmentFileNames = att.pendingAttachments.map(a => a.fileName);
+    const fileNames = attachmentFileNames.length > 0 ? attachmentFileNames : undefined;
+
     if (pendingContext) {
       const fullMessage = content.trim()
         ? `${pendingContext.text}\n\n${content}`
         : pendingContext.text;
       setPendingContext(null);
-      sendMessage(fullMessage);
+      att.clearPending();
+      sendMessage(fullMessage, fileNames);
     } else {
-      sendMessage(content);
+      att.clearPending();
+      sendMessage(content, fileNames);
     }
-  }, [pendingContext, sendMessage]);
+  }, [pendingContext, sendMessage, att]);
 
   // Auto-scroll to bottom on new messages or streaming updates
   useEffect(() => {
@@ -119,6 +128,10 @@ export function App() {
           isStreaming={isStreaming}
           pendingContext={pendingContext}
           onDismissContext={() => setPendingContext(null)}
+          pendingAttachments={att.pendingAttachments}
+          onUploadFile={att.uploadFile}
+          onRemoveAttachment={att.removePending}
+          uploading={att.uploading}
         />
       </div>
 

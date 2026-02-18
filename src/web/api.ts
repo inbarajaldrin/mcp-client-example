@@ -1,7 +1,14 @@
 // Reference: Plan for web frontend API routes
 import { Router, type Request, type Response } from 'express';
+import multer from 'multer';
+import { tmpdir } from 'os';
+import path from 'path';
+import fs from 'fs';
 import type { MCPClient, WebStreamEvent } from '../index.js';
+import type { AttachmentInfo } from '../managers/attachment-manager.js';
 import { createProvider, PROVIDERS } from '../bin.js';
+
+const upload = multer({ dest: path.join(tmpdir(), 'mcp-client-uploads') });
 
 /**
  * Creates a push-to-pull bridge: returns an observer callback and an AsyncGenerator.
@@ -72,7 +79,7 @@ export function createApiRouter(client: MCPClient): Router {
 
   // POST /api/chat/message — SSE streaming endpoint
   router.post('/chat/message', async (req: Request, res: Response) => {
-    const { content } = req.body;
+    const { content, attachmentFileNames } = req.body;
     if (!content || typeof content !== 'string') {
       res.status(400).json({ error: 'content is required' });
       return;
@@ -84,6 +91,16 @@ export function createApiRouter(client: MCPClient): Router {
     }
 
     isProcessing = true;
+
+    // Resolve attachment file names to AttachmentInfo[]
+    let attachments: AttachmentInfo[] | undefined;
+    if (Array.isArray(attachmentFileNames) && attachmentFileNames.length > 0) {
+      const mgr = client.getAttachmentManager();
+      attachments = attachmentFileNames
+        .map((name: string) => mgr.getAttachmentInfo(name))
+        .filter((a): a is AttachmentInfo => a !== null);
+      if (attachments.length === 0) attachments = undefined;
+    }
 
     // Set up SSE headers
     res.setHeader('Content-Type', 'text/event-stream');
@@ -103,7 +120,7 @@ export function createApiRouter(client: MCPClient): Router {
     const queryPromise = client.processQuery(
       content,
       false,        // isSystemPrompt
-      undefined,    // attachments
+      attachments,
       () => cancelled,
       observer,
     ).catch((error: any) => {
@@ -449,6 +466,70 @@ export function createApiRouter(client: MCPClient): Router {
       return;
     }
     res.json({ ok: true });
+  });
+
+  // ─── Attachments ───
+
+  // POST /api/attachments/upload — upload a file
+  router.post('/attachments/upload', upload.single('file'), async (req: Request, res: Response) => {
+    const file = (req as any).file as Express.Multer.File | undefined;
+    if (!file) {
+      res.status(400).json({ error: 'No file provided' });
+      return;
+    }
+    try {
+      const mgr = client.getAttachmentManager();
+      // Rename temp file to preserve original filename (multer strips it)
+      const renamedPath = path.join(path.dirname(file.path), file.originalname);
+      fs.renameSync(file.path, renamedPath);
+      const attachment = mgr.copyFileToAttachments(renamedPath);
+      // Clean up temp file
+      try { fs.unlinkSync(renamedPath); } catch {}
+      if (!attachment) {
+        res.status(500).json({ error: 'Failed to process attachment' });
+        return;
+      }
+      res.json({
+        ok: true,
+        attachment: { fileName: attachment.fileName, ext: attachment.ext, mediaType: attachment.mediaType },
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // GET /api/attachments — list all attachments
+  router.get('/attachments', (_req: Request, res: Response) => {
+    const mgr = client.getAttachmentManager();
+    const attachments = mgr.listAttachments();
+    res.json(attachments.map(a => ({ fileName: a.fileName, ext: a.ext, mediaType: a.mediaType })));
+  });
+
+  // DELETE /api/attachments/:fileName — delete an attachment
+  router.delete('/attachments/:fileName', (req: Request, res: Response) => {
+    const mgr = client.getAttachmentManager();
+    const result = mgr.deleteAttachments([req.params.fileName]);
+    if (result.deleted.length > 0) {
+      res.json({ ok: true });
+    } else {
+      res.status(404).json({ error: 'Attachment not found' });
+    }
+  });
+
+  // PATCH /api/attachments/:fileName — rename an attachment
+  router.patch('/attachments/:fileName', (req: Request, res: Response) => {
+    const { newName } = req.body;
+    if (!newName || typeof newName !== 'string') {
+      res.status(400).json({ error: 'newName is required' });
+      return;
+    }
+    const mgr = client.getAttachmentManager();
+    const ok = mgr.renameAttachment(req.params.fileName, newName);
+    if (ok) {
+      res.json({ ok: true, newName });
+    } else {
+      res.status(400).json({ error: 'Rename failed' });
+    }
   });
 
   return router;

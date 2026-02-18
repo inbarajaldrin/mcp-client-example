@@ -1288,6 +1288,10 @@ export class MCPClient {
     return this.chatHistoryManager;
   }
 
+  getAttachmentManager(): AttachmentManager {
+    return this.attachmentManager;
+  }
+
   /**
    * Get user turns from the conversation for rewind functionality.
    * Returns user messages from both the in-memory messages array and chat history.
