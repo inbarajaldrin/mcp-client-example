@@ -36,6 +36,7 @@ export interface ChatMetadata {
   tags?: string[];
   // TODO: Fix summary creation logic - currently it's being set to end reason instead of actual chat summary
   // summary?: string;
+  name?: string;
   filePath: string;
   mdFilePath: string;
 }
@@ -1538,6 +1539,18 @@ export class ChatHistoryManager {
       });
       return false;
     }
+  }
+
+  /**
+   * Set a display name for a chat session (stored in index metadata only)
+   */
+  setChatName(sessionId: string, name: string): boolean {
+    const metadata = this.index.get(sessionId);
+    if (!metadata) return false;
+
+    metadata.name = name.trim() || undefined;
+    this.saveIndex();
+    return true;
   }
 
   /**

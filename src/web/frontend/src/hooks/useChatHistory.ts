@@ -10,6 +10,7 @@ export interface ChatMeta {
   model: string;
   servers: string[];
   tags?: string[];
+  name?: string;
 }
 
 export function useChatHistory() {
@@ -97,5 +98,24 @@ export function useChatHistory() {
     }
   }, []);
 
-  return { chats, loading, error, fetchChats, searchChats, restoreChat, exportChat, deleteChat };
+  const renameChat = useCallback(async (sessionId: string, name: string) => {
+    try {
+      const res = await fetch(`/api/chats/${sessionId}/rename`, {
+        method: 'PATCH',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name }),
+      });
+      if (!res.ok) {
+        setError('Rename failed');
+        return false;
+      }
+      setChats(prev => prev.map(c => c.sessionId === sessionId ? { ...c, name: name.trim() } : c));
+      return true;
+    } catch {
+      setError('Rename failed');
+      return false;
+    }
+  }, []);
+
+  return { chats, loading, error, fetchChats, searchChats, restoreChat, exportChat, deleteChat, renameChat };
 }

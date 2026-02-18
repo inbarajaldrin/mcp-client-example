@@ -4,6 +4,7 @@ import { ToolCall } from './ToolCall';
 
 interface ChatMessageProps {
   message: ChatMessageType;
+  onRewind?: () => void;
 }
 
 /**
@@ -99,13 +100,25 @@ function renderInline(text: string): (string | JSX.Element)[] {
   return parts;
 }
 
-export function ChatMessage({ message }: ChatMessageProps) {
+export function ChatMessage({ message, onRewind }: ChatMessageProps) {
   const rendered = useMemo(() => renderContent(message.content), [message.content]);
 
   return (
     <div className={`message message--${message.role}`}>
       <div className="message__label">
         {message.role === 'user' ? 'you' : 'assistant'}
+        {message.role === 'user' && onRewind && (
+          <button
+            className="message__rewind-btn"
+            onClick={onRewind}
+            title="Rewind to before this message"
+          >
+            <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+              <polyline points="1 4 1 10 7 10"/>
+              <path d="M3.51 15a9 9 0 1 0 2.13-9.36L1 10"/>
+            </svg>
+          </button>
+        )}
       </div>
       <div className="message__body">
         {rendered}

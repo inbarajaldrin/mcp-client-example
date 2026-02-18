@@ -413,6 +413,7 @@ export function createApiRouter(client: MCPClient): Router {
       model: c.model,
       servers: c.servers,
       tags: c.tags,
+      name: c.name,
     })));
   });
 
@@ -466,6 +467,93 @@ export function createApiRouter(client: MCPClient): Router {
       return;
     }
     res.json({ ok: true });
+  });
+
+  // PATCH /api/chats/:id/rename — rename a chat session
+  router.patch('/chats/:id/rename', (req: Request, res: Response) => {
+    const { name } = req.body;
+    if (!name || typeof name !== 'string') {
+      res.status(400).json({ error: 'name (string) is required' });
+      return;
+    }
+    const ok = client.getChatHistoryManager().setChatName(req.params.id, name);
+    if (!ok) {
+      res.status(404).json({ error: 'Chat not found' });
+      return;
+    }
+    res.json({ ok: true, name: name.trim() });
+  });
+
+  // ─── Conversation Rewind ───
+
+  // GET /api/chat/turns — returns user turns for rewind UI
+  router.get('/chat/turns', (_req: Request, res: Response) => {
+    try {
+      const turns = client.getUserTurns();
+      res.json(turns.map(t => ({
+        turnNumber: t.turnNumber,
+        messageIndex: t.messageIndex,
+        historyIndex: t.historyIndex,
+        content: t.content.slice(0, 200), // Truncate for display
+        timestamp: t.timestamp,
+      })));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // POST /api/chat/rewind — rewind conversation to a specific turn
+  router.post('/chat/rewind', (req: Request, res: Response) => {
+    const { messageIndex, historyIndex } = req.body;
+    if (typeof messageIndex !== 'number' || typeof historyIndex !== 'number') {
+      res.status(400).json({ error: 'messageIndex and historyIndex (numbers) are required' });
+      return;
+    }
+    try {
+      client.rewindToTurn({ messageIndex, historyIndex });
+      const messages = client.getMessages();
+      res.json({ ok: true, remainingMessages: messages.length });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // ─── Tool Replay ───
+
+  // GET /api/tool-replay/calls — returns replayable tool calls from current session
+  router.get('/tool-replay/calls', (_req: Request, res: Response) => {
+    try {
+      const calls = client.getChatHistoryManager().getReplayableToolCalls();
+      res.json(calls.map(c => ({
+        toolName: c.toolName,
+        toolInput: c.toolInput,
+        toolOutput: c.toolOutput.slice(0, 500), // Truncate for listing
+        timestamp: c.timestamp,
+      })));
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // POST /api/tool-replay/execute — re-execute a tool call
+  router.post('/tool-replay/execute', async (req: Request, res: Response) => {
+    const { toolName, toolInput } = req.body;
+    if (!toolName || typeof toolName !== 'string') {
+      res.status(400).json({ error: 'toolName is required' });
+      return;
+    }
+    try {
+      client.setDisableHistoryRecording(true);
+      const result = await client.executeMCPTool(toolName, toolInput || {});
+      client.setDisableHistoryRecording(false);
+      res.json({
+        ok: true,
+        result: typeof result?.displayText === 'string' ? result.displayText : JSON.stringify(result),
+      });
+    } catch (err: any) {
+      client.setDisableHistoryRecording(false);
+      res.status(500).json({ error: err.message || String(err) });
+    }
   });
 
   // ─── Attachments ───

@@ -147,6 +147,37 @@ export function useChat() {
     }
   }, [isStreaming]);
 
+  const rewindToMessage = useCallback(async (frontendMsgIndex: number) => {
+    if (isStreaming) return;
+    try {
+      // Get backend turns to map frontend index to backend indices
+      const turnsRes = await fetch('/api/chat/turns');
+      const turns: Array<{ turnNumber: number; messageIndex: number; historyIndex: number }> = await turnsRes.json();
+
+      // Count which user turn this frontend message index corresponds to
+      // Frontend messages: [user0, asst0, user1, asst1, ...] — user messages are at even indices
+      let userTurnIdx = 0;
+      for (let i = 0; i < frontendMsgIndex; i++) {
+        if (messages[i]?.role === 'user') userTurnIdx++;
+      }
+
+      const turn = turns[userTurnIdx];
+      if (!turn) return;
+
+      const res = await fetch('/api/chat/rewind', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ messageIndex: turn.messageIndex, historyIndex: turn.historyIndex }),
+      });
+      if (res.ok) {
+        // Truncate frontend messages to match
+        setMessages(prev => prev.slice(0, frontendMsgIndex));
+      }
+    } catch {
+      // Silently fail
+    }
+  }, [isStreaming, messages]);
+
   const clearChat = useCallback(async () => {
     await fetch('/api/chat/clear', { method: 'POST' });
     setMessages([]);
@@ -156,5 +187,5 @@ export function useChat() {
     abortRef.current?.abort();
   }, []);
 
-  return { messages, isStreaming, sendMessage, clearChat, stopStreaming };
+  return { messages, isStreaming, sendMessage, clearChat, stopStreaming, rewindToMessage };
 }

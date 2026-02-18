@@ -7,6 +7,7 @@ import { useProviderModel } from './hooks/useProviderModel';
 import { useChatHistory } from './hooks/useChatHistory';
 import { usePrompts } from './hooks/usePrompts';
 import { useAttachments } from './hooks/useAttachments';
+import { useToolReplay } from './hooks/useToolReplay';
 import { ChatMessage } from './components/ChatMessage';
 import { ChatInput } from './components/ChatInput';
 import { ServerPanel } from './components/ServerPanel';
@@ -14,9 +15,10 @@ import { StatusBar } from './components/StatusBar';
 import { SettingsModal } from './components/SettingsModal';
 import { ProviderSelector } from './components/ProviderSelector';
 import { ChatHistoryPanel } from './components/ChatHistoryPanel';
+import { ToolReplayPanel } from './components/ToolReplayPanel';
 
 export function App() {
-  const { messages, isStreaming, sendMessage, clearChat, stopStreaming } = useChat();
+  const { messages, isStreaming, sendMessage, clearChat, stopStreaming, rewindToMessage } = useChat();
   const { servers, allTools, loading: serversLoading, toggleTool, toggleServer } = useServers();
   const status = useStatus();
   const messagesEndRef = useRef<HTMLDivElement>(null);
@@ -37,6 +39,10 @@ export function App() {
 
   // Attachments
   const att = useAttachments();
+
+  // Tool Replay
+  const tr = useToolReplay();
+  const [toolReplayOpen, setToolReplayOpen] = useState(false);
 
   // Pending prompt context — shown above chat input after "Use"
   const [pendingContext, setPendingContext] = useState<{ name: string; text: string } | null>(null);
@@ -84,6 +90,9 @@ export function App() {
           mcp-client
         </div>
         <div className="app-header__actions">
+          <button className="btn-header" onClick={() => setToolReplayOpen(true)} title="Tool Replay">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2v4.5h.5l.5-.5V3h9v10H7l-.5.5.5.5h5.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1zm4.56 7.56L4.5 7.5 6.56 5.44l-.7-.7L3.1 7.5l2.76 2.76.7-.7zM8.44 5.44l.7-.7L11.9 7.5l-2.76 2.76-.7-.7L10.5 7.5 8.44 5.44z"/></svg>
+          </button>
           <button className="btn-header" onClick={() => setHistoryOpen(true)} title="Chat History">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M8 1a7 7 0 1 0 0 14A7 7 0 0 0 8 1zm0 12.5A5.5 5.5 0 1 1 8 2.5a5.5 5.5 0 0 1 0 11zM8.5 4h-1v4.5l3.5 2.1.5-.82L8.5 8V4z"/></svg>
           </button>
@@ -116,7 +125,13 @@ export function App() {
               <span>Ready for input</span>
             </div>
           ) : (
-            messages.map(msg => <ChatMessage key={msg.id} message={msg} />)
+            messages.map((msg, idx) => (
+              <ChatMessage
+                key={msg.id}
+                message={msg}
+                onRewind={msg.role === 'user' && !isStreaming ? () => rewindToMessage(idx) : undefined}
+              />
+            ))
           )}
           <div ref={messagesEndRef} />
         </div>
@@ -168,6 +183,18 @@ export function App() {
         onRestore={ch.restoreChat}
         onExport={ch.exportChat}
         onDelete={ch.deleteChat}
+        onRename={ch.renameChat}
+      />
+
+      <ToolReplayPanel
+        open={toolReplayOpen}
+        onClose={() => setToolReplayOpen(false)}
+        calls={tr.calls}
+        loading={tr.loading}
+        executing={tr.executing}
+        lastResult={tr.lastResult}
+        onFetch={tr.fetchCalls}
+        onExecute={tr.executeTool}
       />
 
     </div>

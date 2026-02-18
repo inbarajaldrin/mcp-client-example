@@ -12,6 +12,7 @@ interface ChatHistoryPanelProps {
   onRestore: (id: string) => Promise<boolean>;
   onExport: (id: string, format: 'json' | 'md') => Promise<any>;
   onDelete: (id: string) => Promise<boolean>;
+  onRename: (id: string, name: string) => Promise<boolean>;
 }
 
 function formatDuration(ms?: number): string {
@@ -31,10 +32,12 @@ function formatDate(iso: string): string {
 
 export function ChatHistoryPanel({
   open, onClose, chats, loading, error,
-  onFetch, onSearch, onRestore, onExport, onDelete,
+  onFetch, onSearch, onRestore, onExport, onDelete, onRename,
 }: ChatHistoryPanelProps) {
   const [query, setQuery] = useState('');
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null);
+  const [editingId, setEditingId] = useState<string | null>(null);
+  const [editValue, setEditValue] = useState('');
 
   useEffect(() => {
     if (open) onFetch();
@@ -80,9 +83,44 @@ export function ChatHistoryPanel({
               {chats.map(chat => (
                 <div key={chat.sessionId} className="chat-history__item">
                   <div className="chat-history__item-header">
-                    <span className="chat-history__date">{formatDate(chat.startTime)}</span>
+                    {editingId === chat.sessionId ? (
+                      <input
+                        className="chat-history__rename-input"
+                        value={editValue}
+                        onChange={e => setEditValue(e.target.value)}
+                        onKeyDown={e => {
+                          if (e.key === 'Enter') {
+                            onRename(chat.sessionId, editValue);
+                            setEditingId(null);
+                          } else if (e.key === 'Escape') {
+                            setEditingId(null);
+                          }
+                        }}
+                        onBlur={() => {
+                          if (editValue.trim()) onRename(chat.sessionId, editValue);
+                          setEditingId(null);
+                        }}
+                        autoFocus
+                      />
+                    ) : (
+                      <span
+                        className="chat-history__date"
+                        onDoubleClick={() => {
+                          setEditingId(chat.sessionId);
+                          setEditValue(chat.name || '');
+                        }}
+                        title="Double-click to rename"
+                      >
+                        {chat.name || formatDate(chat.startTime)}
+                      </span>
+                    )}
                     <span className="chat-history__model">{chat.model}</span>
                   </div>
+                  {chat.name && (
+                    <div className="chat-history__item-date-sub">
+                      {formatDate(chat.startTime)}
+                    </div>
+                  )}
                   <div className="chat-history__item-meta">
                     <span>{chat.messageCount} msgs</span>
                     <span>{chat.toolUseCount} tools</span>
@@ -90,6 +128,10 @@ export function ChatHistoryPanel({
                   </div>
                   <div className="chat-history__item-actions">
                     <button className="btn-sm" onClick={() => handleRestore(chat.sessionId)}>Restore</button>
+                    <button className="btn-sm" onClick={() => {
+                      setEditingId(chat.sessionId);
+                      setEditValue(chat.name || '');
+                    }}>Rename</button>
                     <button className="btn-sm" onClick={() => onExport(chat.sessionId, 'json')}>JSON</button>
                     <button className="btn-sm" onClick={() => onExport(chat.sessionId, 'md')}>MD</button>
                     {confirmDelete === chat.sessionId ? (
