@@ -21,6 +21,7 @@ import { PromptManager } from './managers/prompt-manager.js';
 import { ChatHistoryManager, type ChatSession } from './managers/chat-history-manager.js';
 import { AttachmentManager } from './managers/attachment-manager.js';
 import { PreferencesManager } from './managers/preferences-manager.js';
+import { HookManager } from './managers/hook-manager.js';
 import type {
   ModelProvider,
   Tool,
@@ -111,6 +112,7 @@ export class MCPClient {
   private toolInputTimes: Map<string, string> = new Map(); // Track tool input times by tool name/id
   private elicitationHandler: ElicitationHandler;
   private toolExecutor: MCPToolExecutor;
+  private hookManager: HookManager;
   private forceStopCallback?: (toolName: string, elapsedSeconds: number, abortSignal?: AbortSignal) => Promise<boolean>;
   private isAbortRequestedCallback?: () => boolean;
   private toolApprovalCallback?: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | { decision: 'reject'; message?: string }>;
@@ -174,10 +176,14 @@ export class MCPClient {
     this.preferencesManager = new PreferencesManager(this.logger);
     this.toolManager = new ToolManager(this.logger);
 
+    // Initialize hook manager (client-side hooks for regular chat)
+    this.hookManager = new HookManager(this.logger);
+
     // Initialize tool executor
     this.toolExecutor = new MCPToolExecutor(this.logger, {
       getServers: () => this.servers,
       getPreferencesManager: () => this.preferencesManager,
+      getHookManager: () => this.hookManager,
       isAbortRequested: () => {
         if (this.isAbortRequestedCallback) {
           return this.isAbortRequestedCallback();
@@ -261,9 +267,11 @@ export class MCPClient {
     client.ros2VideoRecordingManager = new ROS2VideoRecordingManager(client.logger);
     client.preferencesManager = new PreferencesManager(client.logger);
     client.toolManager = new ToolManager(client.logger);
+    client.hookManager = new HookManager(client.logger);
     client.toolExecutor = new MCPToolExecutor(client.logger, {
       getServers: () => client.servers,
       getPreferencesManager: () => client.preferencesManager,
+      getHookManager: () => client.hookManager,
       isAbortRequested: () => {
         if (client.isAbortRequestedCallback) {
           return client.isAbortRequestedCallback();
@@ -1306,6 +1314,10 @@ export class MCPClient {
     return this.attachmentManager;
   }
 
+  getHookManager(): HookManager {
+    return this.hookManager;
+  }
+
   /**
    * Get user turns from the conversation for rewind functionality.
    * Returns user messages from both the in-memory messages array and chat history.
@@ -2259,6 +2271,16 @@ export class MCPClient {
           toolInputTime, // Pass the input time
           toolId, // Pass the tool_use_id for pairing with assistant's tool_use block
         );
+
+        // Execute after-hooks (client-side hooks that fire after tool result is displayed)
+        const hookManager = this.hookManager;
+        if (hookManager && !hookManager.isExecuting()) {
+          const hookResult = { displayText: chunk.result || '', contentBlocks: [], hasImages: false };
+          await hookManager.executeAfterHooks(chunk.toolName, hookResult, (name, args) =>
+            this.toolExecutor.executeMCPTool(name, args, true),
+          );
+        }
+
         continue;
       }
 

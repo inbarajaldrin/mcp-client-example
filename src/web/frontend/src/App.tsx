@@ -9,6 +9,7 @@ import { usePrompts } from './hooks/usePrompts';
 import { useAttachments } from './hooks/useAttachments';
 import { useToolReplay } from './hooks/useToolReplay';
 import { useAblations } from './hooks/useAblations';
+import { useHooks } from './hooks/useHooks';
 import { useApproval } from './hooks/useApproval';
 import { ChatMessage } from './components/ChatMessage';
 import { ChatInput } from './components/ChatInput';
@@ -21,6 +22,7 @@ import { ToolReplayPanel } from './components/ToolReplayPanel';
 import { AblationPanel } from './components/AblationPanel';
 import { ApprovalModal } from './components/ApprovalModal';
 import { HelpPanel } from './components/HelpPanel';
+import { HooksPanel } from './components/HooksPanel';
 
 export function App() {
   // Approval / Elicitation
@@ -58,6 +60,10 @@ export function App() {
   // Ablations
   const abl = useAblations();
   const [ablationOpen, setAblationOpen] = useState(false);
+
+  // Hooks
+  const hk = useHooks();
+  const [hooksOpen, setHooksOpen] = useState(false);
 
   // Help
   const [helpOpen, setHelpOpen] = useState(false);
@@ -157,6 +163,7 @@ export function App() {
       }
       if (e.key === 'Escape') {
         if (helpOpen)       { setHelpOpen(false);       return; }
+        if (hooksOpen)      { setHooksOpen(false);      return; }
         if (ablationOpen)   { setAblationOpen(false);   return; }
         if (toolReplayOpen) { setToolReplayOpen(false);  return; }
         if (historyOpen)    { setHistoryOpen(false);     return; }
@@ -165,7 +172,7 @@ export function App() {
     }
     document.addEventListener('keydown', handleKeyDown);
     return () => document.removeEventListener('keydown', handleKeyDown);
-  }, [helpOpen, ablationOpen, toolReplayOpen, historyOpen, settingsOpen]);
+  }, [helpOpen, hooksOpen, ablationOpen, toolReplayOpen, historyOpen, settingsOpen]);
 
   return (
     <div className="app-layout">
@@ -176,6 +183,9 @@ export function App() {
         <div className="app-header__actions">
           <button className="btn-header" onClick={() => setAblationOpen(true)} title="Ablation Studies">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M1 3h14v1H1zM1 7h14v1H1zM1 11h14v1H1zM3 1h1v14H3zM7 1h1v14H7zM11 1h1v14h-1z"/></svg>
+          </button>
+          <button className="btn-header" onClick={() => setHooksOpen(true)} title="Client Hooks">
+            <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M5.5 1A1.5 1.5 0 0 0 4 2.5V3H2.5A1.5 1.5 0 0 0 1 4.5v1A1.5 1.5 0 0 0 2.5 7H4v2H2.5A1.5 1.5 0 0 0 1 10.5v1A1.5 1.5 0 0 0 2.5 13H4v.5A1.5 1.5 0 0 0 5.5 15h1A1.5 1.5 0 0 0 8 13.5V13h2v.5a1.5 1.5 0 0 0 1.5 1.5h1a1.5 1.5 0 0 0 1.5-1.5V13h.5a1.5 1.5 0 0 0 1.5-1.5v-1A1.5 1.5 0 0 0 14.5 9H14V7h.5A1.5 1.5 0 0 0 16 5.5v-1A1.5 1.5 0 0 0 14.5 3H14v-.5A1.5 1.5 0 0 0 12.5 1h-1A1.5 1.5 0 0 0 10 2.5V3H8v-.5A1.5 1.5 0 0 0 6.5 1h-1zM5 2.5a.5.5 0 0 1 .5-.5h1a.5.5 0 0 1 .5.5V4H5V2.5zM3 4h4v3H2.5a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5H3zm5 0h2v3h-2V4zm3 0h3v.5h.5a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5H11V4zm0 4h3.5a.5.5 0 0 1 .5.5v1a.5.5 0 0 1-.5.5H11V8zM8 8h2v3H8V8zM3 8h4v3H2.5a.5.5 0 0 1-.5-.5v-1a.5.5 0 0 1 .5-.5H3zm2 4h2v1.5a.5.5 0 0 1-.5.5h-1a.5.5 0 0 1-.5-.5V12zm6 0h2v.5h.5a.5.5 0 0 1-.5.5h-1a.5.5 0 0 1-.5-.5V12z"/></svg>
           </button>
           <button className="btn-header" onClick={() => setToolReplayOpen(true)} title="Tool Replay">
             <svg width="16" height="16" viewBox="0 0 16 16" fill="currentColor"><path d="M2 2v4.5h.5l.5-.5V3h9v10H7l-.5.5.5.5h5.5a1 1 0 0 0 1-1V2a1 1 0 0 0-1-1H3a1 1 0 0 0-1 1zm4.56 7.56L4.5 7.5 6.56 5.44l-.7-.7L3.1 7.5l2.76 2.76.7-.7zM8.44 5.44l.7-.7L11.9 7.5l-2.76 2.76-.7-.7L10.5 7.5 8.44 5.44z"/></svg>
@@ -337,6 +347,19 @@ export function App() {
         onCancelAblation={abl.cancelAblation}
         executing={abl.executing}
         progress={abl.progress}
+      />
+
+      <HooksPanel
+        open={hooksOpen}
+        onClose={() => setHooksOpen(false)}
+        hooks={hk.hooks}
+        loading={hk.loading}
+        error={hk.error}
+        onFetch={hk.fetchHooks}
+        onAdd={hk.addHook}
+        onRemove={hk.removeHook}
+        onToggle={hk.toggleHook}
+        onReload={hk.reloadHooks}
       />
 
       <HelpPanel

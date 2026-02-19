@@ -6,6 +6,7 @@
 import { CallToolResultSchema } from '@modelcontextprotocol/sdk/types.js';
 import type { Logger } from '../logger.js';
 import type { PreferencesManager } from '../managers/preferences-manager.js';
+import type { HookManager } from '../managers/hook-manager.js';
 import { formatToolCall, formatJSON } from '../utils/formatting.js';
 
 /**
@@ -85,6 +86,8 @@ export interface MCPToolExecutorCallbacks {
    * @param serverName - Name of the server to restart
    */
   killAndRestartServer?: (serverName: string) => Promise<void>;
+  /** Get hook manager for client-side hooks (fires during regular chat) */
+  getHookManager?: () => HookManager | undefined;
 }
 
 /** Force stop timeout in seconds */
@@ -303,6 +306,14 @@ export class MCPToolExecutor {
           hasImages: false,
         };
       }
+    }
+
+    // Execute before-hooks (client-side hooks that fire before tool execution)
+    const hookManager = this.callbacks.getHookManager?.();
+    if (hookManager && !hookManager.isExecuting()) {
+      await hookManager.executeBeforeHooks(toolName, (name, args) =>
+        this.executeMCPTool(name, args, true),
+      );
     }
 
     let toolResult;

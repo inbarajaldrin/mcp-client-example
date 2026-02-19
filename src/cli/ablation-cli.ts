@@ -36,143 +36,10 @@ interface ToolWithSchema {
   };
 }
 
-// ==================== Tool Call Parsing ====================
+// ==================== Tool Call Parsing (shared utilities) ====================
 
-/**
- * Result of parsing a direct tool call command
- */
-interface ParsedToolCall {
-  toolName: string;
-  args: Record<string, unknown>;
-  injectResult: boolean;  // Whether to inject result into conversation context
-}
-
-/**
- * Parse a direct tool call command in either format:
- * - JSON: `@tool:server__tool_name {"arg": "value"}`
- * - Python-like: `@tool:server__tool_name(arg='value', num=42)`
- *
- * @param command The command string starting with @tool: or @tool-exec:
- * @returns Parsed tool call or null if invalid
- */
-function parseDirectToolCall(command: string): ParsedToolCall | null {
-  // Determine if this is @tool: (inject result) or @tool-exec: (no injection)
-  let injectResult = true;
-  let rest: string;
-
-  if (command.startsWith('@tool-exec:')) {
-    injectResult = false;
-    rest = command.slice('@tool-exec:'.length).trim();
-  } else if (command.startsWith('@tool:')) {
-    injectResult = true;
-    rest = command.slice('@tool:'.length).trim();
-  } else {
-    return null;
-  }
-
-  // Try Python-like syntax first: tool_name(arg=val, ...) or tool_name()
-  const pythonMatch = rest.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*\((.*)\)\s*$/);
-  if (pythonMatch) {
-    const toolName = pythonMatch[1];
-    const argsStr = pythonMatch[2].trim();
-    const args = argsStr ? parsePythonArgs(argsStr) : {};
-    return { toolName, args, injectResult };
-  }
-
-  // Try JSON syntax: tool_name {"arg": "value"} or tool_name {}
-  const jsonMatch = rest.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*(\{.*\})?\s*$/);
-  if (jsonMatch) {
-    const toolName = jsonMatch[1];
-    const jsonStr = jsonMatch[2] || '{}';
-    try {
-      const args = JSON.parse(jsonStr);
-      return { toolName, args, injectResult };
-    } catch {
-      return null;
-    }
-  }
-
-  // Simple tool name with no args: tool_name
-  const simpleMatch = rest.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*$/);
-  if (simpleMatch) {
-    return { toolName: simpleMatch[1], args: {}, injectResult };
-  }
-
-  return null;
-}
-
-/**
- * Parse Python-like function arguments: arg='value', num=42, flag=true
- * Handles: strings (single/double quotes), numbers, booleans, null
- */
-function parsePythonArgs(argsStr: string): Record<string, unknown> {
-  const args: Record<string, unknown> = {};
-
-  // State machine to parse arguments
-  let i = 0;
-  while (i < argsStr.length) {
-    // Skip whitespace and commas
-    while (i < argsStr.length && (argsStr[i] === ' ' || argsStr[i] === ',' || argsStr[i] === '\t')) {
-      i++;
-    }
-    if (i >= argsStr.length) break;
-
-    // Parse key
-    const keyStart = i;
-    while (i < argsStr.length && argsStr[i] !== '=' && argsStr[i] !== ' ') {
-      i++;
-    }
-    const key = argsStr.slice(keyStart, i).trim();
-    if (!key) break;
-
-    // Skip to '='
-    while (i < argsStr.length && argsStr[i] === ' ') i++;
-    if (argsStr[i] !== '=') break;
-    i++; // Skip '='
-    while (i < argsStr.length && argsStr[i] === ' ') i++;
-
-    // Parse value
-    let value: unknown;
-
-    if (argsStr[i] === "'" || argsStr[i] === '"') {
-      // String value
-      const quote = argsStr[i];
-      i++;
-      const valueStart = i;
-      while (i < argsStr.length && argsStr[i] !== quote) {
-        if (argsStr[i] === '\\' && i + 1 < argsStr.length) i++; // Skip escaped char
-        i++;
-      }
-      value = argsStr.slice(valueStart, i).replace(/\\(.)/g, '$1');
-      i++; // Skip closing quote
-    } else {
-      // Non-string value (number, boolean, null)
-      const valueStart = i;
-      while (i < argsStr.length && argsStr[i] !== ',' && argsStr[i] !== ')') {
-        i++;
-      }
-      const rawValue = argsStr.slice(valueStart, i).trim();
-
-      // Parse type
-      if (rawValue === 'true' || rawValue === 'True') {
-        value = true;
-      } else if (rawValue === 'false' || rawValue === 'False') {
-        value = false;
-      } else if (rawValue === 'null' || rawValue === 'None') {
-        value = null;
-      } else if (!isNaN(Number(rawValue))) {
-        value = Number(rawValue);
-      } else {
-        // Treat as unquoted string
-        value = rawValue;
-      }
-    }
-
-    args[key] = value;
-  }
-
-  return args;
-}
+import { parseDirectToolCall, matchesWhenCondition } from '../utils/hook-utils.js';
+import type { ParsedToolCall } from '../utils/hook-utils.js';
 import { AttachmentManager, type AttachmentInfo } from '../managers/attachment-manager.js';
 import { PreferencesManager } from '../managers/preferences-manager.js';
 import { createProvider, PROVIDERS } from '../bin.js';
@@ -198,35 +65,6 @@ function formatDuration(ms: number): string {
     return `${minutes}m ${seconds}s`;
   }
   return `${seconds}s`;
-}
-
-/**
- * Check if a tool result matches a `when` condition from a post-tool hook.
- * Strips ANSI codes from displayText, parses as JSON, and checks that every
- * key/value in `when` exists in the parsed result (shallow equality).
- */
-function matchesWhenCondition(
-  when: Record<string, unknown>,
-  displayText: string | undefined,
-): boolean {
-  if (!displayText) return false;
-
-  try {
-    // Strip ANSI escape codes
-    const clean = displayText.replace(/\u001b\[[0-9;]*m/g, '');
-    const parsed = JSON.parse(clean);
-
-    if (typeof parsed !== 'object' || parsed === null) return false;
-
-    // Every key in `when` must match the corresponding field in the result
-    for (const [key, value] of Object.entries(when)) {
-      if (parsed[key] !== value) return false;
-    }
-
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 /**
@@ -1273,8 +1111,23 @@ export class AblationCLI {
     command: string,
     maxIterations: number,
     dryRun: boolean = false,
+    ablation?: AblationDefinition,
+    phaseName?: string,
   ): Promise<AblationCommandResult> {
     const trimmedCommand = command.trim();
+
+    // Handle @complete-phase — signal that the current phase is done
+    if (trimmedCommand === '@complete-phase' || trimmedCommand.startsWith('@complete-phase:')) {
+      const label = trimmedCommand.includes(':') ? trimmedCommand.slice('@complete-phase:'.length) : phaseName || 'current';
+      this.logger.log(`  ✓ @complete-phase: advancing past phase "${label}"\n`, { type: 'info' });
+      return { phaseComplete: true };
+    }
+
+    // Handle @abort — signal to skip remaining phases for the current model
+    if (trimmedCommand === '@abort') {
+      this.logger.log(`  ⚠️ @abort: skipping remaining phases for current model\n`, { type: 'warning' });
+      return { abortRun: true };
+    }
 
     // Handle direct tool calls (@tool: or @tool-exec:)
     if (trimmedCommand.startsWith('@tool:') || trimmedCommand.startsWith('@tool-exec:')) {
@@ -1416,16 +1269,40 @@ export class AblationCLI {
             promptArgs,
           );
           if (promptResult?.messages) {
-            for (const msg of promptResult.messages) {
-              if (msg.content.type === 'text') {
-                // Process the prompt text as a query
-                await this.client.processQuery(
-                  msg.content.text,
-                  false,
-                  undefined,
-                  () => false,
-                );
+            // For agent-driven ablation phases: load phase hooks so @complete-phase works
+            const hookMgr = this.client.getHookManager();
+            let ablHooksLoaded = false;
+            if (ablation && phaseName) {
+              const phaseHooks = this.ablationManager.getHooksForPhase(ablation, phaseName);
+              if (phaseHooks.length > 0) {
+                hookMgr.loadAblationHooks(phaseHooks);
+                hookMgr.setCurrentPhaseName(phaseName);
+                hookMgr.resetPhaseComplete();
+                ablHooksLoaded = true;
               }
+            }
+
+            try {
+              for (const msg of promptResult.messages) {
+                if (msg.content.type === 'text') {
+                  // Process the prompt text as a query
+                  await this.client.processQuery(
+                    msg.content.text,
+                    false,
+                    undefined,
+                    () => hookMgr.isPhaseCompleteRequested(),
+                  );
+                  // Stop processing further messages if phase complete
+                  if (hookMgr.isPhaseCompleteRequested()) break;
+                }
+              }
+            } finally {
+              if (ablHooksLoaded) hookMgr.clearAblationHooks();
+            }
+
+            if (hookMgr.isPhaseCompleteRequested()) {
+              hookMgr.resetPhaseComplete();
+              return { phaseComplete: true };
             }
           }
           break;
@@ -1509,15 +1386,43 @@ export class AblationCLI {
         this.logger.log(`    ⚠ Skipping query in dry run (no model): ${trimmedCommand}\n`, { type: 'warning' });
         return {};
       }
+
+      // For agent-driven ablation phases: load phase hooks into HookManager
+      // so they fire during processQuery's tool calls
+      const hookManager = this.client.getHookManager();
+      let ablationHooksLoaded = false;
+      if (ablation && phaseName) {
+        const phaseHooks = this.ablationManager.getHooksForPhase(ablation, phaseName);
+        if (phaseHooks.length > 0) {
+          hookManager.loadAblationHooks(phaseHooks);
+          hookManager.setCurrentPhaseName(phaseName);
+          hookManager.resetPhaseComplete();
+          ablationHooksLoaded = true;
+        }
+      }
+
       const pendingAttachments = this.callbacks.getPendingAttachments();
-      await this.client.processQuery(
-        trimmedCommand,
-        false,
-        pendingAttachments.length > 0 ? pendingAttachments : undefined,
-        () => false,
-      );
+      try {
+        await this.client.processQuery(
+          trimmedCommand,
+          false,
+          pendingAttachments.length > 0 ? pendingAttachments : undefined,
+          () => hookManager.isPhaseCompleteRequested(),
+        );
+      } finally {
+        // Cleanup: remove temporary ablation hooks
+        if (ablationHooksLoaded) {
+          hookManager.clearAblationHooks();
+        }
+      }
       // Clear attachments after use
       this.callbacks.setPendingAttachments([]);
+
+      // Check if phase completion was signaled during processQuery
+      if (hookManager.isPhaseCompleteRequested()) {
+        hookManager.resetPhaseComplete();
+        return { phaseComplete: true };
+      }
     }
 
     return {};
@@ -2048,6 +1953,10 @@ export class AblationCLI {
     this.callbacks.resetAbort();
     this.callbacks.startKeyboardMonitor();
 
+    // Suspend client-side hooks during ablation runs (ablation manages its own hooks)
+    const hookManager = this.client.getHookManager();
+    hookManager.suspend();
+
     try {
     // Determine models to iterate over
     // In dry run mode, use a single placeholder model (no model switching needed)
@@ -2058,9 +1967,13 @@ export class AblationCLI {
     // runIteration passed to directory helpers: undefined when iterations=1 (preserves old paths)
     const getRunIter = (iter: number) => hasMultipleIterations ? iter : undefined;
 
+    // Track models that should be skipped for remaining phases (via @abort)
+    const skippedModels = new Set<string>();
+
     // Execute: runIteration > phase > model
     for (let iteration = 1; iteration <= iterations; iteration++) {
       if (shouldBreak) break;
+      skippedModels.clear();
 
       if (hasMultipleIterations) {
         const iterLine = `ITERATION ${iteration}/${iterations}`;
@@ -2105,6 +2018,22 @@ export class AblationCLI {
             this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
             shouldBreak = true;
             break;
+          }
+
+          const modelKey = `${model.provider}/${model.model}`;
+
+          // Skip models marked by @abort from a previous phase
+          if (skippedModels.has(modelKey)) {
+            runNumber++;
+            const result: AblationRunResult = {
+              phase: phase.name,
+              model,
+              status: 'skipped',
+            };
+            if (hasMultipleIterations) result.run = iteration;
+            run.results.push(result);
+            this.logger.log(`\n  ⏭ Skipping ${phase.name} + ${modelKey} (aborted in earlier phase)\n`, { type: 'warning' });
+            continue;
           }
 
           runNumber++;
@@ -2165,6 +2094,7 @@ export class AblationCLI {
 
             // Execute onStart lifecycle hooks
             let aborted = false;
+            let abortCurrentModel = false;
             if (phaseOnStart && phaseOnStart.length > 0) {
               this.logger.log(`  ⤷ Phase onStart hooks...\n`, { type: 'info' });
               for (const startCmd of phaseOnStart) {
@@ -2181,6 +2111,8 @@ export class AblationCLI {
                   startCmd,
                   ablation.settings.maxIterations,
                   ablation.dryRun || false,
+                  ablation,
+                  phase.name,
                 );
 
                 if (ablation.dryRun && hookResult.toolExecResult) {
@@ -2247,6 +2179,8 @@ export class AblationCLI {
                         hookCmd,
                         ablation.settings.maxIterations,
                         ablation.dryRun || false,
+                        ablation,
+                        phase.name,
                       );
 
                       if (ablation.dryRun && hookResult.toolExecResult) {
@@ -2275,6 +2209,8 @@ export class AblationCLI {
                 command,
                 ablation.settings.maxIterations,
                 ablation.dryRun || false,
+                ablation,
+                phase.name,
               );
 
               // Collect tool exec log entry for dry run
@@ -2291,6 +2227,12 @@ export class AblationCLI {
                   success: cmdResult.toolExecResult.success,
                   displayText: cmdResult.toolExecResult.displayText,
                 });
+              }
+
+              // Phase completed via @complete-phase (from agent-driven prompt or direct command)
+              if (cmdResult.phaseComplete) {
+                this.logger.log(`  ✓ Phase "${phase.name}" completed via signal\n`, { type: 'success' });
+                break;
               }
 
               // Execute after-hooks (only for @tool-exec/@tool commands, no recursion)
@@ -2314,7 +2256,20 @@ export class AblationCLI {
                       hookCmd,
                       ablation.settings.maxIterations,
                       ablation.dryRun || false,
+                      ablation,
+                      phase.name,
                     );
+
+                    // @abort hook — skip remaining phases for this model
+                    if (hookResult.abortRun) {
+                      abortCurrentModel = true;
+                      break;
+                    }
+
+                    // @complete-phase hook — advance to next phase
+                    if (hookResult.phaseComplete) {
+                      break;
+                    }
 
                     // Collect hook tool exec log entry for dry run
                     if (ablation.dryRun && hookResult.toolExecResult) {
@@ -2336,6 +2291,9 @@ export class AblationCLI {
                   }
                 }
               }
+
+              // If @abort was triggered by an after-hook, break out of the command loop
+              if (abortCurrentModel) break;
 
               // Check for abort after each command
               if (this.callbacks.isAbortRequested()) {
@@ -2363,6 +2321,8 @@ export class AblationCLI {
                   endCmd,
                   ablation.settings.maxIterations,
                   ablation.dryRun || false,
+                  ablation,
+                  phase.name,
                 );
 
                 if (ablation.dryRun && hookResult.toolExecResult) {
@@ -2400,6 +2360,24 @@ export class AblationCLI {
 
               run.results.push(result);
               break;
+            }
+
+            // @abort triggered by hook — skip remaining phases for this model but continue others
+            if (abortCurrentModel) {
+              await this.client.cleanupVideoRecording();
+
+              result.status = 'aborted';
+              result.duration = Date.now() - startTime;
+              result.durationFormatted = formatDuration(result.duration);
+
+              if (ablation.dryRun && toolExecLog.length > 0) {
+                const logsDir = this.ablationManager.createLogsDirectory(runDir, phase.name, getRunIter(iteration));
+                result.logFile = this.ablationManager.saveToolExecLog(runDir, logsDir, toolExecLog, phase.name);
+              }
+
+              skippedModels.add(modelKey);
+              run.results.push(result);
+              continue; // continue to next model, don't break all loops
             }
 
             // Get token usage (skip in dry run - no model means no tokens)
@@ -2494,14 +2472,13 @@ export class AblationCLI {
 
           run.results.push(result);
 
-          // Always stop on error
+          // On failure: skip remaining phases for this model, continue with others
           if (result.status === 'failed') {
+            skippedModels.add(modelKey);
             this.logger.log(
-              `\nAblation stopped due to error: ${result.error}\n`,
-              { type: 'error' },
+              `\n  ⚠️ Skipping remaining phases for ${modelKey} due to error: ${result.error}\n`,
+              { type: 'warning' },
             );
-            this.logger.log('Partial results saved.\n', { type: 'warning' });
-            shouldBreak = true;
           }
         }
       }
@@ -2518,6 +2495,9 @@ export class AblationCLI {
       }
     }
     } finally {
+      // Resume client-side hooks
+      hookManager.resume();
+
       // Stop keyboard monitor - always runs even if aborted/errored
       this.callbacks.stopKeyboardMonitor();
 

@@ -111,6 +111,10 @@ export interface AblationCommandResult {
     success: boolean;
     error?: string;
   };
+  /** When true, signals that remaining phases for the current model should be skipped */
+  abortRun?: boolean;
+  /** When true, signals that the current phase is complete and should advance to the next */
+  phaseComplete?: boolean;
 }
 
 // ==================== Manager ====================

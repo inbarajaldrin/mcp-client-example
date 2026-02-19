@@ -1058,6 +1058,10 @@ export function createApiRouter(client: MCPClient): Router {
     ablationRunning = true;
     ablationCancelRequested = false;
 
+    // Suspend client-side hooks during ablation runs to prevent double-triggering
+    const hookManager = client.getHookManager();
+    hookManager.suspend();
+
     // SSE headers
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -1109,8 +1113,21 @@ export function createApiRouter(client: MCPClient): Router {
     };
 
     // Helper: execute a single ablation command
+    class AbortRunSignal extends Error { constructor() { super('@abort'); } }
+    class PhaseCompleteSignal extends Error { constructor() { super('@complete-phase'); } }
+
+    // Current phase context for hook loading
+    let currentAblationDef: any = null;
+    let currentPhaseName: string = '';
+
     const execCmd = async (command: string, dryRun: boolean) => {
       const trimmed = command.trim();
+
+      // @abort — signal to skip remaining phases for current model
+      if (trimmed === '@abort') throw new AbortRunSignal();
+
+      // @complete-phase — signal to advance to next phase
+      if (trimmed === '@complete-phase' || trimmed.startsWith('@complete-phase:')) throw new PhaseCompleteSignal();
 
       // @tool: / @tool-exec:
       if (trimmed.startsWith('@tool:') || trimmed.startsWith('@tool-exec:')) {
@@ -1144,7 +1161,30 @@ export function createApiRouter(client: MCPClient): Router {
 
       // Plain text query → send to model (skip in dry run)
       if (dryRun) return;
-      await client.processQuery(trimmed, false, undefined, () => ablationCancelRequested);
+
+      // Load ablation hooks for agent-driven phases
+      const hm = client.getHookManager();
+      let ablHooksLoaded = false;
+      if (currentAblationDef && currentPhaseName) {
+        const phaseHooks = ablationManager.getHooksForPhase(currentAblationDef, currentPhaseName);
+        if (phaseHooks.length > 0) {
+          hm.loadAblationHooks(phaseHooks);
+          hm.setCurrentPhaseName(currentPhaseName);
+          hm.resetPhaseComplete();
+          ablHooksLoaded = true;
+        }
+      }
+
+      try {
+        await client.processQuery(trimmed, false, undefined, () => ablationCancelRequested || hm.isPhaseCompleteRequested());
+      } finally {
+        if (ablHooksLoaded) hm.clearAblationHooks();
+      }
+
+      if (hm.isPhaseCompleteRequested()) {
+        hm.resetPhaseComplete();
+        throw new PhaseCompleteSignal();
+      }
     };
 
     try {
@@ -1173,9 +1213,11 @@ export function createApiRouter(client: MCPClient): Router {
       const totalStartTime = Date.now();
       let runNumber = 0;
       let shouldBreak = false;
+      const skippedModels = new Set<string>();
 
       for (let iteration = 1; iteration <= iterations && !shouldBreak; iteration++) {
         ablationManager.restoreOutputsFromSnapshot(runDir);
+        skippedModels.clear();
 
         for (const phase of ablation.phases) {
           if (shouldBreak || ablationCancelRequested) break;
@@ -1184,6 +1226,19 @@ export function createApiRouter(client: MCPClient): Router {
 
           for (const model of modelsToRun) {
             if (shouldBreak || ablationCancelRequested) break;
+
+            const modelKey = `${model.provider}/${model.model}`;
+
+            // Skip models marked by @abort from a previous phase
+            if (skippedModels.has(modelKey)) {
+              runNumber++;
+              const skippedResult: RunResult = { phase: phase.name, model, status: 'skipped' };
+              if (hasMultiIter) skippedResult.run = iteration;
+              results.push(skippedResult);
+              send({ type: 'result', runNumber, totalRuns, ...skippedResult });
+              continue;
+            }
+
             runNumber++;
 
             const result: RunResult = { phase: phase.name, model, status: 'running' };
@@ -1197,6 +1252,10 @@ export function createApiRouter(client: MCPClient): Router {
             const phaseOnEnd = phase.onEnd ? sub(phase.onEnd) : undefined;
 
             try {
+              // Set phase context for hook loading in execCmd
+              currentAblationDef = ablation;
+              currentPhaseName = phase.name;
+
               // Switch model (skip in dry run)
               if (!ablation.dryRun) {
                 const provider = createProvider(model.provider);
@@ -1213,13 +1272,22 @@ export function createApiRouter(client: MCPClient): Router {
               }
 
               // Execute commands
+              let phaseCompleted = false;
               for (let i = 0; i < phaseCommands.length; i++) {
                 if (ablationCancelRequested) break;
                 send({ type: 'command', runNumber, totalRuns, phase: phase.name, commandIndex: i, totalCommands: phaseCommands.length, command: phaseCommands[i] });
-                await execCmd(phaseCommands[i], ablation.dryRun || false);
+                try {
+                  await execCmd(phaseCommands[i], ablation.dryRun || false);
+                } catch (cmdErr: any) {
+                  if (cmdErr instanceof PhaseCompleteSignal) {
+                    phaseCompleted = true;
+                    break;
+                  }
+                  throw cmdErr; // re-throw other errors
+                }
               }
 
-              // Execute onEnd hooks
+              // Execute onEnd hooks (run even after @complete-phase, skip on cancel)
               if (!ablationCancelRequested && phaseOnEnd) {
                 for (const cmd of phaseOnEnd) {
                   if (ablationCancelRequested) break;
@@ -1237,9 +1305,15 @@ export function createApiRouter(client: MCPClient): Router {
                 }
               }
             } catch (err: any) {
-              result.status = 'failed';
-              result.error = err.message || String(err);
-              shouldBreak = true;
+              if (err instanceof AbortRunSignal) {
+                // @abort: skip remaining phases for this model, continue with others
+                result.status = 'aborted';
+                skippedModels.add(modelKey);
+              } else {
+                result.status = 'failed';
+                result.error = err.message || String(err);
+                skippedModels.add(modelKey);
+              }
             }
 
             result.duration = Date.now() - startTime;
@@ -1287,6 +1361,7 @@ export function createApiRouter(client: MCPClient): Router {
       send({ type: 'error', message: err.message || String(err) });
     } finally {
       ablationRunning = false;
+      hookManager.resume();
       if (!connectionClosed) res.end();
     }
   });
@@ -1299,6 +1374,81 @@ export function createApiRouter(client: MCPClient): Router {
     }
     ablationCancelRequested = true;
     res.json({ ok: true });
+  });
+
+  // ─── Client Hooks ───
+
+  // GET /api/hooks — list all hooks
+  router.get('/hooks', (_req: Request, res: Response) => {
+    try {
+      const hooks = client.getHookManager().listHooks();
+      res.json(hooks);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // POST /api/hooks — add a hook
+  router.post('/hooks', (req: Request, res: Response) => {
+    const { after, before, when, run, enabled, description } = req.body;
+    if (!run || (!after && !before)) {
+      res.status(400).json({ error: 'run and either after or before are required' });
+      return;
+    }
+    try {
+      const hook = client.getHookManager().addHook({
+        ...(after && { after }),
+        ...(before && { before }),
+        ...(when && { when }),
+        run,
+        enabled: enabled !== false,
+        ...(description && { description }),
+      });
+      res.json(hook);
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // POST /api/hooks/reload — reload hooks from disk (must be before :id routes)
+  router.post('/hooks/reload', (_req: Request, res: Response) => {
+    try {
+      client.getHookManager().loadHooks();
+      const hooks = client.getHookManager().listHooks();
+      res.json({ count: hooks.length, hooks });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // DELETE /api/hooks/:id — remove a hook
+  router.delete('/hooks/:id', (req: Request, res: Response) => {
+    try {
+      const success = client.getHookManager().removeHook(req.params.id);
+      res.json({ success });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // POST /api/hooks/:id/enable — enable a hook
+  router.post('/hooks/:id/enable', (req: Request, res: Response) => {
+    try {
+      const success = client.getHookManager().enableHook(req.params.id);
+      res.json({ success });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // POST /api/hooks/:id/disable — disable a hook
+  router.post('/hooks/:id/disable', (req: Request, res: Response) => {
+    try {
+      const success = client.getHookManager().disableHook(req.params.id);
+      res.json({ success });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
   });
 
   return router;

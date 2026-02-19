@@ -16,6 +16,7 @@ import { PromptCLI } from './cli/prompt-cli.js';
 import { AblationCLI } from './cli/ablation-cli.js';
 import { ToolReplayCLI } from './cli/tool-replay-cli.js';
 import { ServerRefreshCLI } from './cli/server-refresh-cli.js';
+import { HooksCLI } from './cli/hooks-cli.js';
 import { HumanInTheLoopManager } from './managers/hil-manager.js';
 
 // Command list for tab autocomplete
@@ -34,6 +35,7 @@ const CLI_COMMANDS = [
   '/tool-replay',
   '/rewind',
   '/hil',
+  '/hooks', '/hooks-list', '/hooks-add', '/hooks-remove', '/hooks-enable', '/hooks-disable', '/hooks-reload',
 ];
 
 export class MCPClientCLI {
@@ -56,6 +58,7 @@ export class MCPClientCLI {
   private ablationCLI: AblationCLI;
   private toolReplayCLI: ToolReplayCLI;
   private serverRefreshCLI: ServerRefreshCLI;
+  private hooksCLI: HooksCLI;
   private hilManager: HumanInTheLoopManager;
   private escapeKeyHandler: ((_str: string, key: { name?: string }) => void) | null = null;
 
@@ -191,6 +194,7 @@ export class MCPClientCLI {
     });
 
     this.serverRefreshCLI = new ServerRefreshCLI(this.client, this.logger, () => this.rl);
+    this.hooksCLI = new HooksCLI(this.client, this.logger, () => this.rl);
 
     // Set up signal handlers for graceful shutdown
     this.signalHandler = new SignalHandler(this.logger, async () => {
@@ -731,6 +735,14 @@ export class MCPClientCLI {
       `Tool Replay:\n` +
       `  /tool-replay - Browse and re-execute past tool calls (results not sent to agent)\n` +
       `\n` +
+      `Hooks:\n` +
+      `  /hooks or /hooks-list - List all configured client hooks\n` +
+      `  /hooks-add - Add a new hook (interactive)\n` +
+      `  /hooks-remove <id> - Remove a hook by ID\n` +
+      `  /hooks-enable <id> - Enable a hook\n` +
+      `  /hooks-disable <id> - Disable a hook\n` +
+      `  /hooks-reload - Reload hooks from hooks.yaml\n` +
+      `\n` +
       `Ablation Studies:\n` +
       `  /ablation-create - Create a new ablation study (interactive wizard)\n` +
       `  /ablation-list - List all saved ablation studies\n` +
@@ -1177,6 +1189,40 @@ export class MCPClientCLI {
               { type: 'error' },
             );
           }
+          continue;
+        }
+
+        // ==================== Hooks Commands ====================
+        if (query.toLowerCase() === '/hooks' || query.toLowerCase() === '/hooks-list') {
+          await this.hooksCLI.handleHooksList();
+          continue;
+        }
+
+        if (query.toLowerCase() === '/hooks-add') {
+          await this.hooksCLI.handleHooksAdd();
+          continue;
+        }
+
+        if (query.toLowerCase().startsWith('/hooks-remove')) {
+          const args = query.slice('/hooks-remove'.length).trim();
+          await this.hooksCLI.handleHooksRemove(args);
+          continue;
+        }
+
+        if (query.toLowerCase().startsWith('/hooks-enable')) {
+          const args = query.slice('/hooks-enable'.length).trim();
+          await this.hooksCLI.handleHooksEnable(args);
+          continue;
+        }
+
+        if (query.toLowerCase().startsWith('/hooks-disable')) {
+          const args = query.slice('/hooks-disable'.length).trim();
+          await this.hooksCLI.handleHooksDisable(args);
+          continue;
+        }
+
+        if (query.toLowerCase() === '/hooks-reload') {
+          await this.hooksCLI.handleHooksReload();
           continue;
         }
 
