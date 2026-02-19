@@ -148,18 +148,55 @@ export class GeminiProvider implements ModelProvider {
     return Object;
   }
 
+  // Recursively coerce all enum values to strings (Gemini requires enum: string[])
+  private coerceEnumsToStrings(schema: any): any {
+    if (!schema || typeof schema !== 'object') {
+      return schema;
+    }
+
+    const processed = { ...schema };
+
+    // Gemini only allows enum on STRING type properties
+    if (Array.isArray(processed.enum)) {
+      processed.enum = processed.enum.map((val: any) => String(val));
+      processed.type = 'string';
+    }
+
+    if (processed.properties && typeof processed.properties === 'object') {
+      processed.properties = Object.fromEntries(
+        Object.entries(processed.properties).map(
+          ([key, prop]) => [key, this.coerceEnumsToStrings(prop)]
+        )
+      );
+    }
+
+    if (processed.items) {
+      processed.items = this.coerceEnumsToStrings(processed.items);
+    }
+
+    if (Array.isArray(processed.anyOf)) {
+      processed.anyOf = processed.anyOf.map((s: any) => this.coerceEnumsToStrings(s));
+    }
+
+    if (Array.isArray(processed.oneOf)) {
+      processed.oneOf = processed.oneOf.map((s: any) => this.coerceEnumsToStrings(s));
+    }
+
+    return processed;
+  }
+
   // Convert MCP tool format to Gemini function declaration format
   private convertToolsToGeminiFormat(tools: Tool[]): any {
     if (tools.length === 0) {
       return null;
     }
-    
+
     // Gemini expects tools as an array with a single object containing functionDeclarations
     return [{
       functionDeclarations: tools.map((tool) => ({
         name: tool.name,
         description: tool.description,
-        parameters: tool.input_schema,
+        parameters: this.coerceEnumsToStrings(tool.input_schema),
       })),
     }];
   }
