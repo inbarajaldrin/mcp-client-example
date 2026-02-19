@@ -1,0 +1,74 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "attachment.schema.json",
+  "title": "Attachment",
+  "description": "File attachment structures. Files stored at .mcp-client-data/attachments/. Content blocks used when sending attachments to LLM providers.",
+  "type": "object",
+  "$defs": {
+    "AttachmentInfo": {
+      "type": "object",
+      "required": ["path", "fileName", "ext", "mediaType"],
+      "description": "Metadata for an uploaded file attachment",
+      "properties": {
+        "path": { "type": "string", "description": "Absolute file path on disk" },
+        "fileName": { "type": "string", "description": "Original filename" },
+        "ext": { "type": "string", "description": "File extension (e.g. .png, .pdf, .txt)" },
+        "mediaType": { "type": "string", "description": "MIME type (e.g. image/png, application/pdf)" }
+      }
+    },
+    "DocumentBlock": {
+      "type": "object",
+      "required": ["type", "source"],
+      "description": "PDF document content block for Anthropic API",
+      "properties": {
+        "type": { "const": "document" },
+        "source": {
+          "type": "object",
+          "required": ["type", "media_type", "data"],
+          "properties": {
+            "type": { "const": "base64" },
+            "media_type": { "const": "application/pdf" },
+            "data": { "type": "string", "description": "Base64-encoded PDF content" }
+          }
+        }
+      }
+    },
+    "ImageBlock": {
+      "type": "object",
+      "required": ["type", "source"],
+      "description": "Image content block for Anthropic API",
+      "properties": {
+        "type": { "const": "image" },
+        "source": {
+          "type": "object",
+          "required": ["type", "media_type", "data"],
+          "properties": {
+            "type": { "const": "base64" },
+            "media_type": {
+              "type": "string",
+              "enum": ["image/jpeg", "image/png", "image/gif", "image/webp"]
+            },
+            "data": { "type": "string", "description": "Base64-encoded image data" }
+          }
+        }
+      }
+    },
+    "TextBlock": {
+      "type": "object",
+      "required": ["type", "text"],
+      "description": "Plain text content block",
+      "properties": {
+        "type": { "const": "text" },
+        "text": { "type": "string" }
+      }
+    },
+    "ContentBlock": {
+      "description": "Union of all attachment content block types",
+      "oneOf": [
+        { "$ref": "#/$defs/DocumentBlock" },
+        { "$ref": "#/$defs/ImageBlock" },
+        { "$ref": "#/$defs/TextBlock" }
+      ]
+    }
+  }
+}

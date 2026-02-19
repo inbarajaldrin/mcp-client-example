@@ -1,0 +1,138 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "title": "MCP Client Schema Index",
+  "description": "Maps all data formats produced and consumed by the MCP client to their schemas and file locations.",
+  "schemas": [
+    {
+      "schema": "chat-session.schema.json",
+      "title": "Chat Session",
+      "filePath": ".mcp-client-data/chats/YYYY-MM-DD/chat-HHMMSS-{sessionId}.json",
+      "io": "output",
+      "format": "json",
+      "description": "Full conversation history with messages, token usage, tool calls, and session metadata"
+    },
+    {
+      "schema": "chat-index.schema.json",
+      "title": "Chat Index",
+      "filePath": ".mcp-client-data/chats/index.json",
+      "io": "output",
+      "format": "json",
+      "description": "Metadata index of all chat sessions for quick lookup without reading full session files"
+    },
+    {
+      "schema": "hooks.schema.json",
+      "title": "Client Hooks",
+      "filePath": ".mcp-client-data/hooks.yaml",
+      "io": "input/output",
+      "format": "yaml",
+      "description": "Client-side hooks that trigger actions before/after MCP tool execution with conditional matching"
+    },
+    {
+      "schema": "preferences.schema.json",
+      "title": "Preferences",
+      "filePath": ".mcp-client-data/preferences.json",
+      "io": "input/output",
+      "format": "json",
+      "description": "User settings for tool states, timeouts, iteration limits, and human-in-the-loop mode"
+    },
+    {
+      "schema": "mcp-config.schema.json",
+      "title": "MCP Server Config",
+      "filePath": "mcp_config.json",
+      "io": "input",
+      "format": "json",
+      "description": "MCP server launch configurations defining command, args, env, and transport type"
+    },
+    {
+      "schema": "ablation-definition.schema.json",
+      "title": "Ablation Definition",
+      "filePath": ".mcp-client-data/ablations/{name}.yaml",
+      "io": "input",
+      "format": "yaml",
+      "description": "Ablation study definitions with phases, models, arguments, hooks, and execution settings"
+    },
+    {
+      "schema": "ablation-run.schema.json",
+      "title": "Ablation Run Summary",
+      "filePath": ".mcp-client-data/ablations/runs/YYYY-MM-DD/{name}/{timestamp}/summary.json",
+      "io": "output",
+      "format": "json",
+      "description": "Results of ablation study execution including per-phase status, tokens, duration, and chat file references"
+    },
+    {
+      "schema": "tool-exec-log.schema.json",
+      "title": "Tool Execution Log",
+      "filePath": ".mcp-client-data/ablations/runs/.../logs/{phase}/tool-exec-log.json",
+      "io": "output",
+      "format": "json",
+      "description": "Ordered log of tool executions during ablation dry-run phases with timing, success, and hook tracking"
+    },
+    {
+      "schema": "tool.schema.json",
+      "title": "Tool Definition",
+      "filePath": null,
+      "io": "internal",
+      "format": "json",
+      "description": "MCP tool definition as discovered from connected servers. Embedded in chat sessions and used by provider interfaces."
+    },
+    {
+      "schema": "tool-call.schema.json",
+      "title": "Tool Call & Execution Result",
+      "filePath": null,
+      "io": "internal",
+      "format": "json",
+      "description": "Tool invocation request from LLM, execution result with content blocks, and direct tool-exec command syntax"
+    },
+    {
+      "schema": "message.schema.json",
+      "title": "Provider Message",
+      "filePath": null,
+      "io": "internal",
+      "format": "json",
+      "description": "Internal message format passed through provider-specific converters (convertToOpenAIMessages, etc.)"
+    },
+    {
+      "schema": "web-events.schema.json",
+      "title": "Web Stream Events",
+      "filePath": null,
+      "io": "output (SSE)",
+      "format": "json",
+      "description": "Server-Sent Events for web UI: text deltas, tool lifecycle, token usage, approvals, elicitations, and IPC events"
+    },
+    {
+      "schema": "attachment.schema.json",
+      "title": "Attachments",
+      "filePath": ".mcp-client-data/attachments/",
+      "io": "input/output",
+      "format": "binary + json",
+      "description": "File attachment metadata and provider-specific content blocks (document, image, text) with base64 encoding"
+    }
+  ],
+  "commands": {
+    "description": "Special command formats used in ablation phases and hooks",
+    "formats": [
+      { "pattern": "@tool-exec:server__tool(arg='val', num=42)", "description": "Execute tool directly, result not injected into LLM context" },
+      { "pattern": "@tool-exec:server__tool {\"arg\": \"value\"}", "description": "Execute tool with JSON arguments" },
+      { "pattern": "@tool:server__tool(arg='val')", "description": "Execute tool and inject result into LLM context" },
+      { "pattern": "@wait:N", "description": "Wait N seconds before continuing" },
+      { "pattern": "@complete-phase", "description": "Signal that the current phase is complete" },
+      { "pattern": "@complete-phase:name", "description": "Signal phase complete only if current phase matches name" },
+      { "pattern": "@abort", "description": "Abort the current ablation run" },
+      { "pattern": "/attachment-insert {filename}", "description": "Insert file as attachment into conversation" },
+      { "pattern": "plain text", "description": "Sent as user message to the LLM" }
+    ]
+  },
+  "directoryStructure": {
+    ".mcp-client-data/": {
+      "chats/": "Chat session storage (JSON + MD per session, index.json)",
+      "chats/index.json": "Session metadata index",
+      "hooks.yaml": "Client-side hook definitions",
+      "preferences.json": "User preferences",
+      "attachments/": "Uploaded file attachments",
+      "ablations/": "Ablation study definitions (YAML)",
+      "ablations/runs/": "Ablation run results organized by date/name/timestamp",
+      "outputs/logs/": "Domain-specific output logs (e.g. assembly results)"
+    },
+    "mcp_config.json": "MCP server configurations"
+  }
+}

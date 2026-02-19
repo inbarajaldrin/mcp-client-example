@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "hooks.schema.json",
+  "title": "ClientHooks",
+  "description": "Client-side hook definitions stored at .mcp-client-data/hooks.yaml. Hooks trigger actions before/after MCP tool execution.",
+  "type": "object",
+  "required": ["hooks"],
+  "properties": {
+    "hooks": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/ClientHook" }
+    }
+  },
+  "$defs": {
+    "ClientHook": {
+      "type": "object",
+      "required": ["run"],
+      "properties": {
+        "id": {
+          "type": "string",
+          "description": "8-character unique identifier, auto-generated if omitted",
+          "pattern": "^[a-f0-9]{8}$"
+        },
+        "enabled": {
+          "type": "boolean",
+          "default": true,
+          "description": "Whether this hook is active"
+        },
+        "description": {
+          "type": "string",
+          "description": "Human-readable description of what this hook does"
+        },
+        "after": {
+          "type": "string",
+          "description": "Full tool name (server__tool) to match AFTER execution"
+        },
+        "before": {
+          "type": "string",
+          "description": "Full tool name (server__tool) to match BEFORE execution"
+        },
+        "when": {
+          "type": "object",
+          "description": "Conditional match against tool result JSON. Hook only fires if all key-value pairs match.",
+          "additionalProperties": true
+        },
+        "run": {
+          "type": "string",
+          "description": "Command to execute. Supported formats: @tool-exec:server__tool(arg='val'), @complete-phase:name, @abort"
+        }
+      },
+      "oneOf": [
+        { "required": ["after"] },
+        { "required": ["before"] }
+      ]
+    }
+  }
+}

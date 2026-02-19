@@ -1,0 +1,52 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "mcp-config.schema.json",
+  "title": "MCPConfig",
+  "description": "MCP server configuration stored at mcp_config.json. Defines how to launch and connect to MCP servers.",
+  "type": "object",
+  "required": ["mcpServers"],
+  "properties": {
+    "mcpServers": {
+      "type": "object",
+      "description": "Map of server name to server configuration",
+      "additionalProperties": { "$ref": "#/$defs/ServerConfig" }
+    }
+  },
+  "$defs": {
+    "ServerConfig": {
+      "type": "object",
+      "required": ["command"],
+      "properties": {
+        "disabled": {
+          "type": "boolean",
+          "default": false,
+          "description": "Whether this server is disabled"
+        },
+        "timeout": {
+          "type": "number",
+          "description": "Server-specific timeout in seconds. Overrides global mcpTimeout."
+        },
+        "type": {
+          "type": "string",
+          "enum": ["stdio", "sse", "http"],
+          "default": "stdio",
+          "description": "Transport type for server communication"
+        },
+        "command": {
+          "type": "string",
+          "description": "Executable command to launch the server"
+        },
+        "args": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Command-line arguments passed to the server"
+        },
+        "env": {
+          "type": "object",
+          "description": "Environment variables set for the server process",
+          "additionalProperties": { "type": "string" }
+        }
+      }
+    }
+  }
+}

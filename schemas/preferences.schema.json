@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "preferences.schema.json",
+  "title": "ClientPreferences",
+  "description": "User preferences stored at .mcp-client-data/preferences.json. Controls tool states, timeouts, and iteration limits.",
+  "type": "object",
+  "properties": {
+    "toolStates": {
+      "type": "object",
+      "description": "Per-tool enable/disable state. Key is full tool name (server__tool), value is boolean.",
+      "additionalProperties": { "type": "boolean" }
+    },
+    "promptStates": {
+      "type": "object",
+      "description": "Per-prompt enable/disable state. Key is full prompt name (server__prompt), value is boolean.",
+      "additionalProperties": { "type": "boolean" }
+    },
+    "mcpTimeout": {
+      "type": "number",
+      "description": "MCP tool call timeout in seconds. -1 for unlimited.",
+      "default": 60
+    },
+    "maxIterations": {
+      "type": "integer",
+      "description": "Maximum iterations between agent calls. -1 for unlimited.",
+      "default": -1
+    },
+    "hilEnabled": {
+      "type": "boolean",
+      "description": "Human-in-the-loop mode: require approval before tool execution",
+      "default": false
+    }
+  }
+}

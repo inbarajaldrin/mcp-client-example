@@ -1,0 +1,170 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "chat-session.schema.json",
+  "title": "ChatSession",
+  "description": "Full conversation session stored at .mcp-client-data/chats/YYYY-MM-DD/chat-HHMMSS-{sessionId}.json",
+  "type": "object",
+  "required": ["sessionId", "startTime", "model", "servers", "messages", "metadata"],
+  "properties": {
+    "sessionId": {
+      "type": "string",
+      "description": "Unique session identifier"
+    },
+    "startTime": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when session started"
+    },
+    "endTime": {
+      "type": "string",
+      "format": "date-time",
+      "description": "ISO 8601 timestamp when session ended"
+    },
+    "model": {
+      "type": "string",
+      "description": "LLM model identifier used for this session"
+    },
+    "servers": {
+      "type": "array",
+      "items": { "type": "string" },
+      "description": "MCP server names connected during session"
+    },
+    "tools": {
+      "type": "array",
+      "description": "Available tools during the session",
+      "items": { "$ref": "tool.schema.json" }
+    },
+    "messages": {
+      "type": "array",
+      "description": "Ordered conversation messages",
+      "items": { "$ref": "#/$defs/ChatMessage" }
+    },
+    "tokenUsagePerCallback": {
+      "type": "array",
+      "description": "Token usage recorded per LLM callback",
+      "items": { "$ref": "#/$defs/TokenUsageRecord" }
+    },
+    "metadata": { "$ref": "#/$defs/SessionMetadata" }
+  },
+  "$defs": {
+    "ChatMessage": {
+      "type": "object",
+      "required": ["timestamp", "role", "content"],
+      "properties": {
+        "timestamp": {
+          "type": "string",
+          "format": "date-time",
+          "description": "ISO 8601 timestamp of this message"
+        },
+        "role": {
+          "type": "string",
+          "enum": ["user", "assistant", "tool", "client"],
+          "description": "Message author role"
+        },
+        "content": {
+          "type": "string",
+          "description": "Text content of the message"
+        },
+        "content_blocks": {
+          "type": "array",
+          "description": "Structured content blocks preserving tool_use blocks from assistant",
+          "items": {
+            "type": "object",
+            "properties": {
+              "type": { "type": "string" }
+            },
+            "additionalProperties": true
+          }
+        },
+        "tool_use_id": {
+          "type": "string",
+          "description": "Tool use ID for pairing tool results with tool calls"
+        },
+        "attachments": {
+          "type": "array",
+          "description": "File attachments included with this message",
+          "items": {
+            "type": "object",
+            "required": ["fileName", "ext", "mediaType"],
+            "properties": {
+              "fileName": { "type": "string" },
+              "ext": { "type": "string", "description": "File extension (e.g. .png, .pdf)" },
+              "mediaType": { "type": "string", "description": "MIME type" }
+            }
+          }
+        },
+        "toolName": {
+          "type": "string",
+          "description": "Name of the tool called (on tool messages)"
+        },
+        "toolInput": {
+          "type": "object",
+          "description": "Arguments passed to the tool",
+          "additionalProperties": true
+        },
+        "toolOutput": {
+          "type": "string",
+          "description": "Raw output returned by the tool"
+        },
+        "toolInputTime": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When tool input was sent"
+        },
+        "toolOutputTime": {
+          "type": "string",
+          "format": "date-time",
+          "description": "When tool output was received"
+        },
+        "orchestratorMode": {
+          "type": "boolean",
+          "description": "Whether this message was in orchestrator mode"
+        },
+        "isIPCCall": {
+          "type": "boolean",
+          "description": "Whether this was an automatic IPC call"
+        }
+      }
+    },
+    "TokenUsageRecord": {
+      "type": "object",
+      "required": ["timestamp", "inputTokens", "outputTokens", "totalTokens"],
+      "properties": {
+        "timestamp": { "type": "string", "format": "date-time" },
+        "inputTokens": { "type": "integer" },
+        "outputTokens": { "type": "integer" },
+        "totalTokens": { "type": "integer" },
+        "regularInputTokens": { "type": "integer", "description": "Non-cached input tokens" },
+        "cacheCreationTokens": { "type": "integer", "description": "Tokens used to create cache" },
+        "cacheReadTokens": { "type": "integer", "description": "Tokens read from cache" },
+        "estimatedCost": { "type": "number", "description": "Estimated cost in USD" },
+        "ollamaMetrics": {
+          "type": "object",
+          "description": "Ollama-specific performance metrics",
+          "properties": {
+            "totalDuration": { "type": "number", "description": "Total inference duration (ns)" },
+            "loadDuration": { "type": "number", "description": "Model load duration (ns)" },
+            "evalDuration": { "type": "number", "description": "Response generation duration (ns)" },
+            "promptEvalDuration": { "type": "number", "description": "Prompt evaluation duration (ns)" },
+            "evalCount": { "type": "integer", "description": "Number of tokens generated" },
+            "promptEvalCount": { "type": "integer", "description": "Number of prompt tokens evaluated" },
+            "evalRate": { "type": "number", "description": "Tokens/second for generation" },
+            "promptEvalRate": { "type": "number", "description": "Tokens/second for prompt eval" }
+          }
+        }
+      }
+    },
+    "SessionMetadata": {
+      "type": "object",
+      "required": ["messageCount", "toolUseCount", "ipcCallCount"],
+      "properties": {
+        "cumulativeTokens": { "type": "integer", "description": "Total tokens used across session" },
+        "peakContextTokens": { "type": "integer", "description": "Peak context window usage" },
+        "messageCount": { "type": "integer" },
+        "toolUseCount": { "type": "integer" },
+        "ipcCallCount": { "type": "integer" },
+        "totalCost": { "type": "number", "description": "Total estimated cost in USD" }
+      }
+    }
+  }
+}

@@ -1,0 +1,54 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ablation-run.schema.json",
+  "title": "AblationRun",
+  "description": "Ablation run summary stored at .mcp-client-data/ablations/runs/YYYY-MM-DD/{ablation-name}/{timestamp}/summary.json",
+  "type": "object",
+  "required": ["ablationName", "startedAt", "results"],
+  "properties": {
+    "ablationName": { "type": "string", "description": "Name of the ablation definition that was executed" },
+    "startedAt": { "type": "string", "format": "date-time" },
+    "completedAt": { "type": "string", "format": "date-time" },
+    "resolvedArguments": {
+      "type": "object",
+      "description": "Argument values resolved before execution",
+      "additionalProperties": { "type": "string" }
+    },
+    "results": {
+      "type": "array",
+      "items": { "$ref": "#/$defs/AblationRunResult" }
+    },
+    "totalTokens": { "type": "integer", "description": "Sum of tokens across all results" },
+    "totalDuration": { "type": "number", "description": "Total duration in milliseconds" },
+    "totalDurationFormatted": { "type": "string", "description": "Human-readable duration (e.g. '2m 30s')" }
+  },
+  "$defs": {
+    "AblationRunResult": {
+      "type": "object",
+      "required": ["phase", "model", "status"],
+      "properties": {
+        "phase": { "type": "string", "description": "Phase name from the ablation definition" },
+        "model": {
+          "type": "object",
+          "required": ["provider", "model"],
+          "properties": {
+            "provider": { "type": "string" },
+            "model": { "type": "string" }
+          }
+        },
+        "run": { "type": "integer", "description": "Run number (only populated when runs > 1)" },
+        "status": {
+          "type": "string",
+          "enum": ["pending", "running", "completed", "failed", "skipped", "aborted"],
+          "description": "Execution status of this phase/model combination"
+        },
+        "tokens": { "type": "integer", "description": "Tokens consumed" },
+        "duration": { "type": "number", "description": "Duration in milliseconds" },
+        "durationFormatted": { "type": "string" },
+        "chatFile": { "type": "string", "description": "Path to the chat session JSON for this result" },
+        "logFile": { "type": "string", "description": "Path to tool-exec log JSON (dry-run mode)" },
+        "error": { "type": "string", "description": "Error message if status is failed" }
+      }
+    }
+  }
+}

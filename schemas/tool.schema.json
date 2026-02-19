@@ -1,0 +1,36 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tool.schema.json",
+  "title": "Tool",
+  "description": "MCP tool definition as discovered from connected servers. Used in chat sessions and provider interfaces.",
+  "type": "object",
+  "required": ["name", "description", "input_schema"],
+  "properties": {
+    "name": {
+      "type": "string",
+      "description": "Full tool name in server__tool format"
+    },
+    "description": {
+      "type": "string",
+      "description": "Human-readable description of what the tool does"
+    },
+    "input_schema": {
+      "type": "object",
+      "description": "JSON Schema describing the tool's input parameters",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "object" },
+        "properties": {
+          "type": "object",
+          "description": "Parameter definitions",
+          "additionalProperties": true
+        },
+        "required": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Required parameter names"
+        }
+      }
+    }
+  }
+}

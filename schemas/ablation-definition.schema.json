@@ -1,0 +1,125 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "ablation-definition.schema.json",
+  "title": "AblationDefinition",
+  "description": "Ablation study definition stored at .mcp-client-data/ablations/{name}.yaml. Defines experiment phases, models, and execution settings.",
+  "type": "object",
+  "required": ["name", "description", "created", "phases", "models", "settings"],
+  "properties": {
+    "name": { "type": "string", "description": "Unique ablation study name" },
+    "description": { "type": "string", "description": "Human-readable description of the experiment" },
+    "created": { "type": "string", "format": "date-time", "description": "ISO 8601 creation timestamp" },
+    "updated": { "type": "string", "format": "date-time", "description": "ISO 8601 last update timestamp" },
+    "dryRun": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, executes @tool-exec commands directly without LLM involvement"
+    },
+    "runs": {
+      "type": "integer",
+      "default": 1,
+      "minimum": 1,
+      "description": "Number of times to repeat each phase/model combination"
+    },
+    "arguments": {
+      "type": "array",
+      "description": "User-supplied arguments resolved before execution. Referenced as ${argName} in commands.",
+      "items": { "$ref": "#/$defs/AblationArgument" }
+    },
+    "phases": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Ordered execution phases",
+      "items": { "$ref": "#/$defs/AblationPhase" }
+    },
+    "models": {
+      "type": "array",
+      "minItems": 1,
+      "description": "Models to test across all phases",
+      "items": { "$ref": "#/$defs/AblationModel" }
+    },
+    "settings": { "$ref": "#/$defs/AblationSettings" },
+    "hooks": {
+      "type": "array",
+      "description": "Global hooks that apply across all phases",
+      "items": { "$ref": "#/$defs/PostToolHook" }
+    }
+  },
+  "$defs": {
+    "AblationArgument": {
+      "type": "object",
+      "required": ["name"],
+      "properties": {
+        "name": { "type": "string", "description": "Argument name, referenced as ${name} in commands" },
+        "description": { "type": "string", "description": "Prompt shown when requesting this argument" },
+        "type": {
+          "type": "string",
+          "enum": ["string", "attachment"],
+          "default": "string",
+          "description": "Argument type. 'attachment' resolves to a file path."
+        },
+        "required": { "type": "boolean", "default": true },
+        "default": { "type": "string", "description": "Default value if not provided" }
+      }
+    },
+    "AblationPhase": {
+      "type": "object",
+      "required": ["name", "commands"],
+      "properties": {
+        "name": { "type": "string", "description": "Phase name used in results and logs" },
+        "commands": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Ordered commands: @tool-exec:server__tool(args), @tool:server__tool(args), @wait:N, @complete-phase, @abort, /attachment-insert {file}, or plain text (user prompt to LLM)"
+        },
+        "hooks": {
+          "type": "array",
+          "description": "Phase-specific hooks (override global hooks)",
+          "items": { "$ref": "#/$defs/PostToolHook" }
+        },
+        "onStart": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Commands to run when this phase starts"
+        },
+        "onEnd": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Commands to run when this phase ends"
+        }
+      }
+    },
+    "AblationModel": {
+      "type": "object",
+      "required": ["provider", "model"],
+      "properties": {
+        "provider": { "type": "string", "description": "Provider name (anthropic, openai, google, ollama, xai)" },
+        "model": { "type": "string", "description": "Model identifier (e.g. claude-sonnet-4-20250514)" }
+      }
+    },
+    "AblationSettings": {
+      "type": "object",
+      "required": ["maxIterations"],
+      "properties": {
+        "maxIterations": {
+          "type": "integer",
+          "description": "Max agent iterations per phase. -1 for unlimited."
+        },
+        "mcpConfigPath": {
+          "type": "string",
+          "description": "Override MCP config path for this ablation"
+        }
+      }
+    },
+    "PostToolHook": {
+      "type": "object",
+      "required": ["run"],
+      "properties": {
+        "after": { "type": "string", "description": "Tool name to match after execution" },
+        "before": { "type": "string", "description": "Tool name to match before execution" },
+        "when": { "type": "object", "additionalProperties": true, "description": "Condition match on tool result" },
+        "run": { "type": "string", "description": "Command to execute" }
+      }
+    }
+  }
+}

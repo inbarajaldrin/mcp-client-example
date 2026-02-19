@@ -1,0 +1,72 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tool-call.schema.json",
+  "title": "ToolCall & ToolExecutionResult",
+  "description": "Structures for tool invocation and execution results. Used internally by the agent loop and logged in chat sessions.",
+  "type": "object",
+  "$defs": {
+    "ToolCall": {
+      "type": "object",
+      "required": ["id", "name", "arguments"],
+      "description": "A tool invocation request from the LLM",
+      "properties": {
+        "id": { "type": "string", "description": "Unique tool call identifier for result pairing" },
+        "name": { "type": "string", "description": "Full tool name (server__tool)" },
+        "arguments": { "type": "string", "description": "JSON-encoded arguments string" }
+      }
+    },
+    "ToolExecutionResult": {
+      "type": "object",
+      "required": ["displayText", "contentBlocks", "hasImages"],
+      "description": "Result of executing an MCP tool",
+      "properties": {
+        "displayText": {
+          "type": "string",
+          "description": "Text to display in CLI. Images shown as [Image: mime/type] placeholders."
+        },
+        "contentBlocks": {
+          "type": "array",
+          "description": "Full content blocks including text and images for LLM consumption",
+          "items": { "$ref": "#/$defs/ContentBlock" }
+        },
+        "hasImages": {
+          "type": "boolean",
+          "description": "Whether any content block contains image data"
+        }
+      }
+    },
+    "ContentBlock": {
+      "oneOf": [
+        { "$ref": "#/$defs/TextContentBlock" },
+        { "$ref": "#/$defs/ImageContentBlock" }
+      ]
+    },
+    "TextContentBlock": {
+      "type": "object",
+      "required": ["type", "text"],
+      "properties": {
+        "type": { "const": "text" },
+        "text": { "type": "string" }
+      }
+    },
+    "ImageContentBlock": {
+      "type": "object",
+      "required": ["type", "data", "mimeType"],
+      "properties": {
+        "type": { "const": "image" },
+        "data": { "type": "string", "description": "Base64-encoded image data" },
+        "mimeType": { "type": "string", "description": "Image MIME type (image/png, image/jpeg, etc.)" }
+      }
+    },
+    "DirectToolExecSyntax": {
+      "description": "String formats for direct tool execution in commands and hooks",
+      "type": "string",
+      "examples": [
+        "@tool-exec:server__tool(arg='value', num=42)",
+        "@tool-exec:server__tool {\"arg\": \"value\"}",
+        "@tool-exec:server__tool",
+        "@tool:server__tool(arg='value')"
+      ]
+    }
+  }
+}

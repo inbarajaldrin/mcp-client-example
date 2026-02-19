@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "web-events.schema.json",
+  "title": "WebStreamEvent",
+  "description": "Server-Sent Events emitted by the web UI during chat sessions. Consumed by the frontend via EventSource.",
+  "oneOf": [
+    { "$ref": "#/$defs/TextDelta" },
+    { "$ref": "#/$defs/ToolStart" },
+    { "$ref": "#/$defs/ToolComplete" },
+    { "$ref": "#/$defs/TokenUsage" },
+    { "$ref": "#/$defs/Warning" },
+    { "$ref": "#/$defs/Info" },
+    { "$ref": "#/$defs/Error" },
+    { "$ref": "#/$defs/Done" },
+    { "$ref": "#/$defs/ApprovalRequest" },
+    { "$ref": "#/$defs/ElicitationRequest" },
+    { "$ref": "#/$defs/IPCToolStart" },
+    { "$ref": "#/$defs/IPCToolEnd" }
+  ],
+  "$defs": {
+    "TextDelta": {
+      "type": "object",
+      "required": ["type", "text"],
+      "properties": {
+        "type": { "const": "text_delta" },
+        "text": { "type": "string", "description": "Incremental text chunk from LLM response" }
+      }
+    },
+    "ToolStart": {
+      "type": "object",
+      "required": ["type", "toolName", "toolInput", "toolId"],
+      "properties": {
+        "type": { "const": "tool_start" },
+        "toolName": { "type": "string" },
+        "toolInput": { "type": "object", "additionalProperties": true },
+        "toolId": { "type": "string", "description": "Unique ID for pairing with tool_complete" }
+      }
+    },
+    "ToolComplete": {
+      "type": "object",
+      "required": ["type", "toolName", "toolInput", "result", "toolId"],
+      "properties": {
+        "type": { "const": "tool_complete" },
+        "toolName": { "type": "string" },
+        "toolInput": { "type": "object", "additionalProperties": true },
+        "result": { "type": "string", "description": "Tool output text" },
+        "toolId": { "type": "string" },
+        "cancelled": { "type": "boolean", "description": "Whether the tool call was cancelled by user" }
+      }
+    },
+    "TokenUsage": {
+      "type": "object",
+      "required": ["type", "inputTokens", "outputTokens", "totalTokens"],
+      "properties": {
+        "type": { "const": "token_usage" },
+        "inputTokens": { "type": "integer" },
+        "outputTokens": { "type": "integer" },
+        "totalTokens": { "type": "integer" }
+      }
+    },
+    "Warning": {
+      "type": "object",
+      "required": ["type", "message"],
+      "properties": {
+        "type": { "const": "warning" },
+        "message": { "type": "string" }
+      }
+    },
+    "Info": {
+      "type": "object",
+      "required": ["type", "message"],
+      "properties": {
+        "type": { "const": "info" },
+        "message": { "type": "string" }
+      }
+    },
+    "Error": {
+      "type": "object",
+      "required": ["type", "message"],
+      "properties": {
+        "type": { "const": "error" },
+        "message": { "type": "string" }
+      }
+    },
+    "Done": {
+      "type": "object",
+      "required": ["type"],
+      "properties": {
+        "type": { "const": "done" }
+      }
+    },
+    "ApprovalRequest": {
+      "type": "object",
+      "required": ["type", "toolName", "toolInput", "requestId"],
+      "description": "Requests human-in-the-loop approval before executing a tool",
+      "properties": {
+        "type": { "const": "approval_request" },
+        "toolName": { "type": "string" },
+        "toolInput": { "type": "object", "additionalProperties": true },
+        "requestId": { "type": "string", "description": "ID to respond with approval/rejection" }
+      }
+    },
+    "ElicitationRequest": {
+      "type": "object",
+      "required": ["type", "message", "requestedSchema", "requestId"],
+      "description": "Requests structured input from the user mid-conversation",
+      "properties": {
+        "type": { "const": "elicitation_request" },
+        "message": { "type": "string", "description": "Prompt to display to the user" },
+        "requestedSchema": { "description": "JSON Schema describing expected response shape" },
+        "requestId": { "type": "string" }
+      }
+    },
+    "IPCToolStart": {
+      "type": "object",
+      "required": ["type", "toolName", "args"],
+      "description": "Automatic IPC tool call started (inter-process communication between agents)",
+      "properties": {
+        "type": { "const": "ipc_tool_start" },
+        "toolName": { "type": "string" },
+        "args": { "type": "object", "additionalProperties": true }
+      }
+    },
+    "IPCToolEnd": {
+      "type": "object",
+      "required": ["type", "toolName", "args"],
+      "description": "Automatic IPC tool call completed",
+      "properties": {
+        "type": { "const": "ipc_tool_end" },
+        "toolName": { "type": "string" },
+        "args": { "type": "object", "additionalProperties": true },
+        "result": { "description": "Tool result (any type)" },
+        "error": { "type": "string" }
+      }
+    }
+  }
+}

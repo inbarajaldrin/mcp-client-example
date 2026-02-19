@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "message.schema.json",
+  "title": "Message (Provider)",
+  "description": "Internal message format used by the agent loop and passed to provider-specific converters. Distinct from ChatMessage (which is the persisted format).",
+  "type": "object",
+  "required": ["role", "content"],
+  "properties": {
+    "role": {
+      "type": "string",
+      "enum": ["user", "assistant", "tool"],
+      "description": "Message role for LLM API"
+    },
+    "content": {
+      "type": "string",
+      "description": "Text content of the message"
+    },
+    "tool_call_id": {
+      "type": "string",
+      "description": "Tool call ID for OpenAI-style tool result messages"
+    },
+    "tool_name": {
+      "type": "string",
+      "description": "Tool name for Ollama-style tool result messages"
+    },
+    "tool_calls": {
+      "type": "array",
+      "description": "Tool calls made by assistant (OpenAI format)",
+      "items": { "$ref": "tool-call.schema.json#/$defs/ToolCall" }
+    },
+    "tool_results": {
+      "type": "array",
+      "description": "Tool results for Anthropic-style messages",
+      "items": {
+        "type": "object",
+        "required": ["type", "tool_use_id", "content"],
+        "properties": {
+          "type": { "const": "tool_result" },
+          "tool_use_id": { "type": "string" },
+          "tool_name": { "type": "string" },
+          "content": {
+            "description": "String or array of content blocks (text/image)",
+            "oneOf": [
+              { "type": "string" },
+              {
+                "type": "array",
+                "items": {
+                  "type": "object",
+                  "properties": { "type": { "type": "string" } },
+                  "additionalProperties": true
+                }
+              }
+            ]
+          }
+        }
+      }
+    },
+    "content_blocks": {
+      "type": "array",
+      "description": "Preserved tool_use blocks from assistant responses",
+      "items": {
+        "type": "object",
+        "properties": { "type": { "type": "string" } },
+        "additionalProperties": true
+      }
+    }
+  }
+}

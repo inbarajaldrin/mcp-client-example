@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "chat-index.schema.json",
+  "title": "ChatIndex",
+  "description": "Session metadata index stored at .mcp-client-data/chats/index.json. Array of ChatMetadata entries.",
+  "type": "array",
+  "items": { "$ref": "#/$defs/ChatMetadata" },
+  "$defs": {
+    "ChatMetadata": {
+      "type": "object",
+      "required": ["sessionId", "startTime", "messageCount", "toolUseCount", "model", "servers", "filePath", "mdFilePath"],
+      "properties": {
+        "sessionId": { "type": "string", "description": "Unique session identifier" },
+        "startTime": { "type": "string", "format": "date-time" },
+        "endTime": { "type": "string", "format": "date-time" },
+        "duration": { "type": "integer", "description": "Session duration in milliseconds" },
+        "messageCount": { "type": "integer" },
+        "toolUseCount": { "type": "integer" },
+        "ipcCallCount": { "type": "integer", "description": "Automatic IPC calls made" },
+        "model": { "type": "string", "description": "LLM model identifier" },
+        "servers": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "MCP server names"
+        },
+        "tags": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "User-assigned tags"
+        },
+        "name": { "type": "string", "description": "User-assigned session name" },
+        "filePath": { "type": "string", "description": "Path to the full JSON chat session file" },
+        "mdFilePath": { "type": "string", "description": "Path to the markdown export" }
+      }
+    }
+  }
+}
