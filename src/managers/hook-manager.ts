@@ -215,15 +215,21 @@ export class HookManager {
 
   /**
    * Execute matching after-hooks for a completed tool call.
-   * Hook results are NOT injected into LLM conversation.
+   * When a hook uses @tool: (inject) and injectToolResult is provided, the hook
+   * result is injected into the conversation so the agent sees it as context.
    *
    * Client hooks only fire when not suspended.
    * Ablation hooks always fire when loaded (even when suspended).
    */
   async executeAfterHooks(
     toolName: string,
-    toolResult: ToolExecutionResult,
+    toolResult: ToolExecutionResult & { toolInput?: Record<string, unknown> },
     executeTool: (name: string, args: Record<string, unknown>) => Promise<ToolExecutionResult>,
+    injectToolResult?: (
+      name: string,
+      args: Record<string, unknown>,
+      result: { displayText: string; contentBlocks: Array<{ type: string; text?: string; data?: string; mimeType?: string }> },
+    ) => void,
   ): Promise<void> {
     if (this.executing) return;
 
@@ -243,7 +249,7 @@ export class HookManager {
         if (!hook.enabled) continue;
         if (hook.after !== toolName) continue;
 
-        if (hook.when && !matchesWhenCondition(hook.when, toolResult.displayText)) {
+        if (hook.when && !matchesWhenCondition(hook.when, toolResult.displayText, toolResult.toolInput)) {
           continue;
         }
 
@@ -261,7 +267,16 @@ export class HookManager {
         this.logger.log(`[Hook triggered: ${parsed.toolName}]\n`, { type: 'info' });
 
         try {
-          await executeTool(parsed.toolName, parsed.args);
+          const hookToolResult = await executeTool(parsed.toolName, parsed.args);
+          if (
+            parsed.injectResult &&
+            injectToolResult &&
+            hookToolResult.contentBlocks &&
+            hookToolResult.contentBlocks.length > 0
+          ) {
+            injectToolResult(parsed.toolName, parsed.args, hookToolResult);
+            this.logger.log(`[Hook result injected into context]\n`, { type: 'info' });
+          }
           this.logger.log(`[Hook completed: ${parsed.toolName}]\n`, { type: 'info' });
         } catch (error: any) {
           this.logger.log(`[Hook failed: ${error.message}]\n`, { type: 'warning' });

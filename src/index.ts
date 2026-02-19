@@ -50,7 +50,7 @@ import { OrchestratorIPCServer } from './ipc-server.js';
 import { ElicitationHandler } from './handlers/elicitation-handler.js';
 import { formatToolCall, formatJSON, formatCompactJSON } from './utils/formatting.js';
 import { TokenManager } from './core/token-manager.js';
-import { MCPToolExecutor } from './core/tool-executor.js';
+import { MCPToolExecutor, type ToolExecutionResult } from './core/tool-executor.js';
 import readline from 'readline/promises';
 import { existsSync, readFileSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
@@ -633,73 +633,18 @@ export class MCPClient {
     toolInput: Record<string, unknown>,
     result: { displayText: string; contentBlocks: Array<{ type: string; text?: string; data?: string; mimeType?: string }> },
   ): void {
-    // Generate a synthetic tool_use ID
-    const toolUseId = `injected_${Date.now()}_${Math.random().toString(36).substring(2, 9)}`;
+    const textContent = result.contentBlocks
+      .filter((b) => b.type === 'text' && b.text)
+      .map((b) => b.text!)
+      .join('\n') || result.displayText;
 
-    // Create a synthetic assistant message with tool_use block
-    // Note: tool_calls uses 'arguments' (JSON string), content_blocks uses 'input' (object)
-    const assistantMessage: Message = {
-      role: 'assistant',
-      content: '', // No text content, just tool use
-      tool_calls: [{
-        id: toolUseId,
-        name: toolName,
-        arguments: JSON.stringify(toolInput),
-      }],
-      content_blocks: [{
-        type: 'tool_use',
-        id: toolUseId,
-        name: toolName,
-        input: toolInput,
-      }],
-    };
-
-    // Convert content blocks to Anthropic format for tool_result
-    let toolResultContent: string | Array<{ type: string; [key: string]: any }>;
-    const hasImages = result.contentBlocks.some(b => b.type === 'image');
-
-    if (hasImages) {
-      toolResultContent = result.contentBlocks.map((block) => {
-        if (block.type === 'text' && block.text) {
-          return { type: 'text', text: block.text };
-        } else if (block.type === 'image' && block.data && block.mimeType) {
-          return {
-            type: 'image',
-            source: {
-              type: 'base64',
-              media_type: block.mimeType,
-              data: block.data,
-            },
-          };
-        }
-        return { type: 'text', text: '[Unknown content]' };
-      });
-    } else {
-      // Text-only result - use simple string
-      toolResultContent = result.contentBlocks
-        .filter((b) => b.type === 'text' && b.text)
-        .map((b) => b.text!)
-        .join('\n');
-    }
-
-    // Create user message with tool_result
-    const userMessage: Message = {
+    const argsStr = Object.keys(toolInput).length > 0 ? ` with args ${JSON.stringify(toolInput)}` : '';
+    const message: Message = {
       role: 'user',
-      content: '',
-      tool_results: [{
-        type: 'tool_result',
-        tool_use_id: toolUseId,
-        content: toolResultContent,
-      }],
+      content: `[Client hook executed ${toolName}${argsStr}]\nResult: ${textContent}`,
     };
 
-    // Add both messages to conversation
-    this.messages.push(assistantMessage);
-    this.messages.push(userMessage);
-
-    // Note: We don't record injected results to chat history since they're
-    // synthetic entries for ablation purposes. The messages are in the
-    // conversation context which is what matters for the agent.
+    this.messages.push(message);
   }
 
   /**
@@ -2101,6 +2046,11 @@ export class MCPClient {
         promptEvalRate?: number;
       };
     } | null;
+    pendingHookChecks: Array<{
+      toolName: string;
+      displayText: string;
+      toolInput: Record<string, unknown>;
+    }>;
   }> {
     this.logger.log(consoleStyles.assistant);
 
@@ -2113,6 +2063,13 @@ export class MCPClient {
       toolUseId?: string;
       toolCallId?: string;
       content: string;
+    }> = [];
+
+    // Collect tool completions for deferred hook execution after the agent responds.
+    const pendingHookChecks: Array<{
+      toolName: string;
+      displayText: string;
+      toolInput: Record<string, unknown>;
     }> = [];
     const isAnthropic = this.modelProvider.getProviderName() === 'anthropic';
 
@@ -2272,13 +2229,15 @@ export class MCPClient {
           toolId, // Pass the tool_use_id for pairing with assistant's tool_use block
         );
 
-        // Execute after-hooks (client-side hooks that fire after tool result is displayed)
-        const hookManager = this.hookManager;
-        if (hookManager && !hookManager.isExecuting()) {
-          const hookResult = { displayText: chunk.result || '', contentBlocks: [], hasImages: false };
-          await hookManager.executeAfterHooks(chunk.toolName, hookResult, (name, args) =>
-            this.toolExecutor.executeMCPTool(name, args, true),
-          );
+        // Collect tool completions for deferred hook execution.
+        // Hooks run after the agent's full response so the CLI shows them
+        // sequentially and the agent can react in a follow-up turn.
+        if (this.hookManager && !this.hookManager.isExecuting()) {
+          pendingHookChecks.push({
+            toolName: chunk.toolName,
+            displayText: chunk.result || '',
+            toolInput: (chunk as any).toolInput,
+          });
         }
 
         continue;
@@ -2739,6 +2698,8 @@ export class MCPClient {
           tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
         }
 
+        // Note: hooks are executed by the caller after the agent's response completes.
+
         // Check if we need to summarize after this response
         if (this.tokenManager.shouldSummarize()) {
           await this.tokenManager.autoSummarize();
@@ -2812,8 +2773,8 @@ export class MCPClient {
       }
     }
 
-    // Return any remaining pending tool results and last token usage so they can be flushed/logged by caller
-    return { pendingToolResults, lastTokenUsage };
+    // Return remaining state so caller can flush/log appropriately
+    return { pendingToolResults, lastTokenUsage, pendingHookChecks };
   }
 
   async processQuery(query: string, isSystemPrompt: boolean = false, attachments?: Array<{ path: string; fileName: string; ext: string; mediaType: string }>, cancellationCheck?: () => boolean, observer?: StreamObserver) {
@@ -2902,7 +2863,7 @@ export class MCPClient {
       // Process the stream and collect final assistant message
       // Don't break immediately on cancellation - let current chunk finish
       // Pass initial token count for tracking
-      const { pendingToolResults, lastTokenUsage } = await this.processToolUseStream(stream, cancellationCheck, tokenCountBeforeStream, observer);
+      const { pendingToolResults, lastTokenUsage, pendingHookChecks } = await this.processToolUseStream(stream, cancellationCheck, tokenCountBeforeStream, observer);
 
       // Flush any remaining pending tool results (in case we aborted before they were added)
       if (pendingToolResults && pendingToolResults.length > 0) {
@@ -3063,6 +3024,53 @@ export class MCPClient {
           lastTokenUsage.cacheReadTokens,
           lastTokenUsage.ollamaMetrics
         );
+      }
+
+      // Execute deferred hooks after the agent's full response.
+      // Hooks run visibly in the CLI, inject results, and trigger another agent turn.
+      if (pendingHookChecks && pendingHookChecks.length > 0 &&
+          this.hookManager && !(cancellationCheck && cancellationCheck())) {
+        const hookInjections: Array<{
+          name: string;
+          args: Record<string, unknown>;
+          result: { displayText: string; contentBlocks: Array<{ type: string; text?: string; data?: string; mimeType?: string }> };
+        }> = [];
+
+        for (const check of pendingHookChecks) {
+          const hookResult: ToolExecutionResult & { toolInput?: Record<string, unknown> } = {
+            displayText: check.displayText,
+            contentBlocks: [],
+            hasImages: false,
+            toolInput: check.toolInput,
+          };
+          await this.hookManager.executeAfterHooks(
+            check.toolName,
+            hookResult,
+            (name, args) => this.toolExecutor.executeMCPTool(name, args, true),
+            (name, args, result) => { hookInjections.push({ name, args, result }); },
+          );
+        }
+
+        // Inject results and trigger another agent turn
+        if (hookInjections.length > 0) {
+          for (const inj of hookInjections) {
+            this.injectToolResult(inj.name, inj.args, inj.result);
+          }
+
+          const hookContinueStream = (this.modelProvider as any).createMessageStreamWithToolUse(
+            this.messages,
+            this.model,
+            this.tools,
+            8192,
+            toolExecutor,
+            (() => {
+              const maxIter = this.preferencesManager.getMaxIterations();
+              return maxIter === -1 ? 999999 : maxIter;
+            })(),
+            cancellationCheck,
+          );
+          await this.processToolUseStream(hookContinueStream, cancellationCheck, this.currentTokenCount, observer);
+        }
       }
 
       // Check todo status if todo mode is enabled and agent is trying to exit

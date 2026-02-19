@@ -138,29 +138,38 @@ export function parsePythonArgs(argsStr: string): Record<string, unknown> {
 
 /**
  * Check if a tool result matches a `when` condition from a post-tool hook.
- * Strips ANSI codes from displayText, parses as JSON, and checks that every
- * key/value in `when` exists in the parsed result (shallow equality).
+ * Matches against displayText (tool result) first. If that fails or is empty,
+ * falls back to toolInput — useful when the tool returns {} but the meaningful
+ * data (phase, status, action) is in the input arguments.
  */
 export function matchesWhenCondition(
   when: Record<string, unknown>,
   displayText: string | undefined,
+  toolInput?: Record<string, unknown>,
 ): boolean {
-  if (!displayText) return false;
-
-  try {
-    // Strip ANSI escape codes
-    const clean = displayText.replace(/\u001b\[[0-9;]*m/g, '');
-    const parsed = JSON.parse(clean);
-
-    if (typeof parsed !== 'object' || parsed === null) return false;
-
-    // Every key in `when` must match the corresponding field in the result
+  const tryMatch = (obj: Record<string, unknown>): boolean => {
+    if (typeof obj !== 'object' || obj === null) return false;
     for (const [key, value] of Object.entries(when)) {
-      if (parsed[key] !== value) return false;
+      if (obj[key] !== value) return false;
     }
-
     return true;
-  } catch {
-    return false;
+  };
+
+  // First try matching against tool result (displayText)
+  if (displayText) {
+    try {
+      const clean = displayText.replace(/\u001b\[[0-9;]*m/g, '');
+      const parsed = JSON.parse(clean);
+      if (tryMatch(parsed as Record<string, unknown>)) return true;
+    } catch {
+      // Not valid JSON, continue to fallback
+    }
   }
+
+  // Fall back to tool input when result is empty or doesn't match
+  if (toolInput && Object.keys(toolInput).length > 0 && tryMatch(toolInput)) {
+    return true;
+  }
+
+  return false;
 }

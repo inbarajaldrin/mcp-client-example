@@ -397,9 +397,9 @@ export class AnthropicProvider implements ModelProvider {
     // - Filter out assistant messages with only tool_calls (no content) - Anthropic doesn't store these
     const anthropicMessages = messages
       .filter((msg) => {
-        // Skip assistant messages that only have tool_calls but no content
-        // Anthropic handles tool calls via stream, not in message history
-        if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0 && !msg.content) {
+        // Skip assistant messages that only have tool_calls but no content,
+        // unless they have content_blocks (e.g. injected hook tool_use messages)
+        if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0 && !msg.content && !msg.content_blocks) {
           return false;
         }
         return true;
@@ -803,9 +803,9 @@ export class AnthropicProvider implements ModelProvider {
     // - Filter out assistant messages with only tool_calls (no content) - Anthropic doesn't store these
     const anthropicMessages = messages
       .filter((msg) => {
-        // Skip assistant messages that only have tool_calls but no content
-        // Anthropic handles tool calls via stream, not in message history
-        if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0 && !msg.content) {
+        // Skip assistant messages that only have tool_calls but no content,
+        // unless they have content_blocks (e.g. injected hook tool_use messages)
+        if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0 && !msg.content && !msg.content_blocks) {
           return false;
         }
         return true;
@@ -843,7 +843,9 @@ export class AnthropicProvider implements ModelProvider {
     // Convert messages to Anthropic format (same as convertToAnthropicMessages)
     const anthropicMessages = messages
       .filter((msg) => {
-        if (msg.role === 'assistant' && msg.tool_calls && !msg.content) {
+        // Remove assistant messages with only tool_calls and no meaningful content,
+        // but keep those with content_blocks (e.g. injected hook tool_use messages)
+        if (msg.role === 'assistant' && msg.tool_calls && !msg.content && !msg.content_blocks) {
           return false;
         }
         return true;

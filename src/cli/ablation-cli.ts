@@ -2241,7 +2241,7 @@ export class AblationCLI {
                 for (const hook of hooks) {
                   if (hook.after === cmdResult.toolExecResult.toolName) {
                     // Check when condition if present — skip hook if result doesn't match
-                    if (hook.when && !matchesWhenCondition(hook.when, cmdResult.toolExecResult.displayText)) {
+                    if (hook.when && !matchesWhenCondition(hook.when, cmdResult.toolExecResult.displayText, cmdResult.toolExecResult.args)) {
                       continue;
                     }
                     // Check for abort before hook
