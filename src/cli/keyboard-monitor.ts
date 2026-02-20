@@ -228,4 +228,90 @@ export class KeyboardMonitor {
     }
     this._isMonitoring = false;
   }
+
+  /**
+   * Collect a line of input from the user while staying in raw mode.
+   * This prevents Ctrl+C from sending a real SIGINT to child processes.
+   * Ctrl+C is handled as a JS-level event (same as during monitoring).
+   *
+   * Must be called while the keyboard monitor is active (raw mode on).
+   * Temporarily replaces the key handler to echo characters and collect input.
+   */
+  collectInput(prompt: string): Promise<string | null> {
+    return new Promise((resolve) => {
+      if (!this._isMonitoring || !process.stdin.isTTY) {
+        resolve(null);
+        return;
+      }
+
+      // Write prompt
+      process.stdout.write(prompt);
+
+      let buffer = '';
+
+      // Temporarily pause normal monitoring and install input handler
+      const stdin = process.stdin;
+
+      // Remove existing listeners temporarily
+      const existingListeners = stdin.listeners('data').slice();
+      stdin.removeAllListeners('data');
+
+      const inputHandler = (key: string) => {
+        // Ctrl+C — emit JS SIGINT (stays in raw mode, no OS signal)
+        if (key === '\x03') {
+          process.stdout.write('\n');
+          process.emit('SIGINT', 'SIGINT');
+          // Restore listeners and resolve null to signal abort
+          stdin.removeListener('data', inputHandler);
+          for (const listener of existingListeners) {
+            stdin.on('data', listener as (...args: any[]) => void);
+          }
+          resolve(null);
+          return;
+        }
+
+        // Enter — submit input
+        if (key === '\r' || key === '\n') {
+          process.stdout.write('\n');
+          stdin.removeListener('data', inputHandler);
+          for (const listener of existingListeners) {
+            stdin.on('data', listener as (...args: any[]) => void);
+          }
+          resolve(buffer);
+          return;
+        }
+
+        // Backspace
+        if (key === '\x7f' || key === '\b') {
+          if (buffer.length > 0) {
+            buffer = buffer.slice(0, -1);
+            // Erase character on screen: move back, write space, move back
+            process.stdout.write('\b \b');
+          }
+          return;
+        }
+
+        // Escape — clear buffer
+        if (key === '\x1b') {
+          // Clear displayed text
+          while (buffer.length > 0) {
+            process.stdout.write('\b \b');
+            buffer = buffer.slice(0, -1);
+          }
+          return;
+        }
+
+        // Ignore other control characters
+        if (key.charCodeAt(0) < 32) {
+          return;
+        }
+
+        // Printable character — echo and buffer
+        buffer += key;
+        process.stdout.write(key);
+      };
+
+      stdin.on('data', inputHandler);
+    });
+  }
 }

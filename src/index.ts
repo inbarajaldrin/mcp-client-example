@@ -342,12 +342,14 @@ export class MCPClient {
     const connectionErrors: Array<{ name: string; error: any }> = [];
 
     for (const serverConfig of this.serverConfigs) {
-      // Skip servers that are disabled in config — they're kept in serverConfigs
-      // so features like todo mode can connect them on-demand via enableTodoMode()
-      if (serverConfig.disabledInConfig) continue;
+      // Connect ALL servers regardless of disabled status — disabled servers
+      // are still available for direct tool execution (e.g. @tool-exec: in ablation).
+      // The disabledInConfig flag only controls agent-level tool visibility
+      // (filtered in initMCPTools).
 
       try {
-        this.logger.log(`Connecting to server "${serverConfig.name}"...\n`, {
+        const label = serverConfig.disabledInConfig ? ' (disabled)' : '';
+        this.logger.log(`Connecting to server "${serverConfig.name}"${label}...\n`, {
           type: 'info',
         });
 
@@ -781,12 +783,12 @@ export class MCPClient {
 
     const connectionErrors: Array<{ name: string; error: any }> = [];
 
-    // Reconnect to servers
+    // Reconnect to ALL servers (disabled servers stay connected for direct
+    // tool execution; agent visibility is controlled by initMCPTools filtering)
     for (const serverConfig of this.serverConfigs) {
-      if (serverConfig.disabledInConfig) continue;
-
       try {
-        this.logger.log(`Connecting to server "${serverConfig.name}"...\n`, {
+        const label = serverConfig.disabledInConfig ? ' (disabled)' : '';
+        this.logger.log(`Connecting to server "${serverConfig.name}"${label}...\n`, {
           type: 'info',
         });
 

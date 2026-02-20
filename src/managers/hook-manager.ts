@@ -46,6 +46,7 @@ export class HookManager {
   private ablationHooks: ClientHook[] = [];
   private currentPhaseName: string = '';
   private phaseCompleteRequested: boolean = false;
+  private abortRunRequested: boolean = false;
 
   constructor(logger?: Logger) {
     this.logger = logger || new Logger({ mode: 'verbose' });
@@ -179,6 +180,17 @@ export class HookManager {
   /** Reset phase complete flag for the next phase */
   resetPhaseComplete(): void { this.phaseCompleteRequested = false; }
 
+  // ==================== Abort Run Signaling ====================
+
+  /** Signal that the current ablation run should abort */
+  requestAbortRun(): void { this.abortRunRequested = true; }
+
+  /** Check if abort run has been requested */
+  isAbortRunRequested(): boolean { return this.abortRunRequested; }
+
+  /** Reset abort run flag */
+  resetAbortRun(): void { this.abortRunRequested = false; }
+
   // ==================== Runtime Hook Execution ====================
 
   /** Whether hook execution is currently in progress (recursion guard) */
@@ -205,8 +217,10 @@ export class HookManager {
       return true;
     }
 
-    // @abort — skip in client hook context (ablation handles separately)
+    // @abort — signal that the current ablation run should abort
     if (trimmed === '@abort') {
+      this.logger.log(`[Hook abort: skipping remaining phases for current model]\n`, { type: 'warning' });
+      this.abortRunRequested = true;
       return true;
     }
 

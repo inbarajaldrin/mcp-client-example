@@ -101,6 +101,8 @@ export interface AblationCLICallbacks {
   startKeyboardMonitor: () => void;
   /** Stop keyboard monitor */
   stopKeyboardMonitor: () => void;
+  /** Collect a line of input while staying in raw mode (prevents SIGINT to children) */
+  collectInput: (prompt: string) => Promise<string | null>;
   /** Get HIL manager */
   getHILManager: () => any; // HumanInTheLoopManager
 }
@@ -1141,6 +1143,16 @@ export class AblationCLI {
       return { abortRun: true };
     }
 
+    // Handle @wait:<seconds> — pause execution
+    const waitMatch = trimmedCommand.match(/^@wait:(\d+(?:\.\d+)?)$/);
+    if (waitMatch) {
+      const waitSeconds = parseFloat(waitMatch[1]);
+      this.logger.log(`    Waiting ${waitSeconds}s...\n`, { type: 'info' });
+      await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
+      this.logger.log(`    Done waiting.\n`, { type: 'info' });
+      return {};
+    }
+
     // Handle direct tool calls (@tool: or @tool-exec:)
     if (trimmedCommand.startsWith('@tool:') || trimmedCommand.startsWith('@tool-exec:')) {
       const parsed = parseDirectToolCall(trimmedCommand);
@@ -1290,6 +1302,7 @@ export class AblationCLI {
                 hookMgr.loadAblationHooks(phaseHooks);
                 hookMgr.setCurrentPhaseName(phaseName);
                 hookMgr.resetPhaseComplete();
+                hookMgr.resetAbortRun();
                 ablHooksLoaded = true;
               }
             }
@@ -1433,6 +1446,7 @@ export class AblationCLI {
           hookManager.loadAblationHooks(phaseHooks);
           hookManager.setCurrentPhaseName(phaseName);
           hookManager.resetPhaseComplete();
+          hookManager.resetAbortRun();
           ablationHooksLoaded = true;
         }
       }
@@ -1443,34 +1457,34 @@ export class AblationCLI {
           trimmedCommand,
           false,
           pendingAttachments.length > 0 ? pendingAttachments : undefined,
-          () => hookManager.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested(),
+          () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested(),
         );
 
         // Handle soft interrupt (Ctrl+A): let user send messages to the agent
+        // Stay in raw mode to prevent Ctrl+C from sending OS SIGINT to child processes
         while (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()) {
           this.callbacks.resetInterrupt();
-          this.callbacks.stopKeyboardMonitor();
-
-          const rl = this.callbacks.getReadline();
-          if (!rl) break;
 
           this.logger.log('\n  ⏸ Agent paused. Type a message to send to the agent, or press Enter to resume ablation.\n', { type: 'warning' });
-          const userInput = (await rl.question('  You: ')).trim();
+          const userInput = await this.callbacks.collectInput('  You: ');
 
-          // Restart keyboard monitor for next iteration
-          this.callbacks.startKeyboardMonitor();
+          // null means Ctrl+C was pressed — treat as abort
+          if (userInput === null) {
+            break;
+          }
 
-          if (!userInput) {
+          const trimmedInput = userInput.trim();
+          if (!trimmedInput) {
             // Empty input — resume ablation
             break;
           }
 
           // Send user's message to the agent (with same hooks active)
           await this.client.processQuery(
-            userInput,
+            trimmedInput,
             false,
             undefined,
-            () => hookManager.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested(),
+            () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested(),
           );
         }
       } finally {
@@ -1481,6 +1495,12 @@ export class AblationCLI {
       }
       // Clear attachments after use
       this.callbacks.setPendingAttachments([]);
+
+      // Check if abort run was signaled during processQuery
+      if (hookManager.isAbortRunRequested()) {
+        hookManager.resetAbortRun();
+        return { abortRun: true };
+      }
 
       // Check if phase completion was signaled during processQuery
       if (hookManager.isPhaseCompleteRequested()) {
@@ -2296,6 +2316,12 @@ export class AblationCLI {
                 break;
               }
 
+              // Abort run signaled (from agent-driven hook via HookManager)
+              if (cmdResult.abortRun) {
+                abortCurrentModel = true;
+                break;
+              }
+
               // Execute after-hooks (only for @tool-exec/@tool commands, no recursion)
               if (cmdResult.toolExecResult) {
                 const hooks = this.ablationManager.getHooksForPhase(ablation, phase.name);
@@ -2435,6 +2461,11 @@ export class AblationCLI {
                 const logsDir = this.ablationManager.createLogsDirectory(runDir, phase.name, getRunIter(iteration));
                 result.logFile = this.ablationManager.saveToolExecLog(runDir, logsDir, toolExecLog, phase.name);
               }
+
+              this.logger.log(
+                `\n  ⚠️ Skipping remaining phases for ${modelKey} due to @abort\n`,
+                { type: 'warning' },
+              );
 
               modelAborted = true;
               run.results.push(result);
