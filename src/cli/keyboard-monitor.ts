@@ -119,11 +119,11 @@ export class KeyboardMonitor {
       if (key === '\x01' && !this._abortRequested) {
         this.logger.log(
           '\n' +
-            chalk.bold.red(
-              '🛑 Abort requested (Ctrl+A) - will finish current response then stop...',
+            chalk.bold.yellow(
+              '⏸ Interrupt requested (Ctrl+A) - will finish current response then pause...',
             ) +
             '\n',
-          { type: 'error' },
+          { type: 'warning' },
         );
         this._abortRequested = true;
 

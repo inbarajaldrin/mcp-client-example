@@ -108,6 +108,11 @@
         "mcpConfigPath": {
           "type": "string",
           "description": "Override MCP config path for this ablation"
+        },
+        "clearContextBetweenPhases": {
+          "type": "boolean",
+          "default": true,
+          "description": "When true (default), clears conversation context between phases. When false, conversation carries over across phases for the same model."
         }
       }
     },

@@ -154,11 +154,15 @@ export class MCPClientCLI {
         getAttachmentCLI: () => this.attachmentCLI,
         displayHelp: () => this.displayHelp(),
         displaySettings: () => this.displaySettings(),
-        // Check both keyboard monitor (Ctrl+A) and signal handler (Ctrl+C in abort mode)
-        isAbortRequested: () => this.keyboardMonitor.abortRequested || this.signalHandler.abortRequested,
+        // Hard abort: Ctrl+C in abort mode (signal handler)
+        isAbortRequested: () => this.signalHandler.abortRequested,
+        // Soft interrupt: Ctrl+A (keyboard monitor) — pause for user input
+        isInterruptRequested: () => this.keyboardMonitor.abortRequested,
         resetAbort: () => {
-          this.keyboardMonitor.abortRequested = false;
           this.signalHandler.resetAbort();
+        },
+        resetInterrupt: () => {
+          this.keyboardMonitor.abortRequested = false;
         },
         setAbortMode: (enabled: boolean) => this.signalHandler.setAbortMode(enabled),
         startKeyboardMonitor: () => this.keyboardMonitor.start(),

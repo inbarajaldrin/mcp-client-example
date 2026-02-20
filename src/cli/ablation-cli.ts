@@ -3,7 +3,7 @@
  */
 
 import readline from 'readline/promises';
-import { cpSync, existsSync } from 'fs';
+import { cpSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -87,13 +87,17 @@ export interface AblationCLICallbacks {
   displayHelp: () => void;
   /** Display settings */
   displaySettings: () => Promise<void>;
-  /** Check if abort was requested (Ctrl+A or Ctrl+C in abort mode) */
+  /** Check if hard abort was requested (Ctrl+C in abort mode) */
   isAbortRequested: () => boolean;
-  /** Reset abort state */
+  /** Check if soft interrupt was requested (Ctrl+A — pause for user input) */
+  isInterruptRequested: () => boolean;
+  /** Reset abort state (Ctrl+C flag) */
   resetAbort: () => void;
+  /** Reset interrupt state (Ctrl+A flag) */
+  resetInterrupt: () => void;
   /** Enable abort mode (Ctrl+C sets flag instead of exiting) */
   setAbortMode: (enabled: boolean) => void;
-  /** Start keyboard monitor to capture Ctrl+A for abort */
+  /** Start keyboard monitor to capture Ctrl+A for interrupt */
   startKeyboardMonitor: () => void;
   /** Stop keyboard monitor */
   stopKeyboardMonitor: () => void;
@@ -339,6 +343,13 @@ export class AblationCLI {
       await rl.question('  Number of repeat runs (default 1): ')
     ).trim();
     const runs = runsStr ? parseInt(runsStr) || 1 : 1;
+
+    this.logger.log('\n  When disabled, conversation history carries over between phases\n', { type: 'info' });
+    this.logger.log('  for the same model (one continuous chat instead of per-phase chats).\n', { type: 'info' });
+    const clearCtxStr = (
+      await rl.question('  Clear context between phases? (Y/n, default yes): ')
+    ).trim().toLowerCase();
+    const clearContextBetweenPhases = (clearCtxStr === 'n' || clearCtxStr === 'no') ? false : undefined;
 
     // Step 4: Define Phases
     this.logger.log('\nStep 4: Define Phases (command sequences)\n', {
@@ -804,6 +815,7 @@ export class AblationCLI {
         settings: {
           mcpConfigPath,
           maxIterations,
+          ...(clearContextBetweenPhases === false ? { clearContextBetweenPhases: false } : {}),
         },
         ...(runs > 1 ? { runs } : {}),
         ...(ablationArguments.length > 0 ? { arguments: ablationArguments } : {}),
@@ -1290,10 +1302,34 @@ export class AblationCLI {
                     msg.content.text,
                     false,
                     undefined,
-                    () => hookMgr.isPhaseCompleteRequested(),
+                    () => hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested(),
                   );
-                  // Stop processing further messages if phase complete
-                  if (hookMgr.isPhaseCompleteRequested()) break;
+
+                  // Handle soft interrupt (Ctrl+A): let user send messages to the agent
+                  while (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()) {
+                    this.callbacks.resetInterrupt();
+                    this.callbacks.stopKeyboardMonitor();
+
+                    const rl = this.callbacks.getReadline();
+                    if (!rl) break;
+
+                    this.logger.log('\n  ⏸ Agent paused. Type a message to send to the agent, or press Enter to resume ablation.\n', { type: 'warning' });
+                    const userInput = (await rl.question('  You: ')).trim();
+
+                    this.callbacks.startKeyboardMonitor();
+
+                    if (!userInput) break;
+
+                    await this.client.processQuery(
+                      userInput,
+                      false,
+                      undefined,
+                      () => hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested(),
+                    );
+                  }
+
+                  // Stop processing further messages if phase complete or aborted
+                  if (hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested()) break;
                 }
               }
             } finally {
@@ -1407,8 +1443,36 @@ export class AblationCLI {
           trimmedCommand,
           false,
           pendingAttachments.length > 0 ? pendingAttachments : undefined,
-          () => hookManager.isPhaseCompleteRequested(),
+          () => hookManager.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested(),
         );
+
+        // Handle soft interrupt (Ctrl+A): let user send messages to the agent
+        while (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()) {
+          this.callbacks.resetInterrupt();
+          this.callbacks.stopKeyboardMonitor();
+
+          const rl = this.callbacks.getReadline();
+          if (!rl) break;
+
+          this.logger.log('\n  ⏸ Agent paused. Type a message to send to the agent, or press Enter to resume ablation.\n', { type: 'warning' });
+          const userInput = (await rl.question('  You: ')).trim();
+
+          // Restart keyboard monitor for next iteration
+          this.callbacks.startKeyboardMonitor();
+
+          if (!userInput) {
+            // Empty input — resume ablation
+            break;
+          }
+
+          // Send user's message to the agent (with same hooks active)
+          await this.client.processQuery(
+            userInput,
+            false,
+            undefined,
+            () => hookManager.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested(),
+          );
+        }
       } finally {
         // Cleanup: remove temporary ablation hooks
         if (ablationHooksLoaded) {
@@ -1548,6 +1612,9 @@ export class AblationCLI {
 
       if (ablation.settings.mcpConfigPath) {
         this.logger.log(`  MCP Config: ${ablation.settings.mcpConfigPath}\n`, { type: 'info' });
+      }
+      if (ablation.settings.clearContextBetweenPhases === false) {
+        this.logger.log(`  Context: Persistent across phases (not cleared between phases)\n`, { type: 'info' });
       }
 
       if (ablation.arguments && ablation.arguments.length > 0) {
@@ -1949,8 +2016,9 @@ export class AblationCLI {
     // Enable abort mode - Ctrl+C will set abort flag instead of exiting
     this.callbacks.setAbortMode(true);
 
-    // Reset abort state and start keyboard monitor for Ctrl+A support
+    // Reset abort/interrupt state and start keyboard monitor for Ctrl+A support
     this.callbacks.resetAbort();
+    this.callbacks.resetInterrupt();
     this.callbacks.startKeyboardMonitor();
 
     // Suspend client-side hooks during ablation runs (ablation manages its own hooks)
@@ -1967,13 +2035,9 @@ export class AblationCLI {
     // runIteration passed to directory helpers: undefined when iterations=1 (preserves old paths)
     const getRunIter = (iter: number) => hasMultipleIterations ? iter : undefined;
 
-    // Track models that should be skipped for remaining phases (via @abort)
-    const skippedModels = new Set<string>();
-
-    // Execute: runIteration > phase > model
+    // Execute: iteration > model > phase
     for (let iteration = 1; iteration <= iterations; iteration++) {
       if (shouldBreak) break;
-      skippedModels.clear();
 
       if (hasMultipleIterations) {
         const iterLine = `ITERATION ${iteration}/${iterations}`;
@@ -1992,10 +2056,7 @@ export class AblationCLI {
         );
       }
 
-      // Restore outputs from snapshot once per iteration
-      this.ablationManager.restoreOutputsFromSnapshot(runDir);
-
-      for (const phase of ablation.phases) {
+      for (const model of modelsToRun) {
         if (shouldBreak) break;
 
         // Check for abort (Ctrl+A or Ctrl+C)
@@ -2004,14 +2065,22 @@ export class AblationCLI {
           shouldBreak = true;
           break;
         }
-        const phaseDir = this.ablationManager.createPhaseDirectory(
-          runDir,
-          phase.name,
-          getRunIter(iteration),
-        );
 
-        for (const model of modelsToRun) {
-          if (shouldBreak) break;
+        const modelKey = `${model.provider}/${model.model}`;
+
+        // Restore outputs per model (each model starts with clean outputs)
+        this.ablationManager.restoreOutputsFromSnapshot(runDir);
+
+        // Create provider instance and switch to this model once (skip in dry run)
+        if (!ablation.dryRun) {
+          const provider = this.createProviderInstance(model.provider);
+          await this.client.switchProviderAndModel(provider, model.model);
+        }
+
+        let modelAborted = false;
+
+        for (const phase of ablation.phases) {
+          if (shouldBreak || modelAborted) break;
 
           // Check for abort (Ctrl+A or Ctrl+C)
           if (this.callbacks.isAbortRequested()) {
@@ -2020,21 +2089,19 @@ export class AblationCLI {
             break;
           }
 
-          const modelKey = `${model.provider}/${model.model}`;
-
-          // Skip models marked by @abort from a previous phase
-          if (skippedModels.has(modelKey)) {
-            runNumber++;
-            const result: AblationRunResult = {
-              phase: phase.name,
-              model,
-              status: 'skipped',
-            };
-            if (hasMultipleIterations) result.run = iteration;
-            run.results.push(result);
-            this.logger.log(`\n  ⏭ Skipping ${phase.name} + ${modelKey} (aborted in earlier phase)\n`, { type: 'warning' });
-            continue;
+          // Conditional context clearing between phases (not for first phase)
+          const isFirstPhase = phase === ablation.phases[0];
+          if (!isFirstPhase && !ablation.dryRun) {
+            if (ablation.settings.clearContextBetweenPhases !== false) {
+              this.client.clearContext();
+            }
           }
+
+          const phaseDir = this.ablationManager.createPhaseDirectory(
+            runDir,
+            phase.name,
+            getRunIter(iteration),
+          );
 
           runNumber++;
           const modelShortName = ablation.dryRun ? 'dry-run' : this.ablationManager.getModelShortName(model);
@@ -2086,12 +2153,6 @@ export class AblationCLI {
           const phaseOnEnd = phase.onEnd ? sub(phase.onEnd) : undefined;
 
           try {
-            // Create provider instance and switch to this model (skip in dry run)
-            if (!ablation.dryRun) {
-              const provider = this.createProviderInstance(model.provider);
-              await this.client.switchProviderAndModel(provider, model.model);
-            }
-
             // Execute onStart lifecycle hooks
             let aborted = false;
             let abortCurrentModel = false;
@@ -2362,7 +2423,7 @@ export class AblationCLI {
               break;
             }
 
-            // @abort triggered by hook — skip remaining phases for this model but continue others
+            // @abort triggered by hook — skip remaining phases for this model
             if (abortCurrentModel) {
               await this.client.cleanupVideoRecording();
 
@@ -2375,9 +2436,9 @@ export class AblationCLI {
                 result.logFile = this.ablationManager.saveToolExecLog(runDir, logsDir, toolExecLog, phase.name);
               }
 
-              skippedModels.add(modelKey);
+              modelAborted = true;
               run.results.push(result);
-              continue; // continue to next model, don't break all loops
+              break; // break phase loop, continue to next model
             }
 
             // Get token usage (skip in dry run - no model means no tokens)
@@ -2400,7 +2461,8 @@ export class AblationCLI {
             await this.client.cleanupVideoRecording();
 
             // Save chat history and copy to phase directory (skip in dry run)
-            if (!ablation.dryRun) {
+            // When context persists across phases, defer saving until all phases complete
+            if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases !== false) {
               const chatHistoryManager = this.client.getChatHistoryManager();
               const chatMetadata = chatHistoryManager.endSession(
                 `Ablation run: ${phase.name} with ${model.provider}/${model.model}`,
@@ -2472,18 +2534,51 @@ export class AblationCLI {
 
           run.results.push(result);
 
-          // On failure: skip remaining phases for this model, continue with others
+          // On failure: skip remaining phases for this model
           if (result.status === 'failed') {
-            skippedModels.add(modelKey);
+            modelAborted = true;
             this.logger.log(
               `\n  ⚠️ Skipping remaining phases for ${modelKey} due to error: ${result.error}\n`,
               { type: 'warning' },
             );
+            break; // break phase loop, continue to next model
+          }
+
+          // Capture outputs produced during this phase
+          this.ablationManager.captureRunOutputs(runDir, phase.name, model, getRunIter(iteration));
+        }
+
+        // When context persists across phases, save the cumulative chat after all phases
+        if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases === false) {
+          const chatHistoryManager = this.client.getChatHistoryManager();
+          const chatMetadata = chatHistoryManager.endSession(
+            `Ablation run: all phases with ${model.provider}/${model.model}`,
+          );
+
+          if (chatMetadata) {
+            // Save cumulative chat to model-level directory under chats/
+            const chatFileName = this.ablationManager.getChatFileName(model);
+            const chatPrefix = hasMultipleIterations ? `chats/run-${iteration}` : 'chats';
+            const modelChatDir = join(runDir, chatPrefix);
+            mkdirSync(modelChatDir, { recursive: true });
+            const destJsonPath = join(modelChatDir, chatFileName);
+            const destMdPath = join(modelChatDir, chatFileName.replace('.json', '.md'));
+
+            try {
+              if (existsSync(chatMetadata.filePath)) {
+                cpSync(chatMetadata.filePath, destJsonPath);
+              }
+              if (existsSync(chatMetadata.mdFilePath)) {
+                cpSync(chatMetadata.mdFilePath, destMdPath);
+              }
+            } catch (copyError) {
+              this.logger.log(`  Warning: Failed to copy cumulative chat files: ${copyError}\n`, { type: 'warning' });
+            }
           }
         }
       }
 
-      // Capture all outputs produced during this iteration
+      // Capture all outputs produced during this iteration (final sweep)
       const iterCapturedCount = this.ablationManager.captureIterationOutputs(
         runDir,
         getRunIter(iteration),
@@ -3030,6 +3125,9 @@ export class AblationCLI {
     this.logger.log(`    Repeat runs: ${ablation.runs ?? 1}\n`, {
       type: 'info',
     });
+    this.logger.log(`    Clear context between phases: ${ablation.settings.clearContextBetweenPhases !== false ? 'yes' : 'no'}\n`, {
+      type: 'info',
+    });
 
     const maxIterStr = (
       await rl.question('\n  Max iterations (Enter to keep): ')
@@ -3052,6 +3150,16 @@ export class AblationCLI {
       if (!isNaN(runs) && runs > 0) {
         newRuns = runs > 1 ? runs : undefined;
       }
+    }
+
+    const clearCtxStr = (
+      await rl.question(`  Clear context between phases? (Y/n, Enter to keep): `)
+    ).trim().toLowerCase();
+
+    if (clearCtxStr === 'n' || clearCtxStr === 'no') {
+      newSettings.clearContextBetweenPhases = false;
+    } else if (clearCtxStr === 'y' || clearCtxStr === 'yes') {
+      delete newSettings.clearContextBetweenPhases;
     }
 
     this.ablationManager.update(ablationName, { settings: newSettings, runs: newRuns });

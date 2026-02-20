@@ -48,6 +48,7 @@ export interface AblationPhase {
 export interface AblationSettings {
   maxIterations: number;      // Max agent iterations per run
   mcpConfigPath?: string;     // Optional path to custom MCP config file
+  clearContextBetweenPhases?: boolean; // Default true; when false, conversation carries over between phases
 }
 
 export interface AblationDefinition {

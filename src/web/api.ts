@@ -1213,31 +1213,39 @@ export function createApiRouter(client: MCPClient): Router {
       const totalStartTime = Date.now();
       let runNumber = 0;
       let shouldBreak = false;
-      const skippedModels = new Set<string>();
 
+      // Execute: iteration > model > phase
       for (let iteration = 1; iteration <= iterations && !shouldBreak; iteration++) {
-        ablationManager.restoreOutputsFromSnapshot(runDir);
-        skippedModels.clear();
 
-        for (const phase of ablation.phases) {
+        for (const model of modelsToRun) {
           if (shouldBreak || ablationCancelRequested) break;
 
-          ablationManager.createPhaseDirectory(runDir, phase.name, hasMultiIter ? iteration : undefined);
+          const modelKey = `${model.provider}/${model.model}`;
 
-          for (const model of modelsToRun) {
-            if (shouldBreak || ablationCancelRequested) break;
+          // Restore outputs per model (each model starts with clean outputs)
+          ablationManager.restoreOutputsFromSnapshot(runDir);
 
-            const modelKey = `${model.provider}/${model.model}`;
+          // Switch model once per model (skip in dry run)
+          if (!ablation.dryRun) {
+            const provider = createProvider(model.provider);
+            if (!provider) throw new Error(`Unknown provider: ${model.provider}`);
+            await client.switchProviderAndModel(provider, model.model);
+          }
 
-            // Skip models marked by @abort from a previous phase
-            if (skippedModels.has(modelKey)) {
-              runNumber++;
-              const skippedResult: RunResult = { phase: phase.name, model, status: 'skipped' };
-              if (hasMultiIter) skippedResult.run = iteration;
-              results.push(skippedResult);
-              send({ type: 'result', runNumber, totalRuns, ...skippedResult });
-              continue;
+          let modelAborted = false;
+
+          for (const phase of ablation.phases) {
+            if (shouldBreak || ablationCancelRequested || modelAborted) break;
+
+            // Conditional context clearing between phases (not for first phase)
+            const isFirstPhase = phase === ablation.phases[0];
+            if (!isFirstPhase && !ablation.dryRun) {
+              if (ablation.settings.clearContextBetweenPhases !== false) {
+                client.clearContext();
+              }
             }
+
+            ablationManager.createPhaseDirectory(runDir, phase.name, hasMultiIter ? iteration : undefined);
 
             runNumber++;
 
@@ -1255,13 +1263,6 @@ export function createApiRouter(client: MCPClient): Router {
               // Set phase context for hook loading in execCmd
               currentAblationDef = ablation;
               currentPhaseName = phase.name;
-
-              // Switch model (skip in dry run)
-              if (!ablation.dryRun) {
-                const provider = createProvider(model.provider);
-                if (!provider) throw new Error(`Unknown provider: ${model.provider}`);
-                await client.switchProviderAndModel(provider, model.model);
-              }
 
               // Execute onStart hooks
               if (phaseOnStart) {
@@ -1306,13 +1307,13 @@ export function createApiRouter(client: MCPClient): Router {
               }
             } catch (err: any) {
               if (err instanceof AbortRunSignal) {
-                // @abort: skip remaining phases for this model, continue with others
+                // @abort: skip remaining phases for this model
                 result.status = 'aborted';
-                skippedModels.add(modelKey);
+                modelAborted = true;
               } else {
                 result.status = 'failed';
                 result.error = err.message || String(err);
-                skippedModels.add(modelKey);
+                modelAborted = true;
               }
             }
 
@@ -1322,16 +1323,31 @@ export function createApiRouter(client: MCPClient): Router {
 
             send({ type: 'result', runNumber, totalRuns, ...result });
 
-            // End chat session for this phase/model
-            if (!ablation.dryRun) {
+            // End chat session per phase (only when clearing context between phases)
+            if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases !== false) {
               try {
                 client.getChatHistoryManager().endSession(`Ablation: ${phase.name} with ${model.provider}/${model.model}`);
               } catch { /* ignore */ }
             }
+
+            // On failure: skip remaining phases for this model
+            if (result.status === 'failed') {
+              break;
+            }
+
+            // Capture outputs produced during this phase
+            ablationManager.captureRunOutputs(runDir, phase.name, model, hasMultiIter ? iteration : undefined);
+          }
+
+          // Save cumulative chat when context persists across phases
+          if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases === false) {
+            try {
+              client.getChatHistoryManager().endSession(`Ablation: all phases with ${model.provider}/${model.model}`);
+            } catch { /* ignore */ }
           }
         }
 
-        // Capture iteration outputs
+        // Capture iteration outputs (final sweep)
         ablationManager.captureIterationOutputs(runDir, hasMultiIter ? iteration : undefined);
       }
 
