@@ -135,6 +135,109 @@ export class AblationCLI {
     this.callbacks = callbacks;
   }
 
+  // Slash commands available during an ablation pause (Ctrl+A)
+  private static readonly PAUSE_SLASH_COMMANDS = new Set([
+    '/refresh', '/refresh-servers', '/refresh-select',
+    '/tools', '/tools-list',
+    '/prompts', '/prompts-list',
+    '/token-status', '/tokens',
+    '/help', '/settings',
+  ]);
+
+  /**
+   * Handle user input during an ablation pause (Ctrl+A).
+   * Routes slash commands to their handlers; sends everything else to processQuery.
+   * Returns false if the user entered empty input (resume), or null on Ctrl+C.
+   */
+  private async handlePauseInput(
+    input: string,
+    stopCondition: () => boolean,
+  ): Promise<'resume' | 'abort' | 'handled'> {
+    const trimmed = input.trim();
+    if (!trimmed) return 'resume';
+
+    // Check for slash commands
+    if (trimmed.startsWith('/')) {
+      const cmd = trimmed.split(/\s+/)[0].toLowerCase();
+
+      if (cmd === '/refresh' || cmd === '/refresh-servers') {
+        try {
+          await this.client.refreshServers();
+          this.logger.log('  Servers refreshed.\n', { type: 'success' });
+        } catch (error) {
+          this.logger.log(`  Failed to refresh servers: ${error}\n`, { type: 'error' });
+        }
+        return 'handled';
+      }
+
+      if (cmd === '/refresh-select') {
+        try {
+          const serversInfo = this.client.getServersInfo();
+          const serverNames = serversInfo.map(s => s.name);
+          if (serverNames.length === 0) {
+            this.logger.log('  No servers connected.\n', { type: 'warning' });
+            return 'handled';
+          }
+          this.logger.log('  Connected servers:\n', { type: 'info' });
+          for (let i = 0; i < serverNames.length; i++) {
+            this.logger.log(`    ${i + 1}. ${serverNames[i]}\n`, { type: 'info' });
+          }
+          const rl = this.callbacks.getReadline();
+          if (rl) {
+            const selection = (await rl.question('  Refresh which server? (number or name): ')).trim();
+            const idx = parseInt(selection) - 1;
+            const serverName = (!isNaN(idx) && idx >= 0 && idx < serverNames.length)
+              ? serverNames[idx] : selection;
+            await this.client.refreshServer(serverName);
+            this.logger.log(`  Server "${serverName}" refreshed.\n`, { type: 'success' });
+          }
+        } catch (error) {
+          this.logger.log(`  Failed to refresh server: ${error}\n`, { type: 'error' });
+        }
+        return 'handled';
+      }
+
+      if (cmd === '/tools' || cmd === '/tools-list') {
+        await this.callbacks.getToolCLI().displayToolsList();
+        return 'handled';
+      }
+
+      if (cmd === '/prompts' || cmd === '/prompts-list') {
+        await this.callbacks.getPromptCLI().displayPromptsList();
+        return 'handled';
+      }
+
+      if (cmd === '/token-status' || cmd === '/tokens') {
+        const usage = this.client.getTokenUsage();
+        this.logger.log(`  Tokens: ${JSON.stringify(usage)}\n`, { type: 'info' });
+        return 'handled';
+      }
+
+      if (cmd === '/help') {
+        this.logger.log('\n  Available commands during pause:\n', { type: 'info' });
+        for (const c of AblationCLI.PAUSE_SLASH_COMMANDS) {
+          this.logger.log(`    ${c}\n`, { type: 'info' });
+        }
+        this.logger.log('  Or type a message to send to the agent.\n', { type: 'info' });
+        return 'handled';
+      }
+
+      if (cmd === '/settings') {
+        await this.callbacks.displaySettings();
+        return 'handled';
+      }
+
+      // Unknown slash command — warn but don't send to model
+      this.logger.log(`  Unknown command: ${cmd}\n`, { type: 'warning' });
+      this.logger.log('  Type /help for available pause commands.\n', { type: 'info' });
+      return 'handled';
+    }
+
+    // Regular text — send to the agent
+    await this.client.processQuery(trimmed, false, undefined, stopCondition);
+    return 'handled';
+  }
+
   /**
    * Handle /ablation-create command - Interactive wizard to create ablation study
    */
@@ -1308,17 +1411,30 @@ export class AblationCLI {
             }
 
             try {
+              // Include any pending attachments with the first prompt message
+              const promptAttachments = this.callbacks.getPendingAttachments();
+              let attachmentsConsumed = false;
+
               for (const msg of promptResult.messages) {
                 if (msg.content.type === 'text') {
+                  // Pass pending attachments on the first message, then clear them
+                  const attachments = (!attachmentsConsumed && promptAttachments.length > 0)
+                    ? promptAttachments : undefined;
+
                   // Process the prompt text as a query
                   await this.client.processQuery(
                     msg.content.text,
                     false,
-                    undefined,
+                    attachments,
                     () => hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested(),
                   );
 
-                  // Handle soft interrupt (Ctrl+A): let user send messages to the agent
+                  if (!attachmentsConsumed && promptAttachments.length > 0) {
+                    attachmentsConsumed = true;
+                    this.callbacks.setPendingAttachments([]);
+                  }
+
+                  // Handle soft interrupt (Ctrl+A): let user send messages or slash commands
                   while (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()) {
                     this.callbacks.resetInterrupt();
                     this.callbacks.stopKeyboardMonitor();
@@ -1326,19 +1442,14 @@ export class AblationCLI {
                     const rl = this.callbacks.getReadline();
                     if (!rl) break;
 
-                    this.logger.log('\n  ⏸ Agent paused. Type a message to send to the agent, or press Enter to resume ablation.\n', { type: 'warning' });
+                    this.logger.log('\n  ⏸ Agent paused. Type a message, /command, or press Enter to resume. (/help for commands)\n', { type: 'warning' });
                     const userInput = (await rl.question('  You: ')).trim();
 
                     this.callbacks.startKeyboardMonitor();
 
-                    if (!userInput) break;
-
-                    await this.client.processQuery(
-                      userInput,
-                      false,
-                      undefined,
-                      () => hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested(),
-                    );
+                    const stopCond = () => hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
+                    const result = await this.handlePauseInput(userInput, stopCond);
+                    if (result === 'resume') break;
                   }
 
                   // Stop processing further messages if phase complete or aborted
@@ -1465,7 +1576,7 @@ export class AblationCLI {
         while (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()) {
           this.callbacks.resetInterrupt();
 
-          this.logger.log('\n  ⏸ Agent paused. Type a message to send to the agent, or press Enter to resume ablation.\n', { type: 'warning' });
+          this.logger.log('\n  ⏸ Agent paused. Type a message, /command, or press Enter to resume. (/help for commands)\n', { type: 'warning' });
           const userInput = await this.callbacks.collectInput('  You: ');
 
           // null means Ctrl+C was pressed — treat as abort
@@ -1473,19 +1584,9 @@ export class AblationCLI {
             break;
           }
 
-          const trimmedInput = userInput.trim();
-          if (!trimmedInput) {
-            // Empty input — resume ablation
-            break;
-          }
-
-          // Send user's message to the agent (with same hooks active)
-          await this.client.processQuery(
-            trimmedInput,
-            false,
-            undefined,
-            () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested(),
-          );
+          const stopCond = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
+          const result = await this.handlePauseInput(userInput, stopCond);
+          if (result === 'resume') break;
         }
       } finally {
         // Cleanup: remove temporary ablation hooks
@@ -2215,8 +2316,45 @@ export class AblationCLI {
               }
             }
 
-            // Execute commands for this phase
+            // Pre-stage attachment commands before executing sending commands.
+            // This ensures /attachment-insert and /add-attachment are processed
+            // before /add-prompt or raw queries, regardless of YAML ordering.
+            const stagingCommands = new Set(['/attachment-insert', '/add-attachment', '/clear-attachments']);
+            const stagedIndices = new Set<number>();
+            // Count total staging commands first for numbering
+            const totalStaging = phaseCommands.filter((cmd) => {
+              const t = cmd.trim();
+              const s = t.startsWith('/') ? t.split(/\s+/)[0].toLowerCase() : null;
+              return s && stagingCommands.has(s);
+            }).length;
+            let stageIdx = 0;
+            for (let i = 0; i < phaseCommands.length; i++) {
+              const trimmed = phaseCommands[i].trim();
+              const slashCmd = trimmed.startsWith('/') ? trimmed.split(/\s+/)[0].toLowerCase() : null;
+              if (slashCmd && stagingCommands.has(slashCmd)) {
+                stageIdx++;
+                this.logger.log(
+                  `  [pre-stage ${stageIdx}/${totalStaging}] Executing: ${phaseCommands[i]}\n`,
+                  { type: 'info' },
+                );
+                await this.executeAblationCommand(
+                  phaseCommands[i],
+                  ablation.settings.maxIterations,
+                  ablation.dryRun || false,
+                  ablation,
+                  phase.name,
+                );
+                stagedIndices.add(i);
+              }
+            }
+
+            // Execute remaining (non-staged) commands for this phase
+            const remainingCount = phaseCommands.length - stagedIndices.size;
+            let remainingIdx = 0;
             for (let i = 0; i < phaseCommands.length && !aborted; i++) {
+              if (stagedIndices.has(i)) continue; // Already pre-staged
+              remainingIdx++;
+
               // Check for abort before each command
               if (this.callbacks.isAbortRequested()) {
                 this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
@@ -2227,7 +2365,7 @@ export class AblationCLI {
 
               const command = phaseCommands[i];
               this.logger.log(
-                `  [${i + 1}/${phaseCommands.length}] Executing: ${command}\n`,
+                `  [${remainingIdx}/${remainingCount}] Executing: ${command}\n`,
                 { type: 'info' },
               );
 
