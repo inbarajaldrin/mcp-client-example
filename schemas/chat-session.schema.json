@@ -47,6 +47,10 @@
     "metadata": { "$ref": "#/$defs/SessionMetadata" }
   },
   "$defs": {
+    "OrchestratorWorkflow": {
+      "description": "Orchestrator call pattern (not a stored type — documents how messages relate). The agent writes Python code and calls mcp-tools-orchestrator__execute_composed_code. The orchestrator executes that code in a subprocess. The code calls MCP tools as plain functions (e.g. ros_mcp_server__move_home()), which route back to the client via IPC — no second LLM is involved. This produces two kinds of tool messages in the messages array: (1) The parent: a tool message with toolName='mcp-tools-orchestrator__execute_composed_code', toolInput.code containing the Python script, and toolOutput containing the combined stdout/stderr as JSON {output, returncode, status}. (2) The children: N tool messages with isIPCCall=true, one per MCP tool call made by the code. These are logged to chat history but NOT sent back to the LLM context — the LLM only sees the parent's toolOutput. To group children under their parent, filter IPC messages whose toolInputTime falls within the parent's [toolInputTime, toolOutputTime] window. Cost: only the 2 LLM callbacks (write code + read result) incur token cost. The N IPC tool executions have zero LLM cost since they are direct MCP calls with no model in the loop.",
+      "type": "null"
+    },
     "ChatMessage": {
       "type": "object",
       "required": ["timestamp", "role", "content"],
@@ -99,12 +103,12 @@
         },
         "toolInput": {
           "type": "object",
-          "description": "Arguments passed to the tool",
+          "description": "Arguments passed to the tool. For orchestrator calls (toolName='mcp-tools-orchestrator__execute_composed_code'), contains {code: string} with the Python script the agent wrote.",
           "additionalProperties": true
         },
         "toolOutput": {
           "type": "string",
-          "description": "Raw output returned by the tool"
+          "description": "Raw output returned by the tool. For orchestrator calls, this is a JSON string with {output: string, returncode: number, status: 'success'|'failed'} containing the script's stdout/stderr. This is the only result the LLM sees — individual IPC tool outputs are not sent to the LLM context."
         },
         "toolInputTime": {
           "type": "string",
@@ -118,11 +122,11 @@
         },
         "orchestratorMode": {
           "type": "boolean",
-          "description": "Whether this message was in orchestrator mode"
+          "description": "Whether this tool call occurred while orchestrator mode was active. True on both the parent execute_composed_code message and its child IPC messages. See OrchestratorWorkflow."
         },
         "isIPCCall": {
           "type": "boolean",
-          "description": "Whether this was an automatic IPC call"
+          "description": "Whether this tool call was made by orchestrator code via IPC (a child call). These messages are logged to chat history but not sent to the LLM context. To find the parent, find the execute_composed_code message whose [toolInputTime, toolOutputTime] window contains this message's toolInputTime. See OrchestratorWorkflow."
         }
       }
     },
@@ -161,9 +165,9 @@
         "cumulativeTokens": { "type": "integer", "description": "Total tokens used across session" },
         "peakContextTokens": { "type": "integer", "description": "Peak context window usage" },
         "messageCount": { "type": "integer" },
-        "toolUseCount": { "type": "integer" },
-        "ipcCallCount": { "type": "integer" },
-        "totalCost": { "type": "number", "description": "Total estimated cost in USD" }
+        "toolUseCount": { "type": "integer", "description": "Direct tool calls made by the LLM (excludes IPC calls)" },
+        "ipcCallCount": { "type": "integer", "description": "Tool calls made by orchestrator code via IPC. These have zero LLM cost. See OrchestratorWorkflow." },
+        "totalCost": { "type": "number", "description": "Total estimated LLM cost in USD. Only covers direct LLM callbacks (tokenUsagePerCallback). IPC tool calls have no LLM cost since they are executed without a model." }
       }
     }
   }
