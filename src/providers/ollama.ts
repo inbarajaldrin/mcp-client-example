@@ -16,6 +16,7 @@ import type {
   SummarizationConfig,
   MessageStreamEvent,
   ModelInfo,
+  ThinkingConfig,
 } from '../model-provider.js';
 
 // Provider metadata - exported for use by CLI
@@ -158,6 +159,7 @@ export class OllamaProvider implements ModelProvider {
   private modelCapabilitiesCache: Map<string, string[]> = new Map();
   private host: string;
   private maxContextWindow: number;
+  private thinkingConfig: ThinkingConfig | null = null;
 
   constructor(host?: string) {
     this.host = host || process.env.OLLAMA_HOST || DEFAULT_OLLAMA_HOST;
@@ -172,6 +174,10 @@ export class OllamaProvider implements ModelProvider {
     } else {
       this.maxContextWindow = DEFAULT_MAX_CONTEXT;
     }
+  }
+
+  setThinkingConfig(config: ThinkingConfig): void {
+    this.thinkingConfig = config;
   }
 
   getProviderName(): string {
@@ -660,7 +666,6 @@ export class OllamaProvider implements ModelProvider {
     toolExecutor: ToolExecutor,
     maxIterations: number = 10,
     cancellationCheck?: () => boolean,
-    thinkingMode: boolean = false,
   ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
     // Ensure context window is cached for this model
     if (!this.contextWindowCache.has(model)) {
@@ -728,8 +733,8 @@ export class OllamaProvider implements ModelProvider {
         console.log(`[Ollama] Last 5 tool names:`, ollamaTools?.slice(-5).map(t => t.function.name));
       }
 
-      // Add thinking mode if supported
-      if (thinkingMode) {
+      // Add thinking mode if enabled via setThinkingConfig
+      if (this.thinkingConfig?.enabled) {
         chatParams.think = true;
       }
 

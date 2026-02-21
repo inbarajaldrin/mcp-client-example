@@ -68,6 +68,13 @@ export interface TokenCounter {
   updateConfig(config: Partial<SummarizationConfig>): void;
 }
 
+// Thinking/reasoning configuration passed to providers
+export interface ThinkingConfig {
+  enabled: boolean;
+  model: string;
+  level?: string; // Provider-specific level (e.g. 'low'|'medium'|'high' for OpenAI)
+}
+
 // Model information returned by listAvailableModels
 export interface ModelInfo {
   id: string;
@@ -75,6 +82,7 @@ export interface ModelInfo {
   description?: string;
   contextWindow?: number;
   capabilities?: string[];
+  reasoning?: boolean; // Whether model supports thinking/reasoning
 }
 
 // Abstract ModelProvider interface
@@ -109,5 +117,8 @@ export interface ModelProvider {
 
   // List available models from the provider API
   listAvailableModels(): Promise<ModelInfo[]>;
+
+  // Set thinking/reasoning configuration for subsequent API calls
+  setThinkingConfig?(config: ThinkingConfig): void;
 }
 

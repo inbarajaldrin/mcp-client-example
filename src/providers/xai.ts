@@ -9,9 +9,11 @@ import type {
   SummarizationConfig,
   MessageStreamEvent,
   ModelInfo,
+  ThinkingConfig,
 } from '../model-provider.js';
 
 import type { ToolExecutionResult } from '../core/tool-executor.js';
+import { isReasoningModel } from '../utils/model-capabilities.js';
 
 // Tool Executor Type - function that executes tools on your system
 // Returns ToolExecutionResult with display text and content blocks (including images)
@@ -141,12 +143,28 @@ export class GrokProvider implements ModelProvider {
   private client: OpenAI;
   // Dynamic cache of context windows discovered from API only
   private contextWindowCache: Map<string, number> = new Map();
+  private thinkingConfig: ThinkingConfig | null = null;
 
   constructor() {
     this.client = new OpenAI({
       apiKey: process.env.XAI_API_KEY,
       baseURL: 'https://api.x.ai/v1',
     });
+  }
+
+  setThinkingConfig(config: ThinkingConfig): void {
+    this.thinkingConfig = config;
+  }
+
+  private resolveReasoningEffort(): string | undefined {
+    if (!this.thinkingConfig?.enabled) {
+      return 'low';
+    }
+    const level = this.thinkingConfig.level || 'medium';
+    if (level === 'low' || level === 'medium' || level === 'high') {
+      return level;
+    }
+    return 'medium';
   }
 
   getProviderName(): string {
@@ -268,14 +286,17 @@ export class GrokProvider implements ModelProvider {
       return msg;
     });
 
-    const stream = await this.client.chat.completions.create({
+    const reasoningEffort = isReasoningModel(model, 'xai') ? this.resolveReasoningEffort() : undefined;
+    const createParams: any = {
       model: model,
       messages: openaiMessages,
       max_completion_tokens: maxTokens,
       tools: openaiTools.length > 0 ? openaiTools : undefined,
       stream: true,
       stream_options: { include_usage: true },
-    });
+    };
+    if (reasoningEffort) createParams.reasoning_effort = reasoningEffort;
+    const stream: any = await this.client.chat.completions.create(createParams);
 
     const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
     let messageStarted = false;
@@ -426,14 +447,17 @@ export class GrokProvider implements ModelProvider {
       iterations++;
 
       // Stream request to Grok API
-      const stream = await this.client.chat.completions.create({
+      const reasoningEffort = isReasoningModel(model, 'xai') ? this.resolveReasoningEffort() : undefined;
+      const streamParams: any = {
         model: model,
         messages: this.convertToOpenAIMessages(conversationMessages, model),
         max_completion_tokens: maxTokens,
         tools: openaiTools.length > 0 ? openaiTools : undefined,
         stream: true,
         stream_options: { include_usage: true },
-      });
+      };
+      if (reasoningEffort) streamParams.reasoning_effort = reasoningEffort;
+      const stream: any = await this.client.chat.completions.create(streamParams);
 
       // Track tool calls as they stream in
       const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();

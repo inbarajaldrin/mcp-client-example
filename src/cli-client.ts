@@ -18,13 +18,14 @@ import { ToolReplayCLI } from './cli/tool-replay-cli.js';
 import { ServerRefreshCLI } from './cli/server-refresh-cli.js';
 import { HooksCLI } from './cli/hooks-cli.js';
 import { HumanInTheLoopManager } from './managers/hil-manager.js';
+import { isReasoningModel, getThinkingLevelsForProvider } from './utils/model-capabilities.js';
 
 // Command list for tab autocomplete
 const CLI_COMMANDS = [
   '/help', '/exit', '/clear', '/clear-context',
   '/token-status', '/tokens', '/summarize', '/summarize-now',
   '/settings', '/refresh', '/refresh-servers', '/refresh-select',
-  '/set-timeout', '/set-max-iterations',
+  '/set-timeout', '/set-max-iterations', '/set-thinking',
   '/todo-on', '/todo-off',
   '/orchestrator-on', '/orchestrator-off',
   '/tools', '/tools-list', '/tools-manager', '/tools-select',
@@ -677,16 +678,24 @@ export class MCPClientCLI {
     const timeoutDisplay = timeout === -1 ? 'unlimited' : `${timeout} seconds`;
     const maxIterationsDisplay = maxIterations === -1 ? 'unlimited' : maxIterations.toString();
 
+    const thinkingEnabled = this.preferencesManager.getThinkingEnabled();
+    const thinkingLevel = this.preferencesManager.getThinkingLevel();
+    const thinkingDisplay = thinkingEnabled
+      ? `on${thinkingLevel ? ` (level: ${thinkingLevel})` : ''}`
+      : 'off';
+
     this.logger.log('\n⚙️  Client Settings:\n', { type: 'info' });
     this.logger.log(
       `  MCP Tool Timeout: ${timeoutDisplay}\n` +
-      `  Max Iterations: ${maxIterationsDisplay}\n`,
+      `  Max Iterations: ${maxIterationsDisplay}\n` +
+      `  Thinking Mode: ${thinkingDisplay}\n`,
       { type: 'info' },
     );
     this.logger.log(
       `\nCommands:\n` +
       `  /set-timeout <seconds> - Change MCP tool timeout (1-3600, or "infinity"/"unlimited")\n` +
-      `  /set-max-iterations <number> - Change max iterations (1-10000, or "infinity"/"unlimited")\n`,
+      `  /set-max-iterations <number> - Change max iterations (1-10000, or "infinity"/"unlimited")\n` +
+      `  /set-thinking on|off - Enable/disable thinking/reasoning mode\n`,
       { type: 'info' },
     );
   }
@@ -707,6 +716,7 @@ export class MCPClientCLI {
       `  /refresh-select - Interactive selection for refreshing specific servers\n` +
       `  /set-timeout <seconds> - Set MCP tool timeout (1-3600, or "infinity"/"unlimited")\n` +
       `  /set-max-iterations <number> - Set max iterations between agent calls (1-10000, or "infinity"/"unlimited")\n` +
+      `  /set-thinking on|off - Enable/disable thinking/reasoning mode\n` +
       `  /hil - Toggle human-in-the-loop tool approval\n` +
       `\n` +
       `Todo Management:\n` +
@@ -921,6 +931,86 @@ export class MCPClientCLI {
         this.logger.log(`\n✓ Max iterations set to ${maxIterationsDisplay}\n`, { type: 'success' });
       } catch (error) {
         this.logger.log(`\nFailed to set max iterations: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (baseCommand === '/set-thinking') {
+      try {
+        const parts = query.split(' ');
+        if (parts.length < 2) {
+          const currentStatus = this.preferencesManager.getThinkingEnabled() ? 'on' : 'off';
+          const currentLevel = this.preferencesManager.getThinkingLevel();
+          this.logger.log(
+            `\nThinking mode: ${currentStatus}${currentLevel ? ` (level: ${currentLevel})` : ''}\n` +
+            `Usage: /set-thinking on|off\n`,
+            { type: 'info' },
+          );
+          return true;
+        }
+        const value = parts[1].toLowerCase().trim();
+        if (value === 'off') {
+          this.preferencesManager.setThinkingEnabled(false);
+          this.logger.log('\nThinking/reasoning mode disabled\n', { type: 'success' });
+        } else if (value === 'on') {
+          const providerName = this.client.getProviderName();
+          const model = this.client.getModel();
+          const modelSupports = isReasoningModel(model, providerName);
+
+          if (!modelSupports) {
+            this.logger.log(
+              `\nModel ${model} does not support thinking/reasoning mode\n`,
+              { type: 'warning' },
+            );
+            return true;
+          }
+
+          // Get available levels for this provider
+          const levels = getThinkingLevelsForProvider(providerName);
+
+          if (levels.length <= 1) {
+            // Ollama or providers with no level choices — just turn on
+            this.preferencesManager.setThinkingEnabled(true);
+            this.preferencesManager.setThinkingLevel(levels[0]?.value);
+            this.logger.log('\nThinking/reasoning mode enabled\n', { type: 'success' });
+          } else {
+            // Prompt user for level selection
+            this.logger.log(`\nSelect thinking level for ${providerName}:\n`, { type: 'info' });
+            for (let i = 0; i < levels.length; i++) {
+              this.logger.log(`  ${i + 1}. ${levels[i].label}\n`, { type: 'info' });
+            }
+
+            // Use synchronous readline for level selection
+            const rlSync = readlineSync.createInterface({
+              input: process.stdin,
+              output: process.stdout,
+            });
+
+            const answer = await new Promise<string>((resolve) => {
+              rlSync.question('\nEnter selection (number): ', (ans) => {
+                rlSync.close();
+                resolve(ans.trim());
+              });
+            });
+
+            const selection = parseInt(answer, 10);
+            if (selection >= 1 && selection <= levels.length) {
+              const selectedLevel = levels[selection - 1];
+              this.preferencesManager.setThinkingEnabled(true);
+              this.preferencesManager.setThinkingLevel(selectedLevel.value);
+              this.logger.log(
+                `\nThinking/reasoning mode enabled (level: ${selectedLevel.value})\n`,
+                { type: 'success' },
+              );
+            } else {
+              this.logger.log('\nInvalid selection. Thinking mode not changed.\n', { type: 'error' });
+            }
+          }
+        } else {
+          this.logger.log('\nUsage: /set-thinking on|off\n', { type: 'error' });
+        }
+      } catch (error) {
+        this.logger.log(`\nFailed to set thinking mode: ${error}\n`, { type: 'error' });
       }
       return true;
     }

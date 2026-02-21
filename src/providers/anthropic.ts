@@ -11,11 +11,14 @@ import type {
   SummarizationConfig,
   MessageStreamEvent,
   ModelInfo,
+  ThinkingConfig,
 } from '../model-provider.js';
 
 // No hardcoded model context windows - all context windows must be fetched from API
 
 import type { ToolExecutionResult } from '../core/tool-executor.js';
+import { isReasoningModel, ANTHROPIC_BUDGET_TOKENS } from '../utils/model-capabilities.js';
+import type { AnthropicThinkingLevel } from '../utils/model-capabilities.js';
 
 // Provider metadata - exported for use by CLI
 export const PROVIDER_INFO = {
@@ -175,11 +178,29 @@ export class AnthropicProvider implements ModelProvider {
   private anthropicClient: Anthropic;
   // Dynamic cache of context windows discovered from API only
   private contextWindowCache: Map<string, number> = new Map();
+  private thinkingConfig: ThinkingConfig | null = null;
 
   constructor() {
     this.anthropicClient = new Anthropic({
       apiKey: process.env.ANTHROPIC_API_KEY,
     });
+  }
+
+  setThinkingConfig(config: ThinkingConfig): void {
+    this.thinkingConfig = config;
+  }
+
+  /**
+   * Resolve Anthropic thinking parameter.
+   * Anthropic thinking is opt-in — omit when disabled.
+   */
+  private resolveThinkingParam(): { type: 'enabled'; budget_tokens: number } | undefined {
+    if (!this.thinkingConfig?.enabled) {
+      return undefined; // Anthropic default is already off
+    }
+    const level = (this.thinkingConfig.level || 'medium') as AnthropicThinkingLevel;
+    const budgetTokens = ANTHROPIC_BUDGET_TOKENS[level] || ANTHROPIC_BUDGET_TOKENS.medium;
+    return { type: 'enabled', budget_tokens: budgetTokens };
   }
 
   getProviderName(): string {
@@ -478,12 +499,15 @@ export class AnthropicProvider implements ModelProvider {
         ...(index === anthropicTools.length - 1 ? { cache_control: { type: 'ephemeral' } } : {}),
       }));
 
-      const stream = this.anthropicClient.messages.stream({
+      const thinkingParam = isReasoningModel(model, 'anthropic') ? this.resolveThinkingParam() : undefined;
+      const streamParams: any = {
         model: model,
         max_tokens: maxTokens,
         tools: toolsWithCache as any,
         messages: this.convertToAnthropicMessages(conversationMessages),
-      });
+      };
+      if (thinkingParam) streamParams.thinking = thinkingParam;
+      const stream = this.anthropicClient.messages.stream(streamParams);
 
       // Stream events to user (they see text in real-time)
       for await (const chunk of stream) {

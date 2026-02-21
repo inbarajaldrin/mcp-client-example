@@ -9,6 +9,7 @@ import type { MCPClient, WebStreamEvent } from '../index.js';
 import type { AttachmentInfo } from '../managers/attachment-manager.js';
 import { createProvider, PROVIDERS } from '../bin.js';
 import { AblationManager } from '../managers/ablation-manager.js';
+import { isReasoningModel, getThinkingLevelsForProvider } from '../utils/model-capabilities.js';
 
 const upload = multer({ dest: path.join(tmpdir(), 'mcp-client-uploads') });
 
@@ -422,23 +423,69 @@ export function createApiRouter(client: MCPClient): Router {
       maxIterations: prefs.getMaxIterations(),
       hilEnabled: prefs.getHILEnabled(),
       approveAll: prefs.getApproveAll(),
+      thinkingEnabled: prefs.getThinkingEnabled(),
+      thinkingLevel: prefs.getThinkingLevel(),
     });
   });
 
   // POST /api/settings — update preferences
   router.post('/settings', (req: Request, res: Response) => {
     const prefs = client.getPreferencesManager();
-    const { mcpTimeout, maxIterations, hilEnabled, approveAll } = req.body;
+    const { mcpTimeout, maxIterations, hilEnabled, approveAll, thinkingEnabled, thinkingLevel } = req.body;
     try {
       if (mcpTimeout !== undefined) prefs.setMCPTimeout(mcpTimeout);
       if (maxIterations !== undefined) prefs.setMaxIterations(maxIterations);
       if (hilEnabled !== undefined) prefs.setHILEnabled(!!hilEnabled);
       if (approveAll !== undefined) prefs.setApproveAll(!!approveAll);
+      if (thinkingEnabled !== undefined) prefs.setThinkingEnabled(!!thinkingEnabled);
+      if (thinkingLevel !== undefined) prefs.setThinkingLevel(thinkingLevel);
       res.json({
         mcpTimeout: prefs.getMCPTimeout(),
         maxIterations: prefs.getMaxIterations(),
         hilEnabled: prefs.getHILEnabled(),
         approveAll: prefs.getApproveAll(),
+        thinkingEnabled: prefs.getThinkingEnabled(),
+        thinkingLevel: prefs.getThinkingLevel(),
+      });
+    } catch (err: any) {
+      res.status(400).json({ error: err.message || String(err) });
+    }
+  });
+
+  // ─── Thinking/Reasoning ───
+
+  // GET /api/thinking — returns current thinking config and model support info
+  router.get('/thinking', (_req: Request, res: Response) => {
+    const prefs = client.getPreferencesManager();
+    const model = client.getModel();
+    const providerName = client.getProviderName();
+    const modelSupports = isReasoningModel(model, providerName);
+    const levels = getThinkingLevelsForProvider(providerName);
+
+    res.json({
+      enabled: prefs.getThinkingEnabled(),
+      level: prefs.getThinkingLevel(),
+      modelSupportsThinking: modelSupports,
+      model,
+      provider: providerName,
+      availableLevels: levels,
+    });
+  });
+
+  // POST /api/thinking — set thinking preference
+  router.post('/thinking', (req: Request, res: Response) => {
+    const prefs = client.getPreferencesManager();
+    const { enabled, level } = req.body;
+    try {
+      if (typeof enabled === 'boolean') {
+        prefs.setThinkingEnabled(enabled);
+      }
+      if (level !== undefined) {
+        prefs.setThinkingLevel(level);
+      }
+      res.json({
+        enabled: prefs.getThinkingEnabled(),
+        level: prefs.getThinkingLevel(),
       });
     } catch (err: any) {
       res.status(400).json({ error: err.message || String(err) });

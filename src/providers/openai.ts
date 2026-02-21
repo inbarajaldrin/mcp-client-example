@@ -9,9 +9,11 @@ import type {
   SummarizationConfig,
   MessageStreamEvent,
   ModelInfo,
+  ThinkingConfig,
 } from '../model-provider.js';
 
 import type { ToolExecutionResult } from '../core/tool-executor.js';
+import { isReasoningModel } from '../utils/model-capabilities.js';
 
 // Tool Executor Type - function that executes tools on your system
 // Returns ToolExecutionResult with display text and content blocks (including images)
@@ -158,11 +160,31 @@ export class OpenAIProvider implements ModelProvider {
   private openaiClient: OpenAI;
   // Dynamic cache of context windows discovered from API only
   private contextWindowCache: Map<string, number> = new Map();
+  private thinkingConfig: ThinkingConfig | null = null;
 
   constructor() {
     this.openaiClient = new OpenAI({
       apiKey: process.env.OPENAI_API_KEY,
     });
+  }
+
+  setThinkingConfig(config: ThinkingConfig): void {
+    this.thinkingConfig = config;
+  }
+
+  /**
+   * Resolve reasoning_effort for the API call.
+   * OpenAI gpt-5 family defaults to 'medium' reasoning. 'low' is the minimum (can't use 'none').
+   */
+  private resolveReasoningEffort(): string | undefined {
+    if (!this.thinkingConfig?.enabled) {
+      return 'low'; // Minimize reasoning cost when thinking is off
+    }
+    const level = this.thinkingConfig.level || 'medium';
+    if (level === 'low' || level === 'medium' || level === 'high') {
+      return level;
+    }
+    return 'medium';
   }
 
   getProviderName(): string {
@@ -278,14 +300,17 @@ export class OpenAIProvider implements ModelProvider {
       return msg;
     });
 
-    const stream = await this.openaiClient.chat.completions.create({
+    const reasoningEffort = isReasoningModel(model, 'openai') ? this.resolveReasoningEffort() : undefined;
+    const createParams: any = {
       model: model,
       messages: openaiMessages,
       max_completion_tokens: maxTokens,
       tools: openaiTools.length > 0 ? openaiTools : undefined,
       stream: true,
-      stream_options: { include_usage: true },  // Include token usage in final chunk
-    });
+      stream_options: { include_usage: true },
+    };
+    if (reasoningEffort) createParams.reasoning_effort = reasoningEffort;
+    const stream: any = await this.openaiClient.chat.completions.create(createParams);
 
     const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
     let messageStarted = false;
@@ -452,14 +477,17 @@ export class OpenAIProvider implements ModelProvider {
       iterations++;
 
       // Step 1: Stream request to OpenAI
-      const stream = await this.openaiClient.chat.completions.create({
+      const reasoningEffort = isReasoningModel(model, 'openai') ? this.resolveReasoningEffort() : undefined;
+      const streamParams: any = {
         model: model,
         messages: this.convertToOpenAIMessages(conversationMessages, model),
         max_completion_tokens: maxTokens,
         tools: openaiTools.length > 0 ? openaiTools : undefined,
-        stream: true,  // ✅ KEY: Enable streaming
-        stream_options: { include_usage: true },  // ✅ KEY: Include token usage in final chunk
-      });
+        stream: true,
+        stream_options: { include_usage: true },
+      };
+      if (reasoningEffort) streamParams.reasoning_effort = reasoningEffort;
+      const stream: any = await this.openaiClient.chat.completions.create(streamParams);
 
       // Track tool calls as they stream in
       const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();

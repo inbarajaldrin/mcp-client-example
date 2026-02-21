@@ -46,6 +46,7 @@ export type WebStreamEvent =
 
 export type StreamObserver = (event: WebStreamEvent) => void;
 import { AnthropicProvider, type ToolExecutor } from './providers/anthropic.js';
+import { isReasoningModel } from './utils/model-capabilities.js';
 import { OrchestratorIPCServer } from './ipc-server.js';
 import { ElicitationHandler } from './handlers/elicitation-handler.js';
 import { formatToolCall, formatJSON, formatCompactJSON } from './utils/formatting.js';
@@ -2366,8 +2367,7 @@ export class MCPClient {
           lastTokenUsage.cacheCreationTokens = breakdown.cache_creation_input_tokens || 0;
           lastTokenUsage.cacheReadTokens = breakdown.cache_read_input_tokens || 0;
         } else if (this.modelProvider.getProviderName() === 'google') {
-          // Gemini doesn't provide cache token breakdown - treat all input as regular tokens
-          // This enables cost calculation for Gemini models
+          // Fallback for Gemini when breakdown not provided (e.g. createMessageStream path)
           lastTokenUsage.regularInputTokens = chunk.input_tokens;
           lastTokenUsage.cacheCreationTokens = 0;
           lastTokenUsage.cacheReadTokens = 0;
@@ -2542,12 +2542,15 @@ export class MCPClient {
             lastTokenUsage = null; // Reset after logging
             tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
           } else if (this.modelProvider.getProviderName() === 'google' && lastTokenUsage) {
-            // Google (Gemini): use exact counts from API
+            // Google (Gemini): use exact counts from API (output includes thinking tokens)
             const totalTokens = lastTokenUsage.inputTokens + lastTokenUsage.outputTokens;
             this.chatHistoryManager.addTokenUsagePerCallback(
               lastTokenUsage.inputTokens,
               lastTokenUsage.outputTokens,
-              totalTokens
+              totalTokens,
+              lastTokenUsage.regularInputTokens,
+              lastTokenUsage.cacheCreationTokens,
+              lastTokenUsage.cacheReadTokens,
             );
             lastTokenUsage = null; // Reset after logging
             tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
@@ -2873,7 +2876,18 @@ export class MCPClient {
       
       // Track token count before starting the stream (for per-callback tracking)
       const tokenCountBeforeStream = this.currentTokenCount;
-      
+
+      // Set thinking config on provider before streaming
+      if (this.modelProvider.setThinkingConfig) {
+        const thinkingEnabled = this.preferencesManager.getThinkingEnabled();
+        const modelSupportsThinking = isReasoningModel(this.model, this.modelProvider.getProviderName());
+        this.modelProvider.setThinkingConfig({
+          enabled: thinkingEnabled && modelSupportsThinking,
+          model: this.model,
+          level: this.preferencesManager.getThinkingLevel(),
+        });
+      }
+
       const stream = (this.modelProvider as any).createMessageStreamWithToolUse(
         this.messages,
         this.model,

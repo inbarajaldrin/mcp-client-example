@@ -13,6 +13,7 @@ import { OllamaProvider, PROVIDER_INFO as OLLAMA } from './providers/ollama.js';
 import { GeminiProvider, PROVIDER_INFO as GOOGLE } from './providers/google.js';
 import { GrokProvider, PROVIDER_INFO as XAI } from './providers/xai.js';
 import type { ModelProvider, ModelInfo } from './model-provider.js';
+import { isReasoningModel } from './utils/model-capabilities.js';
 
 // Assembled from individual provider exports - single source of truth
 export const PROVIDERS = [ANTHROPIC, OPENAI, GOOGLE, XAI, OLLAMA];
@@ -391,7 +392,11 @@ async function selectModel(provider: ModelProvider): Promise<string> {
       const selection = parseInt(trimmed, 10);
       if (selection >= 1 && selection <= models.length) {
         const selectedModel = models[selection - 1];
-        console.log(`\n✓ Selected model: ${selectedModel.id}\n`);
+        console.log(`\n✓ Selected model: ${selectedModel.id}`);
+        if (isReasoningModel(selectedModel.id)) {
+          console.log(`  ℹ This model supports reasoning. Use /set-thinking on|off to control.`);
+        }
+        console.log('');
         rl.close();
         return selectedModel.id;
       }

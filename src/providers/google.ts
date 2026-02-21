@@ -9,9 +9,12 @@ import type {
   SummarizationConfig,
   MessageStreamEvent,
   ModelInfo,
+  ThinkingConfig,
 } from '../model-provider.js';
 
 import type { ToolExecutionResult, ContentBlock } from '../core/tool-executor.js';
+import { isReasoningModel, GEMINI_BUDGET_TOKENS } from '../utils/model-capabilities.js';
+import type { GeminiThinkingLevel } from '../utils/model-capabilities.js';
 
 // Tool Executor Type - function that executes tools on your system
 // Returns ToolExecutionResult with display text and content blocks (including images)
@@ -129,11 +132,35 @@ export class GeminiProvider implements ModelProvider {
   private geminiClient: GoogleGenAI;
   // Dynamic cache of context windows discovered from API only
   private contextWindowCache: Map<string, number> = new Map();
+  private thinkingConfig: ThinkingConfig | null = null;
 
   constructor() {
     this.geminiClient = new GoogleGenAI({
       apiKey: process.env.GEMINI_API_KEY,
     });
+  }
+
+  setThinkingConfig(config: ThinkingConfig): void {
+    this.thinkingConfig = config;
+  }
+
+  /**
+   * Resolve Gemini thinkingConfig for the API call.
+   * Gemini 2.5 models default to dynamic thinking.
+   * When disabled: Flash models use thinkingBudget: 0, Pro models use 128 (can't fully disable).
+   */
+  private resolveGeminiThinkingConfig(model: string): { thinkingBudget: number } | undefined {
+    if (!this.thinkingConfig?.enabled) {
+      // Disable thinking — Flash can use 0, Pro minimum is 128
+      const isProModel = model.includes('pro');
+      return { thinkingBudget: isProModel ? 128 : 0 };
+    }
+    const level = (this.thinkingConfig.level || 'dynamic') as GeminiThinkingLevel;
+    const budget = GEMINI_BUDGET_TOKENS[level];
+    if (budget === undefined) {
+      return undefined; // Omit → let Gemini choose dynamically
+    }
+    return { thinkingBudget: budget };
   }
 
   getProviderName(): string {
@@ -406,12 +433,14 @@ export class GeminiProvider implements ModelProvider {
     const geminiTools = this.convertToolsToGeminiFormat(tools);
 
     try {
+      const geminiThinkingConfig = isReasoningModel(model, 'google') ? this.resolveGeminiThinkingConfig(model) : undefined;
       const generateConfig: any = {
         model,
         contents,
         config: {
           maxOutputTokens: maxTokens,
           temperature: 0.7,
+          ...(geminiThinkingConfig && { thinkingConfig: geminiThinkingConfig }),
         },
       };
 
@@ -471,11 +500,13 @@ export class GeminiProvider implements ModelProvider {
         }
 
         // Handle usage metadata
+        // Gemini reports thinking tokens separately from candidate tokens
+        // For cost purposes, thinking tokens are billed at the output rate
         if (chunk.usageMetadata) {
           yield {
             type: 'usage',
             input_tokens: chunk.usageMetadata.promptTokenCount || 0,
-            output_tokens: chunk.usageMetadata.candidatesTokenCount || 0,
+            output_tokens: (chunk.usageMetadata.candidatesTokenCount || 0) + (chunk.usageMetadata.thoughtsTokenCount || 0),
           };
         }
       }
@@ -537,12 +568,14 @@ export class GeminiProvider implements ModelProvider {
       );
 
       // Step 1: Stream request to Gemini
+      const geminiThinkingConfig = isReasoningModel(model, 'google') ? this.resolveGeminiThinkingConfig(model) : undefined;
       const generateConfig: any = {
         model,
         contents,
         config: {
           maxOutputTokens: maxTokens,
           temperature: 0.7,
+          ...(geminiThinkingConfig && { thinkingConfig: geminiThinkingConfig }),
         },
       };
 
@@ -609,7 +642,7 @@ export class GeminiProvider implements ModelProvider {
       }> = [];
       let assistantContent = '';
       let messageStarted = false;
-      let finalUsage: { promptTokenCount?: number; candidatesTokenCount?: number } | null = null;
+      let finalUsage: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number; cachedContentTokenCount?: number } | null = null;
 
       // Stream events to user while collecting response
       for await (const chunk of stream) {
@@ -618,6 +651,8 @@ export class GeminiProvider implements ModelProvider {
           finalUsage = {
             promptTokenCount: chunk.usageMetadata.promptTokenCount || 0,
             candidatesTokenCount: chunk.usageMetadata.candidatesTokenCount || 0,
+            thoughtsTokenCount: chunk.usageMetadata.thoughtsTokenCount || 0,
+            cachedContentTokenCount: chunk.usageMetadata.cachedContentTokenCount || 0,
           };
         }
 
@@ -683,11 +718,24 @@ export class GeminiProvider implements ModelProvider {
       }
 
       // Emit token usage (use 'token_usage' type to match handler in processToolUseStream)
+      // Gemini reports thinking tokens separately — add them to output for cost calculation
+      // Also include cache token breakdown for accurate cost tracking
       if (finalUsage) {
+        const candidateTokens = finalUsage.candidatesTokenCount || 0;
+        const thinkingTokens = finalUsage.thoughtsTokenCount || 0;
+        const cachedTokens = finalUsage.cachedContentTokenCount || 0;
+        const totalInputTokens = finalUsage.promptTokenCount || 0;
+        const regularInputTokens = totalInputTokens - cachedTokens;
+
         yield {
           type: 'token_usage',
-          input_tokens: finalUsage.promptTokenCount || 0,
-          output_tokens: finalUsage.candidatesTokenCount || 0,
+          input_tokens: totalInputTokens,
+          output_tokens: candidateTokens + thinkingTokens,
+          input_tokens_breakdown: {
+            input_tokens: regularInputTokens,
+            cache_creation_input_tokens: 0, // Gemini doesn't track cache creation separately
+            cache_read_input_tokens: cachedTokens,
+          },
         } as MessageStreamEvent;
       }
 

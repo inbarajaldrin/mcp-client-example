@@ -16,6 +16,8 @@ export interface ClientPreferences {
   maxIterations?: number; // Maximum iterations between agent calls
   hilEnabled?: boolean; // Human-in-the-loop confirmations (persistent per-tool prompts)
   approveAll?: boolean; // Approve all tools without prompting (persistent)
+  thinkingEnabled?: boolean; // Enable thinking/reasoning mode for supported models
+  thinkingLevel?: string; // Provider-specific thinking level (e.g. 'low'|'medium'|'high' for OpenAI)
 }
 
 export class PreferencesManager {
@@ -39,6 +41,8 @@ export class PreferencesManager {
           maxIterations: config.maxIterations ?? 100,
           hilEnabled: config.hilEnabled ?? false,
           approveAll: config.approveAll ?? false,
+          thinkingEnabled: config.thinkingEnabled ?? false,
+          thinkingLevel: config.thinkingLevel,
         };
         return;
       } catch (error) {
@@ -59,6 +63,8 @@ export class PreferencesManager {
           maxIterations: config.maxIterations ?? 100,
           hilEnabled: config.hilEnabled ?? false,
           approveAll: config.approveAll ?? false,
+          thinkingEnabled: config.thinkingEnabled ?? false,
+          thinkingLevel: config.thinkingLevel,
         };
         // Write migrated settings to YAML
         this.savePreferences();
@@ -73,6 +79,8 @@ export class PreferencesManager {
       maxIterations: 100,
       hilEnabled: false,
       approveAll: false,
+      thinkingEnabled: false,
+      thinkingLevel: undefined,
     };
   }
 
@@ -173,6 +181,27 @@ export class PreferencesManager {
 
   setApproveAll(value: boolean): void {
     this.preferences.approveAll = value;
+    this.savePreferences();
+  }
+
+  getThinkingEnabled(): boolean {
+    return this.preferences.thinkingEnabled ?? false;
+  }
+
+  setThinkingEnabled(enabled: boolean): void {
+    this.preferences.thinkingEnabled = enabled;
+    if (!enabled) {
+      this.preferences.thinkingLevel = undefined;
+    }
+    this.savePreferences();
+  }
+
+  getThinkingLevel(): string | undefined {
+    return this.preferences.thinkingLevel;
+  }
+
+  setThinkingLevel(level: string | undefined): void {
+    this.preferences.thinkingLevel = level;
     this.savePreferences();
   }
 }
