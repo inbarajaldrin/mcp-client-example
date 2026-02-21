@@ -59,6 +59,8 @@ export interface ChatSession {
     timestamp: string;
     role: 'user' | 'assistant' | 'tool' | 'client';
     content: string;
+    // For assistant messages with thinking/reasoning content
+    thinking?: string;
     // For assistant messages with tool_use blocks (preserves full structure for restore)
     content_blocks?: Array<{ type: string; [key: string]: any }>;
     // For tool result messages (preserves tool_use_id for proper pairing on restore)
@@ -259,7 +261,7 @@ export class ChatHistoryManager {
   /**
    * Add an assistant message to current session
    */
-  addAssistantMessage(content: string, contentBlocks?: Array<{ type: string; [key: string]: any }>): void {
+  addAssistantMessage(content: string, contentBlocks?: Array<{ type: string; [key: string]: any }>, thinking?: string): void {
     if (!this.currentSession) {
       this.logger.log('No active session. Call startSession() first.\n', {
         type: 'warning',
@@ -272,6 +274,11 @@ export class ChatHistoryManager {
       role: 'assistant',
       content,
     };
+
+    // Preserve thinking/reasoning content
+    if (thinking) {
+      message.thinking = thinking;
+    }
 
     // Preserve content_blocks if present (for tool_use blocks)
     if (contentBlocks && contentBlocks.length > 0) {
@@ -765,7 +772,18 @@ export class ChatHistoryManager {
       } else if (msg.role === 'client') {
         md += `### Client (${time})\n\n${msg.content}\n\n`;
       } else if (msg.role === 'assistant') {
-        md += `### Assistant (${time})\n\n${msg.content}\n\n`;
+        md += `### Assistant (${time})\n\n`;
+        // Render thinking/reasoning content if present
+        if (msg.thinking) {
+          md += `<details>\n<summary>Thinking</summary>\n\n${msg.thinking}\n\n</details>\n\n`;
+        } else if (msg.content_blocks) {
+          const thinkingBlocks = (msg.content_blocks as any[]).filter((b: any) => b.type === 'thinking');
+          if (thinkingBlocks.length > 0) {
+            const thinkingText = thinkingBlocks.map((b: any) => b.thinking).join('\n');
+            md += `<details>\n<summary>Thinking</summary>\n\n${thinkingText}\n\n</details>\n\n`;
+          }
+        }
+        md += `${msg.content}\n\n`;
 
         // Display token usage for this callback if available
         if (session.tokenUsagePerCallback && tokenUsageIndex < session.tokenUsagePerCallback.length) {

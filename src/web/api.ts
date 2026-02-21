@@ -252,6 +252,8 @@ export function createApiRouter(client: MCPClient): Router {
             typeof lastAssistant.content === 'string'
               ? lastAssistant.content
               : JSON.stringify(lastAssistant.content),
+            lastAssistant.content_blocks,
+            lastAssistant.thinking,
           );
         }
       } catch {
@@ -278,6 +280,7 @@ export function createApiRouter(client: MCPClient): Router {
     res.json(messages.map((m: any) => ({
       role: m.role,
       content: m.content,
+      thinking: m.thinking,
       content_blocks: m.content_blocks,
       tool_calls: m.tool_calls,
       tool_results: m.tool_results,

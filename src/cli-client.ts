@@ -1585,7 +1585,7 @@ export class MCPClientCLI {
           if (assistantMessages.length > 0) {
             const lastAssistantMessage = assistantMessages[assistantMessages.length - 1];
             if (lastAssistantMessage.content) {
-              this.client.getChatHistoryManager().addAssistantMessage(lastAssistantMessage.content);
+              this.client.getChatHistoryManager().addAssistantMessage(lastAssistantMessage.content, lastAssistantMessage.content_blocks, lastAssistantMessage.thinking);
             }
           }
         }

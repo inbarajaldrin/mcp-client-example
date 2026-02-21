@@ -724,7 +724,7 @@ export class ChatHistoryCLI {
           }
 
           newMessages.push(messageObj);
-          this.historyManager.addAssistantMessage(msg.content, msg.content_blocks);
+          this.historyManager.addAssistantMessage(msg.content, msg.content_blocks, msg.thinking);
           restoredCount++;
 
           // Add tool results that belong to this assistant message (AFTER the assistant message)

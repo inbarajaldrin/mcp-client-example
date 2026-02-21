@@ -1,4 +1,4 @@
-import { useMemo } from 'react';
+import { useMemo, useState } from 'react';
 import type { ChatMessage as ChatMessageType, ContentBlock } from '../hooks/useChat';
 import { ToolCall } from './ToolCall';
 
@@ -100,8 +100,32 @@ function renderInline(text: string): (string | JSX.Element)[] {
   return parts;
 }
 
+function ThinkingBlock({ text }: { text: string }) {
+  const [expanded, setExpanded] = useState(false);
+  return (
+    <div className="thinking-block">
+      <button className="thinking-block__toggle" onClick={() => setExpanded(!expanded)}>
+        <svg className="thinking-block__icon" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+          <path d="M12 2a7 7 0 0 1 7 7c0 2.5-1.3 4.7-3.2 6-.7.5-1.3 1.2-1.5 2H9.7c-.2-.8-.8-1.5-1.5-2C6.3 13.7 5 11.5 5 9a7 7 0 0 1 7-7z"/>
+          <path d="M9 22h6"/><path d="M9 18h6"/>
+        </svg>
+        <span>Thinking</span>
+        <span className="thinking-block__chevron">{expanded ? '\u25BE' : '\u25B8'}</span>
+      </button>
+      {expanded && (
+        <div className="thinking-block__content">
+          {renderContent(text)}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function renderBlocks(blocks: ContentBlock[]): JSX.Element[] {
   return blocks.map((block, idx) => {
+    if (block.type === 'thinking') {
+      return <ThinkingBlock key={`thinking-${idx}`} text={block.text} />;
+    }
     if (block.type === 'text') {
       const elements = renderContent(block.text);
       return <div key={`text-${idx}`} className="message__text-block">{elements}</div>;

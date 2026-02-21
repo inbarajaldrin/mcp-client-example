@@ -466,7 +466,16 @@ export class GeminiProvider implements ModelProvider {
           
           if (candidate.content && candidate.content.parts) {
             for (const part of candidate.content.parts) {
-              if (part.text) {
+              if (part.text && (part as any).thought) {
+                // Thinking/reasoning content
+                yield {
+                  type: 'content_block_delta',
+                  delta: {
+                    type: 'thinking_delta',
+                    thinking: part.text,
+                  },
+                };
+              } else if (part.text) {
                 // Text content
                 yield {
                   type: 'content_block_delta',
@@ -641,6 +650,7 @@ export class GeminiProvider implements ModelProvider {
         thoughtSignature?: string;
       }> = [];
       let assistantContent = '';
+      let thinkingContent = '';
       let messageStarted = false;
       let finalUsage: { promptTokenCount?: number; candidatesTokenCount?: number; thoughtsTokenCount?: number; cachedContentTokenCount?: number } | null = null;
 
@@ -661,7 +671,21 @@ export class GeminiProvider implements ModelProvider {
 
           if (candidate.content && candidate.content.parts) {
             for (const part of candidate.content.parts) {
-              if (part.text) {
+              if (part.text && (part as any).thought) {
+                // Thinking/reasoning content
+                if (!messageStarted) {
+                  yield { type: 'message_start' } as MessageStreamEvent;
+                  messageStarted = true;
+                }
+                thinkingContent += part.text;
+                yield {
+                  type: 'content_block_delta',
+                  delta: {
+                    type: 'thinking_delta',
+                    thinking: part.text,
+                  },
+                } as MessageStreamEvent;
+              } else if (part.text) {
                 // Text content - emit message_start before first text
                 if (!messageStarted) {
                   yield { type: 'message_start' } as MessageStreamEvent;
@@ -758,6 +782,7 @@ export class GeminiProvider implements ModelProvider {
       conversationMessages.push({
         role: 'assistant',
         content: assistantContent || '',
+        ...(thinkingContent && { thinking: thinkingContent }),
         content_blocks: contentBlocks,
       });
 

@@ -328,6 +328,14 @@ export class OpenAIProvider implements ModelProvider {
 
       const delta = choice.delta;
 
+      // Reasoning/thinking content (e.g. from gpt-5 family)
+      if ((delta as any).reasoning_content) {
+        yield {
+          type: 'content_block_delta',
+          delta: { type: 'thinking_delta', thinking: (delta as any).reasoning_content },
+        } as MessageStreamEvent;
+      }
+
       if (delta.content) {
         yield {
           type: 'content_block_delta',
@@ -493,8 +501,9 @@ export class OpenAIProvider implements ModelProvider {
       const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
       let messageStarted = false;
       let assistantContent = '';
-      let finalUsage: { 
-        prompt_tokens: number; 
+      let thinkingContent = '';
+      let finalUsage: {
+        prompt_tokens: number;
         completion_tokens: number;
         input_tokens_details?: { cached_tokens?: number };
       } | null = null;
@@ -519,6 +528,15 @@ export class OpenAIProvider implements ModelProvider {
         }
 
         const delta = choice.delta;
+
+        // Reasoning/thinking content (e.g. from gpt-5 family)
+        if ((delta as any).reasoning_content) {
+          thinkingContent += (delta as any).reasoning_content;
+          yield {
+            type: 'content_block_delta',
+            delta: { type: 'thinking_delta', thinking: (delta as any).reasoning_content },
+          } as MessageStreamEvent;
+        }
 
         // Text content - stream to user
         if (delta.content) {
@@ -614,6 +632,7 @@ export class OpenAIProvider implements ModelProvider {
       conversationMessages.push({
         role: 'assistant',
         content: assistantMessage.content || '',
+        ...(thinkingContent && { thinking: thinkingContent }),
         tool_calls: assistantMessage.tool_calls
           ? assistantMessage.tool_calls.map((tc) => {
               // Handle both function and custom tool call types

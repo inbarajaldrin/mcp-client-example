@@ -534,9 +534,15 @@ export class AnthropicProvider implements ModelProvider {
 
       // Step 2: Add Anthropic's response to conversation
       // Store full content blocks to preserve tool_use blocks for tool_result references
+      // Extract thinking content from thinking blocks
+      const thinkingContent = (response.content as any[])
+        .filter((block: any) => block.type === 'thinking')
+        .map((block: any) => block.thinking)
+        .join('\n');
       conversationMessages.push({
         role: 'assistant',
         content: this.extractTextContent(response.content),
+        ...(thinkingContent && { thinking: thinkingContent }),
         tool_calls: this.extractToolCalls(response.content),
         content_blocks: response.content, // Preserve full content array with tool_use blocks
       });

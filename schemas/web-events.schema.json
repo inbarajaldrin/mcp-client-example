@@ -5,6 +5,7 @@
   "description": "Server-Sent Events emitted by the web UI during chat sessions. Consumed by the frontend via EventSource.",
   "oneOf": [
     { "$ref": "#/$defs/TextDelta" },
+    { "$ref": "#/$defs/ThinkingDelta" },
     { "$ref": "#/$defs/ToolStart" },
     { "$ref": "#/$defs/ToolComplete" },
     { "$ref": "#/$defs/TokenUsage" },
@@ -24,6 +25,14 @@
       "properties": {
         "type": { "const": "text_delta" },
         "text": { "type": "string", "description": "Incremental text chunk from LLM response" }
+      }
+    },
+    "ThinkingDelta": {
+      "type": "object",
+      "required": ["type", "text"],
+      "properties": {
+        "type": { "const": "thinking_delta" },
+        "text": { "type": "string", "description": "Incremental thinking/reasoning content from model" }
       }
     },
     "ToolStart": {

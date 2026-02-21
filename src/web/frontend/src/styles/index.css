@@ -646,6 +646,62 @@ body::before {
   padding: var(--sp-1) 0;
 }
 
+/* ─── Thinking Block ─── */
+.thinking-block {
+  margin-bottom: var(--sp-3);
+  border: 1px dashed var(--border-default);
+  border-radius: var(--radius-md);
+  overflow: hidden;
+}
+
+.thinking-block__toggle {
+  display: flex;
+  align-items: center;
+  gap: var(--sp-2);
+  width: 100%;
+  padding: var(--sp-2) var(--sp-3);
+  background: transparent;
+  border: none;
+  color: var(--text-tertiary);
+  font-family: var(--font-mono);
+  font-size: var(--font-size-sm);
+  cursor: pointer;
+  transition: background-color var(--transition-fast), color var(--transition-fast);
+}
+
+.thinking-block__toggle:hover {
+  background: var(--bg-tertiary);
+  color: var(--text-secondary);
+}
+
+.thinking-block__icon {
+  flex-shrink: 0;
+  opacity: 0.6;
+}
+
+.thinking-block__chevron {
+  margin-left: auto;
+  font-size: 10px;
+}
+
+.thinking-block__content {
+  padding: var(--sp-2) var(--sp-3);
+  color: var(--text-tertiary);
+  font-size: var(--font-size-sm);
+  line-height: 1.5;
+  border-top: 1px dashed var(--border-default);
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.thinking-block__content p {
+  margin-bottom: var(--sp-2);
+}
+
+.thinking-block__content pre {
+  font-size: var(--font-size-xs);
+}
+
 /* ─── Tool Call Card ─── */
 .tool-call {
   border: 1px solid var(--border-default);

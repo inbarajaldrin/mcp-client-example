@@ -11,7 +11,8 @@ export interface ToolCallInfo {
 export type ContentBlock =
   | { type: 'text'; text: string }
   | { type: 'info'; text: string }
-  | { type: 'tool'; tool: ToolCallInfo };
+  | { type: 'tool'; tool: ToolCallInfo }
+  | { type: 'thinking'; text: string };
 
 export interface ChatMessage {
   id: string;
@@ -118,6 +119,17 @@ export function useChat(options?: UseChatOptions) {
 
               let updatedLast: ChatMessage;
               switch (event.type) {
+                case 'thinking_delta': {
+                  const newBlocks = [...last.blocks];
+                  const lastBlock = newBlocks[newBlocks.length - 1];
+                  if (lastBlock && lastBlock.type === 'thinking') {
+                    newBlocks[newBlocks.length - 1] = { type: 'thinking', text: lastBlock.text + event.text };
+                  } else {
+                    newBlocks.push({ type: 'thinking', text: event.text });
+                  }
+                  updatedLast = { ...last, blocks: newBlocks };
+                  break;
+                }
                 case 'text_delta': {
                   const newContent = last.content + event.text;
                   // Append to last text block, or create a new one
@@ -438,6 +450,7 @@ export function useChat(options?: UseChatOptions) {
       const history: Array<{
         role: string;
         content: string;
+        thinking?: string;
         content_blocks?: Array<{ type: string; id?: string; name?: string; input?: any; text?: string }>;
         tool_calls?: Array<{ id: string; name: string; arguments: string }>;
         tool_results?: Array<{ type: string; tool_use_id?: string; content?: string }>;
@@ -506,7 +519,9 @@ export function useChat(options?: UseChatOptions) {
           const blocks: ContentBlock[] = [];
           if (msg.content_blocks && msg.content_blocks.length > 0) {
             for (const cb of msg.content_blocks) {
-              if (cb.type === 'text' && cb.text) {
+              if (cb.type === 'thinking' && (cb as any).thinking) {
+                blocks.push({ type: 'thinking', text: (cb as any).thinking });
+              } else if (cb.type === 'text' && cb.text) {
                 blocks.push({ type: 'text', text: cb.text });
               } else if (cb.type === 'tool_use' && cb.name) {
                 const tc = toolCalls.find(t => t.toolId === cb.id || t.toolName === cb.name);
@@ -516,6 +531,10 @@ export function useChat(options?: UseChatOptions) {
           }
           // Fallback: text block + tool blocks
           if (blocks.length === 0) {
+            // Add thinking block from standalone thinking field (non-Anthropic providers)
+            if (msg.thinking) {
+              blocks.push({ type: 'thinking', text: msg.thinking });
+            }
             if (text) blocks.push({ type: 'text', text });
             for (const tc of toolCalls) blocks.push({ type: 'tool', tool: tc });
           }

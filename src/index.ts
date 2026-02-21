@@ -13,6 +13,7 @@ import {
   type ElicitRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import chalk from 'chalk';
 import { consoleStyles, Logger, LoggerOptions } from './logger.js';
 import { TodoManager } from './managers/todo-manager.js';
 import { ROS2VideoRecordingManager } from './managers/ros2-video-recording-manager.js';
@@ -32,6 +33,7 @@ import type {
 
 export type WebStreamEvent =
   | { type: 'text_delta'; text: string }
+  | { type: 'thinking_delta'; text: string }
   | { type: 'tool_start'; toolName: string; toolInput: Record<string, any>; toolId: string }
   | { type: 'tool_complete'; toolName: string; toolInput: Record<string, any>; result: string; toolId: string; cancelled?: boolean }
   | { type: 'token_usage'; inputTokens: number; outputTokens: number; totalTokens: number }
@@ -2096,6 +2098,8 @@ export class MCPClient {
     this.logger.log(consoleStyles.assistant);
 
     let currentMessage = '';
+    let currentThinking = '';
+    let thinkingStarted = false;
     let messageStarted = false;
     let hasOutputContent = false; // Track if we've output any content after "Assistant:"
 
@@ -2336,7 +2340,29 @@ export class MCPClient {
         continue;
       }
 
+      // Handle thinking/reasoning content from all providers
+      if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'thinking_delta') {
+        const thinkingText = chunk.delta.thinking;
+        currentThinking += thinkingText;
+        // CLI: dimmed text with left border, "Thinking:" header on first chunk
+        if (!thinkingStarted) {
+          this.logger.log(chalk.dim('\n  Thinking:\n'));
+          thinkingStarted = true;
+        }
+        const lines = thinkingText.split('\n');
+        const bordered = lines.map((line: string) => '  ' + chalk.dim('\u2502 ' + line)).join('\n');
+        this.logger.log(bordered);
+        observer?.({ type: 'thinking_delta', text: thinkingText });
+        hasOutputContent = true;
+        continue;
+      }
+
       if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'text_delta') {
+        // Separator between thinking and regular text
+        if (thinkingStarted && currentMessage === '') {
+          this.logger.log('\n');
+          thinkingStarted = false;
+        }
         // Accumulate text from OpenAI streaming
         // Text will appear on the same line as "Assistant:" if it's the first content
         currentMessage += chunk.delta.text;
@@ -2489,7 +2515,7 @@ export class MCPClient {
           // For non-Anthropic providers, this is the only place tool call info gets persisted
           // (Anthropic saves via the complete response handler at chunk.content path below)
           if (!isAnthropic && hasToolCalls && contentBlocks) {
-            this.chatHistoryManager.addAssistantMessage(currentMessage, contentBlocks);
+            this.chatHistoryManager.addAssistantMessage(currentMessage, contentBlocks, currentThinking || undefined);
           }
 
           // Clear pending tool calls after adding to message
@@ -2612,17 +2638,24 @@ export class MCPClient {
           this.logger.log(`\n[DEBUG] Complete response received, NOT logging text (length: ${textContent.length})\n`, { type: 'info' });
         }
         
+        // Extract thinking content from Anthropic response
+        const anthropicThinking = (chunk.content as any[])
+          .filter((block: any) => block.type === 'thinking')
+          .map((block: any) => block.thinking)
+          .join('\n') || undefined;
+
         // Add assistant message to messages (with tool_use blocks if present)
         // This ensures tool calls are preserved in conversation context
         const assistantMessage: Message = {
           role: 'assistant',
           content: textContent,
+          ...(anthropicThinking && { thinking: anthropicThinking }),
           content_blocks: chunk.content, // Preserve full content including tool_use blocks
         };
         this.messages.push(assistantMessage);
 
         // Save assistant message to chat history (preserving content_blocks for proper restore)
-        this.chatHistoryManager.addAssistantMessage(textContent, chunk.content);
+        this.chatHistoryManager.addAssistantMessage(textContent, chunk.content, anthropicThinking);
         
         // If we have pending tool results, add them now (after the assistant message with tool_use blocks)
         if (pendingToolResults.length > 0) {
@@ -3288,7 +3321,8 @@ export class MCPClient {
             if (lastAssistantMessage.content || lastAssistantMessage.content_blocks) {
               this.chatHistoryManager.addAssistantMessage(
                 lastAssistantMessage.content || '',
-                lastAssistantMessage.content_blocks
+                lastAssistantMessage.content_blocks,
+                lastAssistantMessage.thinking
               );
             }
           }
@@ -3477,11 +3511,11 @@ export class MCPClient {
         histMgr.addUserMessage(msg.content);
       } else if (msg.role === 'assistant') {
         if (msg.content_blocks) {
-          this.messages.push({ role: 'assistant', content: msg.content, content_blocks: msg.content_blocks });
-          histMgr.addAssistantMessage(msg.content, msg.content_blocks);
+          this.messages.push({ role: 'assistant', content: msg.content, ...(msg.thinking && { thinking: msg.thinking }), content_blocks: msg.content_blocks });
+          histMgr.addAssistantMessage(msg.content, msg.content_blocks, msg.thinking);
         } else {
-          this.messages.push({ role: 'assistant', content: msg.content });
-          histMgr.addAssistantMessage(msg.content);
+          this.messages.push({ role: 'assistant', content: msg.content, ...(msg.thinking && { thinking: msg.thinking }) });
+          histMgr.addAssistantMessage(msg.content, undefined, msg.thinking);
         }
       } else if (msg.role === 'tool' && msg.tool_use_id) {
         this.messages.push({ role: 'tool', content: msg.content, tool_call_id: msg.tool_use_id });

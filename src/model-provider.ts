@@ -11,6 +11,7 @@ export interface ToolCall {
 export interface Message {
   role: 'user' | 'assistant' | 'tool';
   content: string;
+  thinking?: string; // Accumulated thinking/reasoning content from model
   tool_call_id?: string; // For OpenAI tool result messages
   tool_name?: string; // For Ollama tool result messages
   tool_calls?: ToolCall[]; // For assistant messages that contain tool calls (OpenAI-specific)

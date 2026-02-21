@@ -870,6 +870,7 @@ export class OllamaProvider implements ModelProvider {
       conversationMessages.push({
         role: 'assistant',
         content: assistantContent,
+        ...(thinkingContent && { thinking: thinkingContent }),
         tool_calls: toolCalls.length > 0 ? toolCalls.map(tc => ({
           id: tc.id,
           name: tc.name,

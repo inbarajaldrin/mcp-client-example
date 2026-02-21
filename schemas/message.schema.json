@@ -55,6 +55,10 @@
         }
       }
     },
+    "thinking": {
+      "type": "string",
+      "description": "Accumulated thinking/reasoning content from model (Anthropic extended thinking, OpenAI reasoning_content, Gemini thought parts, Ollama thinking)"
+    },
     "content_blocks": {
       "type": "array",
       "description": "Preserved tool_use blocks from assistant responses",

@@ -69,6 +69,10 @@
           "type": "string",
           "description": "Text content of the message"
         },
+        "thinking": {
+          "type": "string",
+          "description": "Accumulated thinking/reasoning content from model (Anthropic extended thinking, OpenAI reasoning_content, Gemini thought parts, Ollama thinking)"
+        },
         "content_blocks": {
           "type": "array",
           "description": "Structured content blocks preserving tool_use blocks from assistant",

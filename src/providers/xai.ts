@@ -316,6 +316,14 @@ export class GrokProvider implements ModelProvider {
 
       const delta = choice.delta;
 
+      // Reasoning/thinking content (e.g. from grok-3-mini)
+      if ((delta as any).reasoning_content) {
+        yield {
+          type: 'content_block_delta',
+          delta: { type: 'thinking_delta', thinking: (delta as any).reasoning_content },
+        } as MessageStreamEvent;
+      }
+
       if (delta.content) {
         yield {
           type: 'content_block_delta',
@@ -465,6 +473,7 @@ export class GrokProvider implements ModelProvider {
       const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
       let messageStarted = false;
       let assistantContent = '';
+      let thinkingContent = '';
       let finalUsage: {
         prompt_tokens: number;
         completion_tokens: number;
@@ -491,6 +500,15 @@ export class GrokProvider implements ModelProvider {
         }
 
         const delta = choice.delta;
+
+        // Reasoning/thinking content (e.g. from grok-3-mini)
+        if ((delta as any).reasoning_content) {
+          thinkingContent += (delta as any).reasoning_content;
+          yield {
+            type: 'content_block_delta',
+            delta: { type: 'thinking_delta', thinking: (delta as any).reasoning_content },
+          } as MessageStreamEvent;
+        }
 
         // Text content - stream to user
         if (delta.content) {
@@ -585,6 +603,7 @@ export class GrokProvider implements ModelProvider {
       conversationMessages.push({
         role: 'assistant',
         content: assistantMessage.content || '',
+        ...(thinkingContent && { thinking: thinkingContent }),
         tool_calls: assistantMessage.tool_calls
           ? assistantMessage.tool_calls.map((tc) => {
               const functionCall = 'function' in tc ? tc.function : null;
