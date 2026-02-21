@@ -760,10 +760,18 @@ export class AblationManager {
         return true;
       }
 
-      // Move contents into stash, then recreate empty outputs
+      // Move contents into stash, then recreate empty outputs preserving subdirectory structure.
+      // MCP servers create subdirectories (screenshots/, videos/, etc.) once at startup
+      // and expect them to persist — recreate the skeleton so writes don't silently fail.
       cpSync(OUTPUTS_DIR, stashDir, { recursive: true });
       rmSync(OUTPUTS_DIR, { recursive: true, force: true });
       mkdirSync(OUTPUTS_DIR, { recursive: true });
+      for (const item of items) {
+        const stashedPath = join(stashDir, item);
+        if (existsSync(stashedPath) && statSync(stashedPath).isDirectory()) {
+          mkdirSync(join(OUTPUTS_DIR, item), { recursive: true });
+        }
+      }
       this.logger.log(`  Outputs stashed (${items.length} items)\n`, { type: 'info' });
       return true;
     } catch (error) {
@@ -774,14 +782,27 @@ export class AblationManager {
 
   /**
    * Clear the outputs folder between model runs.
-   * Since outputs were stashed at the start, this just empties the folder.
+   * Preserves the subdirectory structure (screenshots/, videos/, etc.) so that
+   * MCP servers can still write to their expected paths. MCP servers create
+   * these subdirectories once at startup and expect them to persist.
    */
   clearOutputs(): void {
     try {
       if (existsSync(OUTPUTS_DIR)) {
-        rmSync(OUTPUTS_DIR, { recursive: true, force: true });
+        for (const item of readdirSync(OUTPUTS_DIR)) {
+          const itemPath = join(OUTPUTS_DIR, item);
+          if (statSync(itemPath).isDirectory()) {
+            // Clear directory contents but preserve the directory itself
+            for (const child of readdirSync(itemPath)) {
+              rmSync(join(itemPath, child), { recursive: true, force: true });
+            }
+          } else {
+            rmSync(itemPath, { force: true });
+          }
+        }
+      } else {
+        mkdirSync(OUTPUTS_DIR, { recursive: true });
       }
-      mkdirSync(OUTPUTS_DIR, { recursive: true });
     } catch (error) {
       this.logger.log(`Failed to clear outputs: ${error}\n`, { type: 'error' });
     }
