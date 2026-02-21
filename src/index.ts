@@ -662,6 +662,9 @@ export class MCPClient {
     };
 
     this.messages.push(message);
+
+    // Log injected hook result to chat history
+    this.chatHistoryManager.addUserMessage(message.content as string);
   }
 
   /**
@@ -2089,6 +2092,7 @@ export class MCPClient {
         promptEvalRate?: number;
       };
     } | null;
+    deferredHookData: Array<{ toolName: string; result: string; toolInput?: Record<string, unknown> }>;
   }> {
     this.logger.log(consoleStyles.assistant);
 
@@ -2097,6 +2101,8 @@ export class MCPClient {
     let thinkingStarted = false;
     let messageStarted = false;
     let hasOutputContent = false; // Track if we've output any content after "Assistant:"
+    // Collect tool completions for deferred hook processing after agent response
+    const deferredHookData: Array<{ toolName: string; result: string; toolInput?: Record<string, unknown> }> = [];
 
     // Track tool results to add to messages
     const pendingToolResults: Array<{
@@ -2263,22 +2269,15 @@ export class MCPClient {
           toolId, // Pass the tool_use_id for pairing with assistant's tool_use block
         );
 
-        // Execute @tool: (injecting) after-hooks inline, right after the tool result.
-        // The hook runs, and its result is injected as a user message so the agent
-        // sees it on the next turn.
-        if (this.hookManager && !this.hookManager.isExecuting()) {
-          const hookResult: ToolExecutionResult & { toolInput?: Record<string, unknown> } = {
-            displayText: chunk.result || '',
-            contentBlocks: [],
-            hasImages: false,
+        // Collect tool completion data for deferred hook processing after agent response.
+        // Conditional hooks and @tool: hooks fire after the agent's full response ends,
+        // not mid-stream (providers copy messages, so mid-stream injection is invisible).
+        if (this.hookManager) {
+          deferredHookData.push({
+            toolName: chunk.toolName,
+            result: chunk.result || '',
             toolInput: (chunk as any).toolInput,
-          };
-          await this.hookManager.executeAfterHooks(
-            chunk.toolName,
-            hookResult,
-            (name, args) => this.toolExecutor.executeMCPTool(name, args, true),
-            (name, args, result) => { this.injectToolResult(name, args, result); },
-          );
+          });
         }
 
         continue;
@@ -2507,11 +2506,16 @@ export class MCPClient {
           };
           this.messages.push(assistantMessage);
 
-          // Save assistant messages with tool calls to chat history
-          // For non-Anthropic providers, this is the only place tool call info gets persisted
+          // Save assistant messages to chat history
+          // For non-Anthropic providers, this is the only place messages get persisted
           // (Anthropic saves via the complete response handler at chunk.content path below)
-          if (!isAnthropic && hasToolCalls && contentBlocks) {
-            this.chatHistoryManager.addAssistantMessage(currentMessage, contentBlocks, currentThinking || undefined);
+          if (!isAnthropic) {
+            if (hasToolCalls && contentBlocks) {
+              this.chatHistoryManager.addAssistantMessage(currentMessage, contentBlocks, currentThinking || undefined);
+            } else if (currentMessage.trim()) {
+              // Also log text-only responses (no tool calls) so they appear in chat history
+              this.chatHistoryManager.addAssistantMessage(currentMessage, undefined, currentThinking || undefined);
+            }
           }
 
           // Clear pending tool calls after adding to message
@@ -2846,7 +2850,7 @@ export class MCPClient {
     }
 
     // Return remaining state so caller can flush/log appropriately
-    return { pendingToolResults, lastTokenUsage };
+    return { pendingToolResults, lastTokenUsage, deferredHookData };
   }
 
   async processQuery(query: string, isSystemPrompt: boolean = false, attachments?: Array<{ path: string; fileName: string; ext: string; mediaType: string }>, cancellationCheck?: () => boolean, observer?: StreamObserver) {
@@ -2946,7 +2950,7 @@ export class MCPClient {
       // Process the stream and collect final assistant message
       // Don't break immediately on cancellation - let current chunk finish
       // Pass initial token count for tracking
-      const { pendingToolResults, lastTokenUsage } = await this.processToolUseStream(stream, cancellationCheck, tokenCountBeforeStream, observer);
+      const { pendingToolResults, lastTokenUsage, deferredHookData } = await this.processToolUseStream(stream, cancellationCheck, tokenCountBeforeStream, observer);
 
       // Flush any remaining pending tool results (in case we aborted before they were added)
       if (pendingToolResults && pendingToolResults.length > 0) {
@@ -3072,6 +3076,35 @@ export class MCPClient {
         return this.messages;
       }
 
+      // Execute deferred hooks (conditional @tool-exec: and all @tool: hooks) now that
+      // the agent's response is complete. These fire after the response so the agent
+      // doesn't interfere, and a follow-up stream lets the agent react to injected results.
+      if (deferredHookData.length > 0 && this.hookManager && !(cancellationCheck && cancellationCheck())) {
+        const hasInjections = await this.hookManager.executeDeferredAfterHooks(
+          deferredHookData,
+          (name, args) => this.toolExecutor.executeMCPTool(name, args, true),
+          (name, args, result) => this.injectToolResult(name, args, result),
+        );
+
+        // If @tool: hooks injected messages, start a follow-up stream so the agent
+        // can see and react to them (e.g., scene was randomized, now continue).
+        if (hasInjections && !(cancellationCheck && cancellationCheck())) {
+          const hookFollowUpStream = (this.modelProvider as any).createMessageStreamWithToolUse(
+            this.messages,
+            this.model,
+            this.tools,
+            8192,
+            toolExecutor,
+            (() => {
+              const maxIter = this.preferencesManager.getMaxIterations();
+              return maxIter === -1 ? 999999 : maxIter;
+            })(),
+            cancellationCheck,
+          );
+          await this.processToolUseStream(hookFollowUpStream, cancellationCheck, this.currentTokenCount, observer);
+        }
+      }
+
       // Always update token count using official API after stream completes
       // This ensures accurate counts including images/attachments
       if (this.modelProvider.getProviderName() === 'anthropic') {
@@ -3167,7 +3200,7 @@ export class MCPClient {
         })(), // maxIterations
             cancellationCheck, // Pass cancellation check to provider
           );
-          const { pendingToolResults: continuePendingToolResults, lastTokenUsage: continueLastTokenUsage } = await this.processToolUseStream(continueStream, cancellationCheck, continueTokenCountBeforeStream, observer);
+          const { pendingToolResults: continuePendingToolResults, lastTokenUsage: continueLastTokenUsage, deferredHookData: continueDeferredHookData } = await this.processToolUseStream(continueStream, cancellationCheck, continueTokenCountBeforeStream, observer);
 
           // Flush any remaining pending tool results
           if (continuePendingToolResults && continuePendingToolResults.length > 0) {
@@ -3243,6 +3276,31 @@ export class MCPClient {
                 }
                 lastAssistantIdx--;
               }
+            }
+          }
+
+          // Execute deferred hooks from the continue stream
+          if (continueDeferredHookData.length > 0 && this.hookManager && !(cancellationCheck && cancellationCheck())) {
+            const hasInjections = await this.hookManager.executeDeferredAfterHooks(
+              continueDeferredHookData,
+              (name, args) => this.toolExecutor.executeMCPTool(name, args, true),
+              (name, args, result) => this.injectToolResult(name, args, result),
+            );
+
+            if (hasInjections && !(cancellationCheck && cancellationCheck())) {
+              const hookFollowUpStream = (this.modelProvider as any).createMessageStreamWithToolUse(
+                this.messages,
+                this.model,
+                this.tools,
+                8192,
+                toolExecutor,
+                (() => {
+                  const maxIter = this.preferencesManager.getMaxIterations();
+                  return maxIter === -1 ? 999999 : maxIter;
+                })(),
+                cancellationCheck,
+              );
+              await this.processToolUseStream(hookFollowUpStream, cancellationCheck, this.currentTokenCount, observer);
             }
           }
 

@@ -258,10 +258,13 @@ export class HookManager {
   }
 
   /**
-   * Execute immediate (non-injecting) after-hooks for a completed tool call.
-   * Fires @tool-exec: hooks and special commands (@complete-phase, @abort) inline
-   * during tool execution. Skips @tool: hooks (those need result injection and
-   * are handled by executeAfterHooks in the deferred path).
+   * Execute immediate after-hooks for a completed tool call.
+   * Fires ONLY:
+   *   - Special commands (@complete-phase, @abort) — always immediate for cancellation
+   *   - Unconditional @tool-exec: hooks (no whenInput/whenOutput)
+   *
+   * Conditional hooks (whenInput/whenOutput) and all @tool: hooks are deferred
+   * to executeDeferredAfterHooks(), which runs after the agent's full response.
    *
    * Called from tool-executor.ts right after each MCP tool completes.
    */
@@ -293,7 +296,7 @@ export class HookManager {
           continue;
         }
 
-        // Handle special commands (@complete-phase, @abort)
+        // Special commands (@complete-phase, @abort) always fire immediately for cancellation
         if (this.handleSpecialCommand(hook.run)) {
           continue;
         }
@@ -304,8 +307,11 @@ export class HookManager {
           continue;
         }
 
-        // Only fire non-injecting hooks inline; @tool: hooks are deferred
+        // Defer @tool: hooks (injecting) — agent can't see injections mid-stream anyway
         if (parsed.injectResult) continue;
+
+        // Defer conditional @tool-exec: hooks — fire after agent response for consistency
+        if (hook.whenInput || hook.whenOutput) continue;
 
         this.logger.log(`[Hook triggered: ${parsed.toolName}]\n`, { type: 'info' });
 
@@ -322,23 +328,28 @@ export class HookManager {
   }
 
   /**
-   * Execute deferred (injecting) after-hooks for a completed tool call.
-   * Only fires @tool: hooks that need to inject results into conversation context.
-   * Skips @tool-exec: hooks and special commands (already handled by executeImmediateAfterHooks).
+   * Execute deferred after-hooks for all tool calls made during the agent's response.
+   * Fires:
+   *   - All @tool: hooks (injecting — always deferred since providers copy messages)
+   *   - Conditional @tool-exec: hooks (whenInput/whenOutput)
    *
-   * Called from the deferred hook loop in processQuery after the agent's full response.
+   * Special commands and unconditional @tool-exec: hooks already fired inline
+   * via executeImmediateAfterHooks.
+   *
+   * Called from processQuery after the agent's full response stream ends.
+   * Returns true if any @tool: hooks injected messages into conversation context.
    */
-  async executeAfterHooks(
-    toolName: string,
-    toolResult: ToolExecutionResult & { toolInput?: Record<string, unknown> },
+  async executeDeferredAfterHooks(
+    toolCompletions: Array<{ toolName: string; result: string; toolInput?: Record<string, unknown> }>,
     executeTool: (name: string, args: Record<string, unknown>) => Promise<ToolExecutionResult>,
     injectToolResult?: (
       name: string,
       args: Record<string, unknown>,
       result: { displayText: string; contentBlocks: Array<{ type: string; text?: string; data?: string; mimeType?: string }> },
     ) => void,
-  ): Promise<void> {
-    if (this.executing) return;
+  ): Promise<boolean> {
+    if (this.executing) return false;
+    if (toolCompletions.length === 0) return false;
 
     const hooksToCheck: ClientHook[] = [];
     if (!this.suspended) {
@@ -346,56 +357,62 @@ export class HookManager {
     }
     hooksToCheck.push(...this.ablationHooks);
 
-    if (hooksToCheck.length === 0) return;
+    if (hooksToCheck.length === 0) return false;
 
+    let hasInjections = false;
     this.executing = true;
     try {
-      for (const hook of hooksToCheck) {
-        if (!hook.enabled) continue;
-        if (hook.after !== toolName) continue;
+      for (const completion of toolCompletions) {
+        for (const hook of hooksToCheck) {
+          if (!hook.enabled) continue;
+          if (hook.after !== completion.toolName) continue;
 
-        if (hook.whenInput && !matchesWhenInputCondition(hook.whenInput, toolResult.toolInput)) {
-          continue;
-        }
-        if (hook.whenOutput && !matchesWhenOutputCondition(hook.whenOutput, toolResult.displayText)) {
-          continue;
-        }
-
-        // Special commands were already handled inline — skip
-        const trimmed = hook.run.trim();
-        if (trimmed === '@complete-phase' || trimmed.startsWith('@complete-phase:') || trimmed === '@abort') {
-          continue;
-        }
-
-        const parsed = parseDirectToolCall(hook.run);
-        if (!parsed) {
-          this.logger.log(`[Hook invalid command: ${hook.run}]\n`, { type: 'warning' });
-          continue;
-        }
-
-        // Non-injecting hooks were already handled inline — skip
-        if (!parsed.injectResult) continue;
-
-        this.logger.log(`[Hook triggered: ${parsed.toolName}]\n`, { type: 'info' });
-
-        try {
-          const hookToolResult = await executeTool(parsed.toolName, parsed.args);
-          if (
-            injectToolResult &&
-            hookToolResult.contentBlocks &&
-            hookToolResult.contentBlocks.length > 0
-          ) {
-            injectToolResult(parsed.toolName, parsed.args, hookToolResult);
-            this.logger.log(`[Hook result injected into context]\n`, { type: 'info' });
+          if (hook.whenInput && !matchesWhenInputCondition(hook.whenInput, completion.toolInput)) {
+            continue;
           }
-          this.logger.log(`[Hook completed: ${parsed.toolName}]\n`, { type: 'info' });
-        } catch (error: any) {
-          this.logger.log(`[Hook failed: ${error.message}]\n`, { type: 'warning' });
+          if (hook.whenOutput && !matchesWhenOutputCondition(hook.whenOutput, completion.result)) {
+            continue;
+          }
+
+          // Special commands were already handled inline — skip
+          const trimmed = hook.run.trim();
+          if (trimmed === '@complete-phase' || trimmed.startsWith('@complete-phase:') || trimmed === '@abort') {
+            continue;
+          }
+
+          const parsed = parseDirectToolCall(hook.run);
+          if (!parsed) {
+            this.logger.log(`[Hook invalid command: ${hook.run}]\n`, { type: 'warning' });
+            continue;
+          }
+
+          // Skip unconditional @tool-exec: hooks — already fired inline
+          if (!parsed.injectResult && !hook.whenInput && !hook.whenOutput) continue;
+
+          this.logger.log(`[Hook triggered (deferred): ${parsed.toolName}]\n`, { type: 'info' });
+
+          try {
+            const hookToolResult = await executeTool(parsed.toolName, parsed.args);
+            if (
+              parsed.injectResult &&
+              injectToolResult &&
+              hookToolResult.contentBlocks &&
+              hookToolResult.contentBlocks.length > 0
+            ) {
+              injectToolResult(parsed.toolName, parsed.args, hookToolResult);
+              hasInjections = true;
+              this.logger.log(`[Hook result injected into context]\n`, { type: 'info' });
+            }
+            this.logger.log(`[Hook completed: ${parsed.toolName}]\n`, { type: 'info' });
+          } catch (error: any) {
+            this.logger.log(`[Hook failed: ${error.message}]\n`, { type: 'warning' });
+          }
         }
       }
     } finally {
       this.executing = false;
     }
+    return hasInjections;
   }
 
   /**
