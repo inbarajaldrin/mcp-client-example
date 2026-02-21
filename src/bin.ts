@@ -2,7 +2,7 @@
 
 import { parseArgs } from 'node:util';
 import { MCPClientCLI } from './cli-client.js';
-import { readFileSync, existsSync, writeFileSync, mkdirSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
@@ -70,7 +70,6 @@ interface AnthropicDesktopConfig {
 }
 
 const CONFIG_DIR = join(__dirname, '..', '.mcp-client-data');
-const CONFIG_FILE = join(CONFIG_DIR, 'preferences.json');
 
 // Try to find local mcp_config.json in mcp-client directory
 const LOCAL_CONFIG_FILE = join(__dirname, '..', 'mcp_config.json');
@@ -152,48 +151,7 @@ function loadConfig(): ClientConfig {
     }
   }
 
-  // Fall back to user config file
-  if (existsSync(CONFIG_FILE)) {
-    try {
-      const content = readFileSync(CONFIG_FILE, 'utf-8');
-      const config = JSON.parse(content);
-
-      // Check if it's Anthropic Desktop format
-      if (config.mcpServers) {
-        const servers: Record<string, ServerConfig> = {};
-        const anthropicConfig = config as AnthropicDesktopConfig;
-        for (const [name, server] of Object.entries(anthropicConfig.mcpServers)) {
-          if (server.disabled) {
-            continue;
-          }
-          servers[name] = {
-            command: server.command,
-            args: server.args || [],
-            env: mergeEnvironment(server.env),
-          };
-        }
-        const enabledServers = Object.keys(servers);
-        return {
-          servers,
-          defaultServer: enabledServers.length > 0 ? enabledServers[0] : undefined,
-        };
-      }
-
-      // Otherwise, assume it's our format
-      return config;
-    } catch (error) {
-      console.error('Error reading config file, using defaults:', error);
-    }
-  }
-
   return getDefaultConfig();
-}
-
-function saveConfig(config: ClientConfig): void {
-  if (!existsSync(CONFIG_DIR)) {
-    mkdirSync(CONFIG_DIR, { recursive: true });
-  }
-  writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
 }
 
 function listServers(config: ClientConfig): void {

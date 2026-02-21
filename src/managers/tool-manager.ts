@@ -10,7 +10,6 @@ const __dirname = dirname(__filename);
 
 const CONFIG_DIR = join(__dirname, '../..', '.mcp-client-data');
 const TOOL_STATES_FILE = join(CONFIG_DIR, 'tool-states.yaml');
-const LEGACY_JSON = join(CONFIG_DIR, 'preferences.json');
 
 export class ToolManager {
   private toolStates: Record<string, boolean> = {};
@@ -35,21 +34,6 @@ export class ToolManager {
           `Failed to load tool-states.yaml: ${error}. Trying legacy fallback.\n`,
           { type: 'warning' },
         );
-      }
-    }
-
-    // Migration: read from legacy preferences.json
-    if (existsSync(LEGACY_JSON)) {
-      try {
-        const content = readFileSync(LEGACY_JSON, 'utf-8');
-        const config = JSON.parse(content);
-        if (config.toolStates && typeof config.toolStates === 'object') {
-          this.toolStates = { ...config.toolStates };
-          this.saveState();
-          return;
-        }
-      } catch {
-        // Fall through to empty
       }
     }
 

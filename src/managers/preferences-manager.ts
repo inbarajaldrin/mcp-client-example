@@ -9,7 +9,6 @@ const __dirname = dirname(__filename);
 
 const CONFIG_DIR = join(__dirname, '../..', '.mcp-client-data');
 const SETTINGS_FILE = join(CONFIG_DIR, 'settings.yaml');
-const LEGACY_JSON = join(CONFIG_DIR, 'preferences.json');
 
 export interface ClientPreferences {
   mcpTimeout?: number; // MCP tool call timeout in seconds
@@ -50,27 +49,6 @@ export class PreferencesManager {
           `Failed to load settings.yaml: ${error}. Trying legacy fallback.\n`,
           { type: 'warning' },
         );
-      }
-    }
-
-    // Migration: read from legacy preferences.json if settings.yaml doesn't exist
-    if (existsSync(LEGACY_JSON)) {
-      try {
-        const content = readFileSync(LEGACY_JSON, 'utf-8');
-        const config = JSON.parse(content);
-        this.preferences = {
-          mcpTimeout: config.mcpTimeout ?? 60,
-          maxIterations: config.maxIterations ?? 100,
-          hilEnabled: config.hilEnabled ?? false,
-          approveAll: config.approveAll ?? false,
-          thinkingEnabled: config.thinkingEnabled ?? false,
-          thinkingLevel: config.thinkingLevel,
-        };
-        // Write migrated settings to YAML
-        this.savePreferences();
-        return;
-      } catch {
-        // Fall through to defaults
       }
     }
 

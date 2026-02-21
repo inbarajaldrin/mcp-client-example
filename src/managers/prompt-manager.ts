@@ -10,7 +10,6 @@ const __dirname = dirname(__filename);
 
 const CONFIG_DIR = join(__dirname, '../..', '.mcp-client-data');
 const PROMPT_STATES_FILE = join(CONFIG_DIR, 'prompt-states.yaml');
-const LEGACY_JSON = join(CONFIG_DIR, 'preferences.json');
 
 type PromptWithServer = {
   server: string;
@@ -40,21 +39,6 @@ export class PromptManager {
           `Failed to load prompt-states.yaml: ${error}. Trying legacy fallback.\n`,
           { type: 'warning' },
         );
-      }
-    }
-
-    // Migration: read from legacy preferences.json
-    if (existsSync(LEGACY_JSON)) {
-      try {
-        const content = readFileSync(LEGACY_JSON, 'utf-8');
-        const config = JSON.parse(content);
-        if (config.promptStates && typeof config.promptStates === 'object') {
-          this.promptStates = { ...config.promptStates };
-          this.saveState();
-          return;
-        }
-      } catch {
-        // Fall through to empty
       }
     }
 
