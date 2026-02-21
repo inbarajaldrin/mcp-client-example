@@ -27,7 +27,12 @@
     },
     "hilEnabled": {
       "type": "boolean",
-      "description": "Human-in-the-loop mode: require approval before tool execution",
+      "description": "Human-in-the-loop mode: require approval before each tool execution",
+      "default": false
+    },
+    "approveAll": {
+      "type": "boolean",
+      "description": "Auto-approve all tools without prompting. Persists across sessions.",
       "default": false
     }
   }

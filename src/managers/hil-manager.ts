@@ -12,11 +12,19 @@ export interface ToolRejection {
 export class HumanInTheLoopManager {
   private enabled: boolean = false; // Off by default
   private firstToolOfSession: boolean = true;
-  private approveAllMode: boolean = false; // Persists across session resets
+  private approveAllMode: boolean = false; // Persists across session resets and across sessions
   private logger: Logger;
 
-  constructor(logger: Logger) {
+  constructor(logger: Logger, options?: { approveAll?: boolean; hilEnabled?: boolean }) {
     this.logger = logger;
+    if (options?.approveAll) {
+      this.approveAllMode = true;
+      this.firstToolOfSession = false; // User already chose, skip first-tool prompt
+    }
+    if (options?.hilEnabled) {
+      this.enabled = true;
+      this.firstToolOfSession = false; // User already chose, skip first-tool prompt
+    }
   }
 
   isEnabled(): boolean {
@@ -31,13 +39,19 @@ export class HumanInTheLoopManager {
     this.enabled = !this.enabled;
   }
 
+  isApproveAllMode(): boolean {
+    return this.approveAllMode;
+  }
+
   setApproveAllMode(value: boolean): void {
     this.approveAllMode = value;
   }
 
   resetSession(): void {
-    this.firstToolOfSession = true;
-    // approveAllMode persists across resets
+    // Only show first-tool prompt if user hasn't made a persistent choice
+    if (!this.approveAllMode && !this.enabled) {
+      this.firstToolOfSession = true;
+    }
   }
 
   /**
@@ -128,7 +142,7 @@ export class HumanInTheLoopManager {
           return 'execute';
         }
         this.approveAllMode = true;
-        this.logger.log(chalk.blue('  Approval for all tools enabled for this session (HIL disabled)\n'));
+        this.logger.log(chalk.blue('  All tools auto-approved (use /hil to re-enable prompts)\n'));
         return 'execute';
 
       case 'p':

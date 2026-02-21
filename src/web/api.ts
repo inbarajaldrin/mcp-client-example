@@ -421,21 +421,24 @@ export function createApiRouter(client: MCPClient): Router {
       mcpTimeout: prefs.getMCPTimeout(),
       maxIterations: prefs.getMaxIterations(),
       hilEnabled: prefs.getHILEnabled(),
+      approveAll: prefs.getApproveAll(),
     });
   });
 
   // POST /api/settings — update preferences
   router.post('/settings', (req: Request, res: Response) => {
     const prefs = client.getPreferencesManager();
-    const { mcpTimeout, maxIterations, hilEnabled } = req.body;
+    const { mcpTimeout, maxIterations, hilEnabled, approveAll } = req.body;
     try {
       if (mcpTimeout !== undefined) prefs.setMCPTimeout(mcpTimeout);
       if (maxIterations !== undefined) prefs.setMaxIterations(maxIterations);
       if (hilEnabled !== undefined) prefs.setHILEnabled(!!hilEnabled);
+      if (approveAll !== undefined) prefs.setApproveAll(!!approveAll);
       res.json({
         mcpTimeout: prefs.getMCPTimeout(),
         maxIterations: prefs.getMaxIterations(),
         hilEnabled: prefs.getHILEnabled(),
+        approveAll: prefs.getApproveAll(),
       });
     } catch (err: any) {
       res.status(400).json({ error: err.message || String(err) });

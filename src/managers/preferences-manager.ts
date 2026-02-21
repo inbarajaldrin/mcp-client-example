@@ -14,7 +14,8 @@ export interface ClientPreferences {
   promptStates?: Record<string, boolean>;
   mcpTimeout?: number; // MCP tool call timeout in seconds
   maxIterations?: number; // Maximum iterations between agent calls
-  hilEnabled?: boolean; // Human-in-the-loop confirmations
+  hilEnabled?: boolean; // Human-in-the-loop confirmations (persistent per-tool prompts)
+  approveAll?: boolean; // Approve all tools without prompting (persistent)
 }
 
 interface ClientConfig {
@@ -25,6 +26,7 @@ interface ClientConfig {
   mcpTimeout?: number;
   maxIterations?: number;
   hilEnabled?: boolean;
+  approveAll?: boolean;
 }
 
 export class PreferencesManager {
@@ -48,6 +50,7 @@ export class PreferencesManager {
         mcpTimeout: 60, // Default: 60 seconds
         maxIterations: 100, // Default: 100 iterations
         hilEnabled: false, // Default: disabled, enabled on-demand via 'persistent'
+        approveAll: false, // Default: not set, user hasn't chosen yet
       };
       return;
     }
@@ -62,6 +65,7 @@ export class PreferencesManager {
         mcpTimeout: config.mcpTimeout ?? 60,
         maxIterations: config.maxIterations ?? 100,
         hilEnabled: config.hilEnabled ?? false,
+        approveAll: config.approveAll ?? false,
       };
     } catch (error) {
       this.logger.log(
@@ -72,6 +76,7 @@ export class PreferencesManager {
         mcpTimeout: 60,
         maxIterations: 100,
         hilEnabled: false,
+        approveAll: false,
       };
     }
   }
@@ -106,6 +111,7 @@ export class PreferencesManager {
         mcpTimeout: this.preferences.mcpTimeout,
         maxIterations: this.preferences.maxIterations,
         hilEnabled: this.preferences.hilEnabled,
+        approveAll: this.preferences.approveAll,
       };
 
       writeFileSync(this.configFile, JSON.stringify(config, null, 2));
@@ -241,6 +247,15 @@ export class PreferencesManager {
 
   setHILEnabled(enabled: boolean): void {
     this.preferences.hilEnabled = enabled;
+    this.savePreferences();
+  }
+
+  getApproveAll(): boolean {
+    return this.preferences.approveAll ?? false;
+  }
+
+  setApproveAll(value: boolean): void {
+    this.preferences.approveAll = value;
     this.savePreferences();
   }
 }

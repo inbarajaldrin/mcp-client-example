@@ -82,8 +82,10 @@ export class MCPClientCLI {
     this.logger = new Logger({ mode: 'verbose' });
     this.attachmentManager = new AttachmentManager(this.logger);
     this.preferencesManager = new PreferencesManager(this.logger);
-    this.hilManager = new HumanInTheLoopManager(this.logger);
-    // HIL is off by default, enabled only if user selects 'persistent' on first tool
+    this.hilManager = new HumanInTheLoopManager(this.logger, {
+      approveAll: this.preferencesManager.getApproveAll(),
+      hilEnabled: this.preferencesManager.getHILEnabled(),
+    });
     this.ablationManager = new AblationManager(this.logger);
 
     // Set up keyboard monitor for abort detection
@@ -513,6 +515,13 @@ export class MCPClientCLI {
       // If persistent mode was enabled, persist the preference
       if (decision === 'execute' && this.hilManager.isEnabled()) {
         this.preferencesManager.setHILEnabled(true);
+        this.preferencesManager.setApproveAll(false);
+      }
+
+      // If approve-all mode was enabled, persist the preference
+      if (decision === 'execute' && this.hilManager.isApproveAllMode()) {
+        this.preferencesManager.setApproveAll(true);
+        this.preferencesManager.setHILEnabled(false);
       }
 
       return decision;
@@ -923,14 +932,27 @@ export class MCPClientCLI {
     }
 
     if (lowerQuery === '/hil') {
-      this.hilManager.toggle();
-      const enabled = this.hilManager.isEnabled();
-      this.preferencesManager.setHILEnabled(enabled);
-      const status = enabled ? 'enabled' : 'disabled';
-      this.logger.log(
-        `\nHuman-in-the-loop tool approval ${status}\n`,
-        { type: enabled ? 'success' : 'warning' },
-      );
+      if (this.hilManager.isEnabled()) {
+        // HIL per-tool prompts active → switch to approve-all (no prompts)
+        this.hilManager.setEnabled(false);
+        this.hilManager.setApproveAllMode(true);
+        this.preferencesManager.setHILEnabled(false);
+        this.preferencesManager.setApproveAll(true);
+        this.logger.log(
+          '\nHuman-in-the-loop disabled — all tools auto-approved\n',
+          { type: 'warning' },
+        );
+      } else {
+        // Approve-all or first-time → switch to HIL per-tool prompts
+        this.hilManager.setEnabled(true);
+        this.hilManager.setApproveAllMode(false);
+        this.preferencesManager.setHILEnabled(true);
+        this.preferencesManager.setApproveAll(false);
+        this.logger.log(
+          '\nHuman-in-the-loop enabled — each tool will require approval\n',
+          { type: 'success' },
+        );
+      }
       return true;
     }
 
