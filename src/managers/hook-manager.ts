@@ -7,7 +7,7 @@ import { randomUUID } from 'crypto';
 import * as yaml from 'yaml';
 import { Logger } from '../logger.js';
 import type { PostToolHook } from './ablation-manager.js';
-import { parseDirectToolCall, matchesWhenCondition } from '../utils/hook-utils.js';
+import { parseDirectToolCall, matchesWhenInputCondition, matchesWhenOutputCondition } from '../utils/hook-utils.js';
 import type { ToolExecutionResult } from '../core/tool-executor.js';
 
 const __filename = fileURLToPath(import.meta.url);
@@ -228,6 +228,36 @@ export class HookManager {
   }
 
   /**
+   * Pre-evaluate whenInput after-hooks for @complete-phase/@abort BEFORE tool execution.
+   * Since whenInput conditions only depend on tool input args (known before the call),
+   * we can fire special commands early. This allows auto-declining elicitations
+   * that arrive during the tool call when the phase is already complete.
+   *
+   * Returns true if a special command (@complete-phase or @abort) was triggered.
+   */
+  preEvaluateWhenInput(toolName: string, toolInput: Record<string, unknown>): boolean {
+    const hooksToCheck: ClientHook[] = [];
+    if (!this.suspended) {
+      hooksToCheck.push(...this.hooks);
+    }
+    hooksToCheck.push(...this.ablationHooks);
+
+    let triggered = false;
+    for (const hook of hooksToCheck) {
+      if (!hook.enabled) continue;
+      if (hook.after !== toolName) continue;
+      // Only evaluate hooks that have a whenInput condition (no whenOutput — we don't have output yet)
+      if (!hook.whenInput) continue;
+      if (!matchesWhenInputCondition(hook.whenInput, toolInput)) continue;
+      // Only fire special commands early; regular tool-exec hooks still wait for completion
+      if (this.handleSpecialCommand(hook.run)) {
+        triggered = true;
+      }
+    }
+    return triggered;
+  }
+
+  /**
    * Execute immediate (non-injecting) after-hooks for a completed tool call.
    * Fires @tool-exec: hooks and special commands (@complete-phase, @abort) inline
    * during tool execution. Skips @tool: hooks (those need result injection and
@@ -256,7 +286,10 @@ export class HookManager {
         if (!hook.enabled) continue;
         if (hook.after !== toolName) continue;
 
-        if (hook.when && !matchesWhenCondition(hook.when, toolResult.displayText, toolResult.toolInput)) {
+        if (hook.whenInput && !matchesWhenInputCondition(hook.whenInput, toolResult.toolInput)) {
+          continue;
+        }
+        if (hook.whenOutput && !matchesWhenOutputCondition(hook.whenOutput, toolResult.displayText)) {
           continue;
         }
 
@@ -321,7 +354,10 @@ export class HookManager {
         if (!hook.enabled) continue;
         if (hook.after !== toolName) continue;
 
-        if (hook.when && !matchesWhenCondition(hook.when, toolResult.displayText, toolResult.toolInput)) {
+        if (hook.whenInput && !matchesWhenInputCondition(hook.whenInput, toolResult.toolInput)) {
+          continue;
+        }
+        if (hook.whenOutput && !matchesWhenOutputCondition(hook.whenOutput, toolResult.displayText)) {
           continue;
         }
 

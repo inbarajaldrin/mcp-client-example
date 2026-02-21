@@ -122,7 +122,8 @@
       "properties": {
         "after": { "type": "string", "description": "Tool name to match after execution" },
         "before": { "type": "string", "description": "Tool name to match before execution" },
-        "when": { "type": "object", "additionalProperties": true, "description": "Condition match on tool result" },
+        "whenInput": { "type": "object", "additionalProperties": true, "description": "Condition match on tool input arguments only" },
+        "whenOutput": { "type": "object", "additionalProperties": true, "description": "Condition match on tool output JSON only" },
         "run": { "type": "string", "description": "Command to execute" }
       }
     }

@@ -46,9 +46,10 @@ export class HooksCLI {
     for (const hook of hooks) {
       const status = hook.enabled ? '\x1b[32m✓\x1b[0m' : '\x1b[31m✗\x1b[0m';
       const trigger = hook.before ? `before: ${hook.before}` : `after: ${hook.after}`;
-      const whenStr = hook.when ? ` when: ${JSON.stringify(hook.when)}` : '';
+      const whenInputStr = hook.whenInput ? ` whenInput: ${JSON.stringify(hook.whenInput)}` : '';
+      const whenOutputStr = hook.whenOutput ? ` whenOutput: ${JSON.stringify(hook.whenOutput)}` : '';
       const desc = hook.description ? ` — ${hook.description}` : '';
-      this.logger.log(`  ${status} [${hook.id}] ${trigger}${whenStr}\n`);
+      this.logger.log(`  ${status} [${hook.id}] ${trigger}${whenInputStr}${whenOutputStr}\n`);
       this.logger.log(`    → ${hook.run}${desc}\n`);
     }
     this.logger.log('\n');
@@ -76,14 +77,25 @@ export class HooksCLI {
         return;
       }
 
-      // When condition (optional)
-      const whenStr = await rl.question('When condition (JSON, optional, press Enter to skip): ');
-      let when: Record<string, unknown> | undefined;
-      if (whenStr.trim()) {
-        try {
-          when = JSON.parse(whenStr.trim());
-        } catch {
-          this.logger.log('Invalid JSON for when condition. Skipping.\n', { type: 'warning' });
+      // Condition (optional)
+      let whenInput: Record<string, unknown> | undefined;
+      let whenOutput: Record<string, unknown> | undefined;
+      if (type === 'after') {
+        const condType = (await rl.question('Add condition? (1=output, 2=input, Enter=none): ')).trim().toLowerCase();
+        if (condType === '1' || condType === 'output') {
+          const jsonStr = await rl.question('whenOutput JSON (e.g. {"status":"success"}): ');
+          if (jsonStr.trim()) {
+            try { whenOutput = JSON.parse(jsonStr.trim()); } catch {
+              this.logger.log('Invalid JSON. Skipping.\n', { type: 'warning' });
+            }
+          }
+        } else if (condType === '2' || condType === 'input') {
+          const jsonStr = await rl.question('whenInput JSON (e.g. {"phase":1}): ');
+          if (jsonStr.trim()) {
+            try { whenInput = JSON.parse(jsonStr.trim()); } catch {
+              this.logger.log('Invalid JSON. Skipping.\n', { type: 'warning' });
+            }
+          }
         }
       }
 
@@ -101,7 +113,8 @@ export class HooksCLI {
         run: run.trim(),
         enabled: true,
         ...(type === 'after' ? { after: toolName.trim() } : { before: toolName.trim() }),
-        ...(when && { when }),
+        ...(whenInput && { whenInput }),
+        ...(whenOutput && { whenOutput }),
         ...(description.trim() && { description: description.trim() }),
       };
 

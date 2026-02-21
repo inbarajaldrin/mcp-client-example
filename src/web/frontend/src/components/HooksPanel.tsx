@@ -140,9 +140,14 @@ export function HooksPanel({
                         )}
                       </div>
                     </div>
-                    {hook.when && (
+                    {hook.whenInput && (
                       <div className="hooks-item__when">
-                        when: <code>{JSON.stringify(hook.when)}</code>
+                        whenInput: <code>{JSON.stringify(hook.whenInput)}</code>
+                      </div>
+                    )}
+                    {hook.whenOutput && (
+                      <div className="hooks-item__when">
+                        whenOutput: <code>{JSON.stringify(hook.whenOutput)}</code>
                       </div>
                     )}
                     <div className="hooks-item__run">

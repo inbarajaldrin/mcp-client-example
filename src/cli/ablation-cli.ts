@@ -38,7 +38,7 @@ interface ToolWithSchema {
 
 // ==================== Tool Call Parsing (shared utilities) ====================
 
-import { parseDirectToolCall, matchesWhenCondition } from '../utils/hook-utils.js';
+import { parseDirectToolCall, matchesWhenInputCondition, matchesWhenOutputCondition } from '../utils/hook-utils.js';
 import type { ParsedToolCall } from '../utils/hook-utils.js';
 import { AttachmentManager, type AttachmentInfo } from '../managers/attachment-manager.js';
 import { PreferencesManager } from '../managers/preferences-manager.js';
@@ -730,27 +730,42 @@ export class AblationCLI {
           ? { before: toolName, run: runCmd }
           : { after: toolName, run: runCmd };
 
-        // Ask for optional when condition (after-hooks only)
+        // Ask for optional condition (after-hooks only)
         if (!isBefore) {
-          const addWhen = (
-            await rl.question('  Add result condition (when)? (y/N): ')
+          const condType = (
+            await rl.question('  Add condition? (1=output, 2=input, N=none): ')
           ).trim().toLowerCase();
-          if (addWhen === 'y' || addWhen === 'yes') {
-            const when: Record<string, unknown> = {};
-            this.logger.log('  Enter key=value pairs (empty key to finish):\n', { type: 'info' });
+          if (condType === '1' || condType === 'output') {
+            const whenOutput: Record<string, unknown> = {};
+            this.logger.log('  Enter key=value pairs for tool output (empty key to finish):\n', { type: 'info' });
             while (true) {
               const key = (await rl.question('    Key: ')).trim();
               if (!key) break;
               const rawValue = (await rl.question('    Value: ')).trim();
-              // Parse numbers and booleans, keep strings as-is
               let value: unknown = rawValue;
               if (rawValue === 'true') value = true;
               else if (rawValue === 'false') value = false;
               else if (rawValue !== '' && !isNaN(Number(rawValue))) value = Number(rawValue);
-              when[key] = value;
+              whenOutput[key] = value;
             }
-            if (Object.keys(when).length > 0) {
-              newHook.when = when;
+            if (Object.keys(whenOutput).length > 0) {
+              newHook.whenOutput = whenOutput;
+            }
+          } else if (condType === '2' || condType === 'input') {
+            const whenInput: Record<string, unknown> = {};
+            this.logger.log('  Enter key=value pairs for tool input (empty key to finish):\n', { type: 'info' });
+            while (true) {
+              const key = (await rl.question('    Key: ')).trim();
+              if (!key) break;
+              const rawValue = (await rl.question('    Value: ')).trim();
+              let value: unknown = rawValue;
+              if (rawValue === 'true') value = true;
+              else if (rawValue === 'false') value = false;
+              else if (rawValue !== '' && !isNaN(Number(rawValue))) value = Number(rawValue);
+              whenInput[key] = value;
+            }
+            if (Object.keys(whenInput).length > 0) {
+              newHook.whenInput = whenInput;
             }
           }
         }
@@ -920,14 +935,16 @@ export class AblationCLI {
         this.logger.log(`\n  Tool hooks: ${totalHooks}\n`, { type: 'info' });
         for (const hook of (ablation.hooks ?? [])) {
           const trigger = hook.before ? `before ${hook.before}` : `after ${hook.after}`;
-          const whenStr = hook.when ? ` when ${JSON.stringify(hook.when)}` : '';
-          this.logger.log(`    • [all phases] ${trigger}${whenStr} → ${hook.run}\n`, { type: 'info' });
+          const whenInputStr = hook.whenInput ? ` whenInput ${JSON.stringify(hook.whenInput)}` : '';
+          const whenOutputStr = hook.whenOutput ? ` whenOutput ${JSON.stringify(hook.whenOutput)}` : '';
+          this.logger.log(`    • [all phases] ${trigger}${whenInputStr}${whenOutputStr} → ${hook.run}\n`, { type: 'info' });
         }
         for (const phase of ablation.phases) {
           for (const hook of (phase.hooks ?? [])) {
             const trigger = hook.before ? `before ${hook.before}` : `after ${hook.after}`;
-            const whenStr = hook.when ? ` when ${JSON.stringify(hook.when)}` : '';
-            this.logger.log(`    • [${phase.name}] ${trigger}${whenStr} → ${hook.run}\n`, { type: 'info' });
+            const whenInputStr = hook.whenInput ? ` whenInput ${JSON.stringify(hook.whenInput)}` : '';
+            const whenOutputStr = hook.whenOutput ? ` whenOutput ${JSON.stringify(hook.whenOutput)}` : '';
+            this.logger.log(`    • [${phase.name}] ${trigger}${whenInputStr}${whenOutputStr} → ${hook.run}\n`, { type: 'info' });
           }
         }
       }
@@ -2461,8 +2478,11 @@ export class AblationCLI {
                 const hooks = this.ablationManager.getHooksForPhase(ablation, phase.name);
                 for (const hook of hooks) {
                   if (hook.after === cmdResult.toolExecResult.toolName) {
-                    // Check when condition if present — skip hook if result doesn't match
-                    if (hook.when && !matchesWhenCondition(hook.when, cmdResult.toolExecResult.displayText, cmdResult.toolExecResult.args)) {
+                    // Check conditions if present — skip hook if doesn't match
+                    if (hook.whenInput && !matchesWhenInputCondition(hook.whenInput, cmdResult.toolExecResult.args)) {
+                      continue;
+                    }
+                    if (hook.whenOutput && !matchesWhenOutputCondition(hook.whenOutput, cmdResult.toolExecResult.displayText)) {
                       continue;
                     }
                     // Check for abort before hook
@@ -3430,8 +3450,9 @@ export class AblationCLI {
         for (let i = 0; i < topHooks.length; i++) {
           const h = topHooks[i];
           const trigger = h.before ? `before ${h.before}` : `after ${h.after}`;
-          const whenStr = h.when ? ` when ${JSON.stringify(h.when)}` : '';
-          this.logger.log(`    ${num}. [all phases] ${trigger}${whenStr} → ${h.run}\n`, { type: 'info' });
+          const whenInputStr = h.whenInput ? ` whenInput ${JSON.stringify(h.whenInput)}` : '';
+          const whenOutputStr = h.whenOutput ? ` whenOutput ${JSON.stringify(h.whenOutput)}` : '';
+          this.logger.log(`    ${num}. [all phases] ${trigger}${whenInputStr}${whenOutputStr} → ${h.run}\n`, { type: 'info' });
           allHooks.push({ label: `[all phases] ${trigger}`, isTopLevel: true, index: i });
           num++;
         }
@@ -3439,8 +3460,9 @@ export class AblationCLI {
           const phaseObj = ablation.phases.find(p => p.name === ph.phase);
           const hookIdx = phaseObj?.hooks?.indexOf(ph.hook) ?? 0;
           const trigger = ph.hook.before ? `before ${ph.hook.before}` : `after ${ph.hook.after}`;
-          const whenStr = ph.hook.when ? ` when ${JSON.stringify(ph.hook.when)}` : '';
-          this.logger.log(`    ${num}. [${ph.phase}] ${trigger}${whenStr} → ${ph.hook.run}\n`, { type: 'info' });
+          const whenInputStr = ph.hook.whenInput ? ` whenInput ${JSON.stringify(ph.hook.whenInput)}` : '';
+          const whenOutputStr = ph.hook.whenOutput ? ` whenOutput ${JSON.stringify(ph.hook.whenOutput)}` : '';
+          this.logger.log(`    ${num}. [${ph.phase}] ${trigger}${whenInputStr}${whenOutputStr} → ${ph.hook.run}\n`, { type: 'info' });
           allHooks.push({ label: `[${ph.phase}] ${trigger}`, isTopLevel: false, phase: ph.phase, index: hookIdx });
           num++;
         }
@@ -3493,27 +3515,42 @@ export class AblationCLI {
           ? { before: toolName, run: runCmd }
           : { after: toolName, run: runCmd };
 
-        // Ask for optional when condition (after-hooks only)
+        // Ask for optional condition (after-hooks only)
         if (!isBefore) {
-          const addWhen = (
-            await rl.question('  Add result condition (when)? (y/N): ')
+          const condType = (
+            await rl.question('  Add condition? (1=output, 2=input, N=none): ')
           ).trim().toLowerCase();
-          if (addWhen === 'y' || addWhen === 'yes') {
-            const when: Record<string, unknown> = {};
-            this.logger.log('  Enter key=value pairs (empty key to finish):\n', { type: 'info' });
+          if (condType === '1' || condType === 'output') {
+            const whenOutput: Record<string, unknown> = {};
+            this.logger.log('  Enter key=value pairs for tool output (empty key to finish):\n', { type: 'info' });
             while (true) {
               const key = (await rl.question('    Key: ')).trim();
               if (!key) break;
               const rawValue = (await rl.question('    Value: ')).trim();
-              // Parse numbers and booleans, keep strings as-is
               let value: unknown = rawValue;
               if (rawValue === 'true') value = true;
               else if (rawValue === 'false') value = false;
               else if (rawValue !== '' && !isNaN(Number(rawValue))) value = Number(rawValue);
-              when[key] = value;
+              whenOutput[key] = value;
             }
-            if (Object.keys(when).length > 0) {
-              newHook.when = when;
+            if (Object.keys(whenOutput).length > 0) {
+              newHook.whenOutput = whenOutput;
+            }
+          } else if (condType === '2' || condType === 'input') {
+            const whenInput: Record<string, unknown> = {};
+            this.logger.log('  Enter key=value pairs for tool input (empty key to finish):\n', { type: 'info' });
+            while (true) {
+              const key = (await rl.question('    Key: ')).trim();
+              if (!key) break;
+              const rawValue = (await rl.question('    Value: ')).trim();
+              let value: unknown = rawValue;
+              if (rawValue === 'true') value = true;
+              else if (rawValue === 'false') value = false;
+              else if (rawValue !== '' && !isNaN(Number(rawValue))) value = Number(rawValue);
+              whenInput[key] = value;
+            }
+            if (Object.keys(whenInput).length > 0) {
+              newHook.whenInput = whenInput;
             }
           }
         }

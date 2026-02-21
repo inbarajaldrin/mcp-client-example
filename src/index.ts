@@ -185,6 +185,7 @@ export class MCPClient {
       getPreferencesManager: () => this.preferencesManager,
       getHookManager: () => this.hookManager,
       cancelPendingElicitation: () => this.elicitationHandler.cancelPending(),
+      setElicitationAutoDecline: (value: boolean) => this.elicitationHandler.setAutoDecline(value),
       isAbortRequested: () => {
         if (this.isAbortRequestedCallback) {
           return this.isAbortRequestedCallback();

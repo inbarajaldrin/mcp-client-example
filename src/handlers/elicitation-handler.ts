@@ -71,6 +71,7 @@ export class ElicitationHandler extends AbstractHandler {
   private onElicitationStart: (() => void) | null = null;
   private onElicitationEnd: (() => void) | null = null;
   private pendingAbortController: AbortController | null = null;
+  private _autoDecline: boolean = false;
 
   constructor(logger: Logger, createReadline: () => readline.Interface) {
     super(logger);
@@ -109,6 +110,15 @@ export class ElicitationHandler extends AbstractHandler {
   }
 
   /**
+   * Set auto-decline mode. When true, any incoming elicitation is
+   * immediately declined without prompting the user. Used when
+   * whenInput hooks have already triggered @complete-phase.
+   */
+  setAutoDecline(value: boolean): void {
+    this._autoDecline = value;
+  }
+
+  /**
    * Cancel any pending elicitation prompt (auto-declines).
    * Called when a tool execution times out or a phase ends, preventing
    * dangling readline prompts from leaking into subsequent output.
@@ -121,6 +131,12 @@ export class ElicitationHandler extends AbstractHandler {
   }
 
   async handleElicitation(request: ElicitRequest): Promise<ElicitResult> {
+    // Auto-decline when a whenInput hook already triggered @complete-phase
+    if (this._autoDecline) {
+      this.logger.log(`\n[Elicitation auto-declined — phase already complete]\n`, { type: 'info' });
+      return { action: 'decline' };
+    }
+
     const params = request.params;
 
     // Check if this is a URL elicitation (not supported in this implementation)

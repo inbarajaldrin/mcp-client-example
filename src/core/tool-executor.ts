@@ -90,6 +90,8 @@ export interface MCPToolExecutorCallbacks {
   getHookManager?: () => HookManager | undefined;
   /** Cancel any pending elicitation (auto-declines dangling prompts) */
   cancelPendingElicitation?: () => void;
+  /** Set elicitation auto-decline mode (used when whenInput triggers @complete-phase early) */
+  setElicitationAutoDecline?: (value: boolean) => void;
 }
 
 /** Force stop timeout in seconds */
@@ -318,8 +320,19 @@ export class MCPToolExecutor {
       );
     }
 
+    // Pre-evaluate whenInput hooks for @complete-phase/@abort before tool execution.
+    // If triggered, auto-decline any elicitations that arrive during the tool call.
+    let earlyPhaseTriggered = false;
+    if (hookManager && !hookManager.isExecuting()) {
+      earlyPhaseTriggered = hookManager.preEvaluateWhenInput(toolName, toolInput);
+      if (earlyPhaseTriggered) {
+        this.callbacks.setElicitationAutoDecline?.(true);
+      }
+    }
+
     let toolResult;
 
+    try { // outer try: clears auto-decline in finally
     try {
       if (serverName && servers.has(serverName)) {
         // Route to the specific server
@@ -454,6 +467,23 @@ export class MCPToolExecutor {
 
       this.logger.log(`\n⚠️ ${errorMessage}\n`, { type: 'error' });
 
+      // Fire after-hooks even on error so @complete-phase/@abort can still trigger.
+      // The when condition will match against toolInput (since displayText is the error),
+      // allowing hooks to react based on what the agent intended to do.
+      const hookMgr = this.callbacks.getHookManager?.();
+      if (hookMgr && !hookMgr.isExecuting()) {
+        const errorResult: ToolExecutionResult = {
+          displayText: errorMessage,
+          contentBlocks: [{ type: 'text', text: errorMessage }],
+          hasImages: false,
+        };
+        await hookMgr.executeImmediateAfterHooks(
+          toolName,
+          { ...errorResult, toolInput },
+          (name, args) => this.executeMCPTool(name, args, true),
+        );
+      }
+
       // Check if this is a timeout error
       const isTimeout =
         toolError instanceof Error &&
@@ -485,6 +515,12 @@ export class MCPToolExecutor {
 
       // For other errors, throw to maintain existing behavior
       throw new Error(errorMessage);
+    }
+    } finally {
+      // Clear auto-decline after tool completes (success or error)
+      if (earlyPhaseTriggered) {
+        this.callbacks.setElicitationAutoDecline?.(false);
+      }
     }
   }
 }

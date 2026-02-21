@@ -137,39 +137,59 @@ export function parsePythonArgs(argsStr: string): Record<string, unknown> {
 }
 
 /**
- * Check if a tool result matches a `when` condition from a post-tool hook.
- * Matches against displayText (tool result) first. If that fails or is empty,
- * falls back to toolInput — useful when the tool returns {} but the meaningful
- * data (phase, status, action) is in the input arguments.
+ * Loose equality: matches across types (e.g. number 1 == string "1").
+ * Handles number/string and boolean/string coercion that commonly occurs
+ * between YAML config values and LLM-sent tool arguments.
  */
-export function matchesWhenCondition(
-  when: Record<string, unknown>,
-  displayText: string | undefined,
+function looseEqual(a: unknown, b: unknown): boolean {
+  if (a === b) return true;
+  // number <-> string: 1 == "1"
+  if (typeof a === 'number' && typeof b === 'string') return String(a) === b;
+  if (typeof a === 'string' && typeof b === 'number') return a === String(b);
+  // boolean <-> string: true == "true"
+  if (typeof a === 'boolean' && typeof b === 'string') return String(a) === b;
+  if (typeof a === 'string' && typeof b === 'boolean') return a === String(b);
+  return false;
+}
+
+/**
+ * Match a condition object against a record of key/value pairs.
+ * Uses loose equality so YAML numbers/booleans match string equivalents.
+ */
+function tryMatch(condition: Record<string, unknown>, obj: Record<string, unknown>): boolean {
+  if (typeof obj !== 'object' || obj === null) return false;
+  for (const [key, value] of Object.entries(condition)) {
+    if (!looseEqual(obj[key], value)) return false;
+  }
+  return true;
+}
+
+/**
+ * Check if tool input arguments match a `whenInput` condition.
+ * Only matches against tool input — never checks tool output.
+ */
+export function matchesWhenInputCondition(
+  whenInput: Record<string, unknown>,
   toolInput?: Record<string, unknown>,
 ): boolean {
-  const tryMatch = (obj: Record<string, unknown>): boolean => {
-    if (typeof obj !== 'object' || obj === null) return false;
-    for (const [key, value] of Object.entries(when)) {
-      if (obj[key] !== value) return false;
-    }
-    return true;
-  };
+  if (!toolInput || Object.keys(toolInput).length === 0) return false;
+  return tryMatch(whenInput, toolInput);
+}
 
-  // First try matching against tool result (displayText)
-  if (displayText) {
-    try {
-      const clean = displayText.replace(/\u001b\[[0-9;]*m/g, '');
-      const parsed = JSON.parse(clean);
-      if (tryMatch(parsed as Record<string, unknown>)) return true;
-    } catch {
-      // Not valid JSON, continue to fallback
-    }
+/**
+ * Check if tool output matches a `whenOutput` condition.
+ * Parses displayText as JSON and matches against it — never checks tool input.
+ */
+export function matchesWhenOutputCondition(
+  whenOutput: Record<string, unknown>,
+  displayText: string | undefined,
+): boolean {
+  if (!displayText) return false;
+  try {
+    const clean = displayText.replace(/\u001b\[[0-9;]*m/g, '');
+    const parsed = JSON.parse(clean);
+    return tryMatch(whenOutput, parsed as Record<string, unknown>);
+  } catch {
+    return false;
   }
-
-  // Fall back to tool input when result is empty or doesn't match
-  if (toolInput && Object.keys(toolInput).length > 0 && tryMatch(toolInput)) {
-    return true;
-  }
-
-  return false;
 }

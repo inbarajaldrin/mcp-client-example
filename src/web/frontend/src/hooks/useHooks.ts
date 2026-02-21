@@ -4,7 +4,8 @@ export interface ClientHook {
   id: string;
   after?: string;
   before?: string;
-  when?: Record<string, unknown>;
+  whenInput?: Record<string, unknown>;
+  whenOutput?: Record<string, unknown>;
   run: string;
   enabled: boolean;
   description?: string;

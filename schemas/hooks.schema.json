@@ -38,9 +38,14 @@
           "type": "string",
           "description": "Full tool name (server__tool) to match BEFORE execution"
         },
-        "when": {
+        "whenInput": {
           "type": "object",
-          "description": "Conditional match against tool result JSON. Hook only fires if all key-value pairs match.",
+          "description": "Conditional match against tool input arguments. Hook only fires if all key-value pairs match the input args.",
+          "additionalProperties": true
+        },
+        "whenOutput": {
+          "type": "object",
+          "description": "Conditional match against tool output JSON. Hook only fires if all key-value pairs match the parsed output.",
           "additionalProperties": true
         },
         "run": {
