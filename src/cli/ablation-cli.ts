@@ -139,6 +139,43 @@ export class AblationCLI {
   }
 
   /**
+   * Save chat history to the global chats directory and copy files into the run's phase directory.
+   * Called on every exit path (success, failure, abort) so chat is always preserved.
+   * Skipped in dry runs (no model = no chat). When context persists across phases,
+   * the caller is responsible for deferring until all phases complete.
+   */
+  private savePhaseChatHistory(
+    endReason: string,
+    runDir: string,
+    phaseName: string,
+    phaseDir: string,
+    model: AblationModel,
+    result: AblationRunResult,
+    hasMultipleIterations: boolean,
+    iteration: number,
+  ): void {
+    const chatHistoryManager = this.client.getChatHistoryManager();
+    const chatMetadata = chatHistoryManager.endSession(endReason);
+
+    if (chatMetadata) {
+      const chatFileName = this.ablationManager.getChatFileName(model);
+      const chatPrefix = hasMultipleIterations ? `chats/run-${iteration}` : 'chats';
+      const relativeChatPath = `${chatPrefix}/${phaseName}/${chatFileName}`;
+      const destJsonPath = join(phaseDir, chatFileName);
+      const destMdPath = join(phaseDir, chatFileName.replace('.json', '.md'));
+
+      try {
+        if (existsSync(chatMetadata.filePath)) cpSync(chatMetadata.filePath, destJsonPath);
+        if (existsSync(chatMetadata.mdFilePath)) cpSync(chatMetadata.mdFilePath, destMdPath);
+        result.chatFile = relativeChatPath;
+      } catch (copyError) {
+        this.logger.log(`  Warning: Failed to copy chat files to run directory: ${copyError}\n`, { type: 'warning' });
+        result.chatFile = chatMetadata.filePath;
+      }
+    }
+  }
+
+  /**
    * Handle user input during an ablation pause (Ctrl+A).
    * Routes slash commands through the main CLI's handler; sends everything else to processQuery.
    * Returns 'resume' if the user entered empty input, 'handled' if a command was processed.
@@ -908,9 +945,9 @@ export class AblationCLI {
           type: 'info',
         });
       }
-      const createRunsInfo = (ablation.runs ?? 1) > 1 ? ` × ${ablation.runs} runs` : '';
+      const createIterInfo = (ablation.runs ?? 1) > 1 ? ` × ${ablation.runs} iterations` : '';
       this.logger.log(
-        `\n  Total runs: ${this.ablationManager.getTotalRuns(ablation)} (${ablation.phases.length} phases × ${ablation.models.length} models${createRunsInfo})\n`,
+        `\n  Runs: ${this.ablationManager.getTotalRuns(ablation)} (${ablation.models.length} model${ablation.models.length > 1 ? 's' : ''}${createIterInfo}), ${ablation.phases.length} phase${ablation.phases.length > 1 ? 's' : ''} each\n`,
         { type: 'info' },
       );
 
@@ -1012,10 +1049,10 @@ export class AblationCLI {
       if (ablation.description) {
         this.logger.log(`     ${ablation.description}\n`, { type: 'info' });
       }
-      const runsInfo = (ablation.runs ?? 1) > 1 ? ` × ${ablation.runs} runs` : '';
+      const runsInfo = (ablation.runs ?? 1) > 1 ? ` × ${ablation.runs} iterations` : '';
       const argsCount = ablation.arguments?.length ?? 0;
       const argsInfo = argsCount > 0 ? ` │ ${argsCount} arg${argsCount > 1 ? 's' : ''}` : '';
-      let infoLine = `     └─ ${ablation.phases.length} phases × ${ablation.models.length} models${runsInfo} = ${totalRuns} runs${argsInfo} │ ${providers.join(', ')} │ Created: ${createdDate}`;
+      let infoLine = `     └─ ${ablation.phases.length} phase${ablation.phases.length > 1 ? 's' : ''} × ${ablation.models.length} model${ablation.models.length > 1 ? 's' : ''}${runsInfo} = ${totalRuns} run${totalRuns > 1 ? 's' : ''}${argsInfo} │ ${providers.join(', ')} │ Created: ${createdDate}`;
       if (ablation.settings.mcpConfigPath) {
         infoLine += ` │ MCP: ${ablation.settings.mcpConfigPath}`;
       }
@@ -1149,9 +1186,9 @@ export class AblationCLI {
           const updated = this.ablationManager.load(ablation.name);
           if (updated) {
             this.logger.log(`\n  Updated ablation:\n`, { type: 'info' });
-            const editRunsInfo = (updated.runs ?? 1) > 1 ? `, Repeat runs: ${updated.runs}` : '';
+            const editIterInfo = (updated.runs ?? 1) > 1 ? `, Iterations: ${updated.runs}` : '';
             this.logger.log(
-              `  Phases: ${updated.phases.length}, Models: ${updated.models.length}, Total runs: ${this.ablationManager.getTotalRuns(updated)}${editRunsInfo}\n`,
+              `  Phases: ${updated.phases.length}, Models: ${updated.models.length}, Runs: ${this.ablationManager.getTotalRuns(updated)}${editIterInfo}\n`,
               { type: 'info' },
             );
             if (updated.settings.mcpConfigPath) {
@@ -1403,16 +1440,25 @@ export class AblationCLI {
                       this.callbacks.resetInterrupt();
                       this.callbacks.stopKeyboardMonitor();
 
-                      const rl = this.callbacks.getReadline();
-                      if (rl) {
+                      if (this.callbacks.getReadline()) {
                         this.logger.log('\n  ⏸ Agent paused. Type a message, /command, or press Enter to resume. (/help for commands)\n', { type: 'warning' });
 
                         let paused = true;
-                        while (paused && !this.callbacks.isAbortRequested()) {
+                        while (paused && !this.callbacks.isAbortRequested()
+                            && !hookMgr.isPhaseCompleteRequested()) {
+                          // Re-fetch readline each iteration — stopKeyboardMonitor() recreates it
+                          const rl = this.callbacks.getReadline()!;
                           const userInput = (await rl.question('  You: ')).trim();
 
                           const stopCond = () => hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
+
+                          // Re-enable keyboard monitor during processQuery so Ctrl+A works,
+                          // then stop it again so readline can prompt the next input.
+                          this.callbacks.startKeyboardMonitor();
                           const result = await this.handlePauseInput(userInput, stopCond);
+                          this.callbacks.resetInterrupt();
+                          this.callbacks.stopKeyboardMonitor();
+
                           if (result === 'resume') {
                             continueAfterPause = true;
                             paused = false;
@@ -1571,7 +1617,8 @@ export class AblationCLI {
             this.logger.log('\n  ⏸ Agent paused. Type a message, /command, or press Enter to resume. (/help for commands)\n', { type: 'warning' });
 
             let paused = true;
-            while (paused && !this.callbacks.isAbortRequested()) {
+            while (paused && !this.callbacks.isAbortRequested()
+                && !hookManager.isPhaseCompleteRequested() && !hookManager.isAbortRunRequested()) {
               const userInput = await this.callbacks.collectInput('  You: ');
 
               // null means Ctrl+C was pressed — treat as abort
@@ -1582,6 +1629,8 @@ export class AblationCLI {
 
               const stopCond = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
               const result = await this.handlePauseInput(userInput, stopCond);
+              // Reset interrupt flag so the next iteration's processQuery doesn't exit immediately
+              this.callbacks.resetInterrupt();
               if (result === 'resume') {
                 continueAfterPause = true;
                 paused = false;
@@ -1730,15 +1779,15 @@ export class AblationCLI {
         { type: 'info' },
       );
 
-      const runsMultiplier = (ablation.runs ?? 1) > 1 ? ` × ${ablation.runs} runs` : '';
+      const iterationsMultiplier = (ablation.runs ?? 1) > 1 ? ` × ${ablation.runs} iterations` : '';
       if (ablation.dryRun) {
         this.logger.log(
-          `\n  Dry Run: ${ablation.phases.length} phases${runsMultiplier} = ${totalRuns} runs (no model)\n`,
+          `\n  Dry Run: ${ablation.phases.length} phases${iterationsMultiplier} = ${totalRuns} run${totalRuns > 1 ? 's' : ''} (no model)\n`,
           { type: 'info' },
         );
       } else {
         this.logger.log(
-          `\n  Matrix: ${ablation.phases.length} phases × ${ablation.models.length} models${runsMultiplier} = ${totalRuns} runs\n`,
+          `\n  Matrix: ${ablation.phases.length} phase${ablation.phases.length > 1 ? 's' : ''} × ${ablation.models.length} model${ablation.models.length > 1 ? 's' : ''}${iterationsMultiplier} = ${totalRuns} run${totalRuns > 1 ? 's' : ''}\n`,
           { type: 'info' },
         );
       }
@@ -2087,6 +2136,7 @@ export class AblationCLI {
    */
   private async runSingleAblation(ablation: AblationDefinition, resolvedArguments?: Record<string, string>): Promise<boolean> {
     const totalRuns = this.ablationManager.getTotalRuns(ablation);
+    const totalScenarios = this.ablationManager.getTotalScenarios(ablation);
 
     // All servers (including disabled) are connected at startup.
     // Only refresh if this ablation uses a custom MCP config path.
@@ -2143,6 +2193,7 @@ export class AblationCLI {
     };
 
     let runNumber = 0;
+    let scenarioNumber = 0;
     const totalStartTime = Date.now();
     let shouldBreak = false;
 
@@ -2211,6 +2262,30 @@ export class AblationCLI {
         }
 
         let modelAborted = false;
+        runNumber++;
+
+        // Display run-level header (one run = one model through all phases)
+        const modelShortName = ablation.dryRun ? 'dry-run' : this.ablationManager.getModelShortName(model);
+        const iterationSuffix = hasMultipleIterations ? ` (iteration ${iteration}/${iterations})` : '';
+
+        if (!ablation.dryRun) {
+          this.logger.log(
+            `\n┌──────────────────────────────────────────────────────────────┐\n`,
+            { type: 'info' },
+          );
+          this.logger.log(
+            `│  RUN ${runNumber}/${totalRuns}: ${modelShortName}${iterationSuffix}\n`,
+            { type: 'info' },
+          );
+          this.logger.log(
+            `│  Provider: ${model.provider} │ Model: ${model.model}\n`,
+            { type: 'info' },
+          );
+          this.logger.log(
+            `└──────────────────────────────────────────────────────────────┘\n`,
+            { type: 'info' },
+          );
+        }
 
         for (const phase of ablation.phases) {
           if (shouldBreak || modelAborted) break;
@@ -2236,9 +2311,8 @@ export class AblationCLI {
             getRunIter(iteration),
           );
 
-          runNumber++;
-          const modelShortName = ablation.dryRun ? 'dry-run' : this.ablationManager.getModelShortName(model);
-          const iterationSuffix = hasMultipleIterations ? ` (iteration ${iteration}/${iterations})` : '';
+          scenarioNumber++;
+          const phaseIndex = ablation.phases.indexOf(phase) + 1;
 
           this.logger.log(
             `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`,
@@ -2246,16 +2320,12 @@ export class AblationCLI {
           );
           if (ablation.dryRun) {
             this.logger.log(
-              `  RUN ${runNumber}/${totalRuns}: ${phase.name} (dry run)${iterationSuffix}\n`,
+              `  SCENARIO ${scenarioNumber}/${totalScenarios}: ${phase.name} (dry run)${iterationSuffix}\n`,
               { type: 'info' },
             );
           } else {
             this.logger.log(
-              `  RUN ${runNumber}/${totalRuns}: ${phase.name} + ${modelShortName}${iterationSuffix}\n`,
-              { type: 'info' },
-            );
-            this.logger.log(
-              `  Provider: ${model.provider} │ Model: ${model.model}\n`,
+              `  PHASE ${phaseIndex}/${ablation.phases.length}: ${phase.name}\n`,
               { type: 'info' },
             );
           }
@@ -2613,6 +2683,17 @@ export class AblationCLI {
                 result.logFile = this.ablationManager.saveToolExecLog(runDir, logsDir, toolExecLog, phase.name);
               }
 
+              // Capture any outputs produced before abort (for diagnostics)
+              this.ablationManager.captureRunOutputs(runDir, phase.name, model, getRunIter(iteration));
+
+              // Save chat history on abort so it's preserved in the run directory
+              if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases !== false) {
+                this.savePhaseChatHistory(
+                  `Ablation run (aborted): ${phase.name} with ${model.provider}/${model.model}`,
+                  runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
+                );
+              }
+
               run.results.push(result);
               break;
             }
@@ -2628,6 +2709,17 @@ export class AblationCLI {
               if (ablation.dryRun && toolExecLog.length > 0) {
                 const logsDir = this.ablationManager.createLogsDirectory(runDir, phase.name, getRunIter(iteration));
                 result.logFile = this.ablationManager.saveToolExecLog(runDir, logsDir, toolExecLog, phase.name);
+              }
+
+              // Capture any outputs produced before @abort (for diagnostics)
+              this.ablationManager.captureRunOutputs(runDir, phase.name, model, getRunIter(iteration));
+
+              // Save chat history on @abort so it's preserved in the run directory
+              if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases !== false) {
+                this.savePhaseChatHistory(
+                  `Ablation run (@abort): ${phase.name} with ${model.provider}/${model.model}`,
+                  runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
+                );
               }
 
               this.logger.log(
@@ -2662,33 +2754,10 @@ export class AblationCLI {
             // Save chat history and copy to phase directory (skip in dry run)
             // When context persists across phases, defer saving until all phases complete
             if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases !== false) {
-              const chatHistoryManager = this.client.getChatHistoryManager();
-              const chatMetadata = chatHistoryManager.endSession(
+              this.savePhaseChatHistory(
                 `Ablation run: ${phase.name} with ${model.provider}/${model.model}`,
+                runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
               );
-
-              // Copy chat files from global chats dir into the run's phase directory
-              if (chatMetadata) {
-                const chatFileName = this.ablationManager.getChatFileName(model);
-                const chatPrefix = hasMultipleIterations ? `chats/run-${iteration}` : 'chats';
-                const relativeChatPath = `${chatPrefix}/${phase.name}/${chatFileName}`;
-                const destJsonPath = join(phaseDir, chatFileName);
-                const destMdPath = join(phaseDir, chatFileName.replace('.json', '.md'));
-
-                try {
-                  if (existsSync(chatMetadata.filePath)) {
-                    cpSync(chatMetadata.filePath, destJsonPath);
-                  }
-                  if (existsSync(chatMetadata.mdFilePath)) {
-                    cpSync(chatMetadata.mdFilePath, destMdPath);
-                  }
-                  result.chatFile = relativeChatPath;
-                } catch (copyError) {
-                  this.logger.log(`  Warning: Failed to copy chat files to run directory: ${copyError}\n`, { type: 'warning' });
-                  // Fall back to referencing the global chat path
-                  result.chatFile = chatMetadata.filePath;
-                }
-              }
             }
 
             this.logger.log(
@@ -2726,12 +2795,23 @@ export class AblationCLI {
             // Stop any active video recording so the file is finalized before capture
             await this.client.cleanupVideoRecording();
 
+            // Save chat history on error so it's preserved in the run directory
+            if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases !== false) {
+              this.savePhaseChatHistory(
+                `Ablation run (failed): ${phase.name} with ${model.provider}/${model.model}`,
+                runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
+              );
+            }
+
             this.logger.log(`\n  ✗ Scenario failed: ${error.message}\n`, {
               type: 'error',
             });
           }
 
           run.results.push(result);
+
+          // Capture outputs produced during this phase (even on failure, for diagnostics)
+          this.ablationManager.captureRunOutputs(runDir, phase.name, model, getRunIter(iteration));
 
           // On failure: skip remaining phases for this model
           if (result.status === 'failed') {
@@ -2742,9 +2822,6 @@ export class AblationCLI {
             );
             break; // break phase loop, continue to next model
           }
-
-          // Capture outputs produced during this phase
-          this.ablationManager.captureRunOutputs(runDir, phase.name, model, getRunIter(iteration));
         }
 
         // When context persists across phases, save the cumulative chat after all phases
@@ -2828,19 +2905,19 @@ export class AblationCLI {
     );
 
     this.logger.log(`\n  Results:\n`, { type: 'info' });
-    const completedRuns = run.results.filter(
+    const completedScenarios = run.results.filter(
       (r) => r.status === 'completed',
     ).length;
-    const failedRuns = run.results.filter((r) => r.status === 'failed').length;
-    const abortedRuns = run.results.filter((r) => r.status === 'aborted').length;
-    this.logger.log(`    Completed: ${completedRuns}/${totalRuns}\n`, {
+    const failedScenarios = run.results.filter((r) => r.status === 'failed').length;
+    const abortedScenarios = run.results.filter((r) => r.status === 'aborted').length;
+    this.logger.log(`    Scenarios: ${completedScenarios}/${totalScenarios} completed\n`, {
       type: 'info',
     });
-    if (failedRuns > 0) {
-      this.logger.log(`    Failed: ${failedRuns}\n`, { type: 'warning' });
+    if (failedScenarios > 0) {
+      this.logger.log(`    Failed: ${failedScenarios}\n`, { type: 'warning' });
     }
-    if (abortedRuns > 0) {
-      this.logger.log(`    Aborted: ${abortedRuns}\n`, { type: 'warning' });
+    if (abortedScenarios > 0) {
+      this.logger.log(`    Aborted: ${abortedScenarios}\n`, { type: 'warning' });
     }
     this.logger.log(
       `    Total time: ${formatDuration(run.totalDuration)}\n`,

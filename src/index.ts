@@ -2089,11 +2089,6 @@ export class MCPClient {
         promptEvalRate?: number;
       };
     } | null;
-    pendingHookChecks: Array<{
-      toolName: string;
-      displayText: string;
-      toolInput: Record<string, unknown>;
-    }>;
   }> {
     this.logger.log(consoleStyles.assistant);
 
@@ -2110,12 +2105,6 @@ export class MCPClient {
       content: string;
     }> = [];
 
-    // Collect tool completions for deferred hook execution after the agent responds.
-    const pendingHookChecks: Array<{
-      toolName: string;
-      displayText: string;
-      toolInput: Record<string, unknown>;
-    }> = [];
     const isAnthropic = this.modelProvider.getProviderName() === 'anthropic';
 
     // Track pending tool calls for OpenAI (to build tool_calls array for assistant message)
@@ -2274,15 +2263,22 @@ export class MCPClient {
           toolId, // Pass the tool_use_id for pairing with assistant's tool_use block
         );
 
-        // Collect tool completions for deferred hook execution.
-        // Hooks run after the agent's full response so the CLI shows them
-        // sequentially and the agent can react in a follow-up turn.
+        // Execute @tool: (injecting) after-hooks inline, right after the tool result.
+        // The hook runs, and its result is injected as a user message so the agent
+        // sees it on the next turn.
         if (this.hookManager && !this.hookManager.isExecuting()) {
-          pendingHookChecks.push({
-            toolName: chunk.toolName,
+          const hookResult: ToolExecutionResult & { toolInput?: Record<string, unknown> } = {
             displayText: chunk.result || '',
+            contentBlocks: [],
+            hasImages: false,
             toolInput: (chunk as any).toolInput,
-          });
+          };
+          await this.hookManager.executeAfterHooks(
+            chunk.toolName,
+            hookResult,
+            (name, args) => this.toolExecutor.executeMCPTool(name, args, true),
+            (name, args, result) => { this.injectToolResult(name, args, result); },
+          );
         }
 
         continue;
@@ -2850,7 +2846,7 @@ export class MCPClient {
     }
 
     // Return remaining state so caller can flush/log appropriately
-    return { pendingToolResults, lastTokenUsage, pendingHookChecks };
+    return { pendingToolResults, lastTokenUsage };
   }
 
   async processQuery(query: string, isSystemPrompt: boolean = false, attachments?: Array<{ path: string; fileName: string; ext: string; mediaType: string }>, cancellationCheck?: () => boolean, observer?: StreamObserver) {
@@ -2950,7 +2946,7 @@ export class MCPClient {
       // Process the stream and collect final assistant message
       // Don't break immediately on cancellation - let current chunk finish
       // Pass initial token count for tracking
-      const { pendingToolResults, lastTokenUsage, pendingHookChecks } = await this.processToolUseStream(stream, cancellationCheck, tokenCountBeforeStream, observer);
+      const { pendingToolResults, lastTokenUsage } = await this.processToolUseStream(stream, cancellationCheck, tokenCountBeforeStream, observer);
 
       // Flush any remaining pending tool results (in case we aborted before they were added)
       if (pendingToolResults && pendingToolResults.length > 0) {
@@ -3111,62 +3107,6 @@ export class MCPClient {
           lastTokenUsage.cacheReadTokens,
           lastTokenUsage.ollamaMetrics
         );
-      }
-
-      // Execute deferred hooks after the agent's full response.
-      // Only @tool: (inject) hooks run here — @tool-exec: hooks and special commands
-      // (@complete-phase, @abort) already fired inline during tool execution.
-      if (pendingHookChecks && pendingHookChecks.length > 0 &&
-          this.hookManager && !(cancellationCheck && cancellationCheck())) {
-        const hookInjections: Array<{
-          name: string;
-          args: Record<string, unknown>;
-          result: { displayText: string; contentBlocks: Array<{ type: string; text?: string; data?: string; mimeType?: string }> };
-        }> = [];
-
-        for (const check of pendingHookChecks) {
-          // Stop if phase-complete or abort was signaled by an earlier hook
-          if (this.hookManager.isPhaseCompleteRequested() || this.hookManager.isAbortRunRequested()) {
-            break;
-          }
-          if (cancellationCheck && cancellationCheck()) {
-            break;
-          }
-
-          const hookResult: ToolExecutionResult & { toolInput?: Record<string, unknown> } = {
-            displayText: check.displayText,
-            contentBlocks: [],
-            hasImages: false,
-            toolInput: check.toolInput,
-          };
-          await this.hookManager.executeAfterHooks(
-            check.toolName,
-            hookResult,
-            (name, args) => this.toolExecutor.executeMCPTool(name, args, true),
-            (name, args, result) => { hookInjections.push({ name, args, result }); },
-          );
-        }
-
-        // Inject results and trigger another agent turn
-        if (hookInjections.length > 0) {
-          for (const inj of hookInjections) {
-            this.injectToolResult(inj.name, inj.args, inj.result);
-          }
-
-          const hookContinueStream = (this.modelProvider as any).createMessageStreamWithToolUse(
-            this.messages,
-            this.model,
-            this.tools,
-            8192,
-            toolExecutor,
-            (() => {
-              const maxIter = this.preferencesManager.getMaxIterations();
-              return maxIter === -1 ? 999999 : maxIter;
-            })(),
-            cancellationCheck,
-          );
-          await this.processToolUseStream(hookContinueStream, cancellationCheck, this.currentTokenCount, observer);
-        }
       }
 
       // Check todo status if todo mode is enabled and agent is trying to exit

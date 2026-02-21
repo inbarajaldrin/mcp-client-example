@@ -412,9 +412,22 @@ export class AblationManager {
   }
 
   /**
-   * Get total number of runs for an ablation (phases × models × runs)
+   * Get total number of runs for an ablation (models × iterations).
+   * A "run" = one model going through all phases once.
    */
   getTotalRuns(ablation: AblationDefinition): number {
+    const iterations = ablation.runs ?? 1;
+    if (ablation.dryRun) {
+      return iterations;
+    }
+    return ablation.models.length * iterations;
+  }
+
+  /**
+   * Get total number of scenarios (phases × models × iterations).
+   * A "scenario" = one phase executed by one model in one iteration.
+   */
+  getTotalScenarios(ablation: AblationDefinition): number {
     const iterations = ablation.runs ?? 1;
     if (ablation.dryRun) {
       return ablation.phases.length * iterations;
