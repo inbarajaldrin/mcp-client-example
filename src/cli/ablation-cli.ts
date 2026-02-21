@@ -1439,6 +1439,13 @@ export class AblationCLI {
               hookMgr.resetPhaseComplete();
               return { phaseComplete: true };
             }
+
+            // Agent stopped responding during ablation without @complete-phase or @abort
+            // — treat as implicit phase completion so the run continues to the next phase/model
+            if (ablation && phaseName && !this.callbacks.isAbortRequested()) {
+              this.logger.log(`  ℹ Phase "${phaseName}": agent stopped without @complete-phase — treating as complete\n`, { type: 'info' });
+              return { phaseComplete: true };
+            }
           }
           break;
         }
@@ -1604,6 +1611,13 @@ export class AblationCLI {
       // Check if phase completion was signaled during processQuery
       if (hookManager.isPhaseCompleteRequested()) {
         hookManager.resetPhaseComplete();
+        return { phaseComplete: true };
+      }
+
+      // Agent stopped responding during ablation without @complete-phase or @abort
+      // — treat as implicit phase completion so the run continues to the next phase/model
+      if (ablation && phaseName && !this.callbacks.isAbortRequested()) {
+        this.logger.log(`  ℹ Phase "${phaseName}": agent stopped without @complete-phase — treating as complete\n`, { type: 'info' });
         return { phaseComplete: true };
       }
     }
