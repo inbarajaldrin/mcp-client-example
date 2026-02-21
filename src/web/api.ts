@@ -1198,7 +1198,7 @@ export function createApiRouter(client: MCPClient): Router {
 
       // Create run directory
       const { runDir } = ablationManager.createRunDirectory(ablationName);
-      ablationManager.snapshotOutputs(runDir);
+      ablationManager.stashOutputs(runDir);
 
       // Substitute arguments
       const sub = (cmds: string[]) =>
@@ -1225,8 +1225,8 @@ export function createApiRouter(client: MCPClient): Router {
 
           const modelKey = `${model.provider}/${model.model}`;
 
-          // Restore outputs per model (each model starts with clean outputs)
-          ablationManager.restoreOutputsFromSnapshot(runDir);
+          // Clear outputs per model (each model starts with clean outputs)
+          ablationManager.clearOutputs();
 
           // Switch model once per model (skip in dry run)
           if (!ablation.dryRun) {
@@ -1367,7 +1367,7 @@ export function createApiRouter(client: MCPClient): Router {
         totalDurationFormatted: fmtDur(totalDuration),
       };
       ablationManager.saveRunResults(runDir, run as any);
-      ablationManager.cleanupOutputsSnapshot(runDir);
+      ablationManager.unstashOutputs(runDir);
 
       // Restore original state
       try {

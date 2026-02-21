@@ -1,4 +1,4 @@
-import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, rmdirSync, unlinkSync, statSync, cpSync, rmSync } from 'fs';
+import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, cpSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
 import { Logger } from '../logger.js';
@@ -718,134 +718,86 @@ export class AblationManager {
   // ==================== Outputs Management ====================
 
   /**
-   * Get the snapshot directory path within the outputs folder
+   * Get the stash directory path for preserving original outputs during an ablation
    */
-  private getSnapshotDir(runDir: string): string {
-    return join(runDir, 'outputs', '_initial');
+  private getStashDir(runDir: string): string {
+    return join(runDir, '_stashed_outputs');
   }
 
   /**
-   * Snapshot the current outputs folder to preserve initial state
-   * Called once before ablation starts
+   * Stash the current outputs folder to preserve original state.
+   * Moves contents out so the outputs folder is empty for the ablation.
+   * Called once before the ablation starts.
    */
-  snapshotOutputs(runDir: string): boolean {
-    const snapshotDir = this.getSnapshotDir(runDir);
+  stashOutputs(runDir: string): boolean {
+    const stashDir = this.getStashDir(runDir);
 
     try {
-      // Create snapshot directory
-      mkdirSync(snapshotDir, { recursive: true });
+      mkdirSync(stashDir, { recursive: true });
 
       if (!existsSync(OUTPUTS_DIR)) {
-        // No outputs folder exists, create empty snapshot marker
-        writeFileSync(join(snapshotDir, '.empty'), '', 'utf-8');
+        writeFileSync(join(stashDir, '.empty'), '', 'utf-8');
+        mkdirSync(OUTPUTS_DIR, { recursive: true });
         return true;
       }
 
       const items = readdirSync(OUTPUTS_DIR);
       if (items.length === 0) {
-        // Outputs folder is empty, create empty snapshot marker
-        writeFileSync(join(snapshotDir, '.empty'), '', 'utf-8');
+        writeFileSync(join(stashDir, '.empty'), '', 'utf-8');
         return true;
       }
 
-      // Copy all contents from outputs to snapshot
-      cpSync(OUTPUTS_DIR, snapshotDir, { recursive: true });
-      this.logger.log(`  Outputs snapshot saved (${items.length} items)\n`, { type: 'info' });
+      // Move contents into stash, then recreate empty outputs
+      cpSync(OUTPUTS_DIR, stashDir, { recursive: true });
+      rmSync(OUTPUTS_DIR, { recursive: true, force: true });
+      mkdirSync(OUTPUTS_DIR, { recursive: true });
+      this.logger.log(`  Outputs stashed (${items.length} items)\n`, { type: 'info' });
       return true;
     } catch (error) {
-      this.logger.log(`Failed to snapshot outputs: ${error}\n`, { type: 'error' });
+      this.logger.log(`Failed to stash outputs: ${error}\n`, { type: 'error' });
       return false;
     }
   }
 
   /**
-   * Restore outputs folder from snapshot
-   * Called before each ablation run to ensure consistent starting state
+   * Clear the outputs folder between model runs.
+   * Since outputs were stashed at the start, this just empties the folder.
    */
-  restoreOutputsFromSnapshot(runDir: string): boolean {
-    const snapshotDir = this.getSnapshotDir(runDir);
-
+  clearOutputs(): void {
     try {
-      if (!existsSync(snapshotDir)) {
-        this.logger.log(`No outputs snapshot found\n`, { type: 'warning' });
-        return false;
-      }
-
-      // Clear current outputs folder
       if (existsSync(OUTPUTS_DIR)) {
         rmSync(OUTPUTS_DIR, { recursive: true, force: true });
       }
-
-      // Check if snapshot was empty
-      const emptyMarker = join(snapshotDir, '.empty');
-      if (existsSync(emptyMarker)) {
-        // Original outputs was empty, just create empty folder
-        mkdirSync(OUTPUTS_DIR, { recursive: true });
-        return true;
-      }
-
-      // Restore from snapshot
       mkdirSync(OUTPUTS_DIR, { recursive: true });
-      cpSync(snapshotDir, OUTPUTS_DIR, { recursive: true });
-      return true;
     } catch (error) {
-      this.logger.log(`Failed to restore outputs from snapshot: ${error}\n`, { type: 'error' });
-      return false;
+      this.logger.log(`Failed to clear outputs: ${error}\n`, { type: 'error' });
     }
   }
 
   /**
-   * Capture outputs written during a run and save to run results
-   * Identifies new/modified files by comparing against snapshot
+   * Capture all outputs currently in the outputs folder to the run archive.
+   * No diffing needed — since outputs were stashed at the start, everything
+   * in the folder was produced by the current run.
    * When runIteration is provided (runs > 1), saves to outputs/run-{N}/{phase}/{model}/
    */
   captureRunOutputs(runDir: string, phaseName: string, model: AblationModel, runIteration?: number): number {
-    const snapshotDir = this.getSnapshotDir(runDir);
-    const outputsBase = runIteration !== undefined
+    const runOutputsDir = runIteration !== undefined
       ? join(runDir, 'outputs', `run-${runIteration}`, sanitizeFolderName(phaseName), sanitizeFolderName(model.model))
       : join(runDir, 'outputs', sanitizeFolderName(phaseName), sanitizeFolderName(model.model));
-    const runOutputsDir = outputsBase;
 
     try {
       if (!existsSync(OUTPUTS_DIR)) {
-        return 0; // No outputs folder, nothing to capture
+        return 0;
       }
 
-      const currentItems = this.getDirectoryContents(OUTPUTS_DIR);
-      const snapshotItems = existsSync(snapshotDir) && !existsSync(join(snapshotDir, '.empty'))
-        ? this.getDirectoryContents(snapshotDir)
-        : new Map<string, { size: number }>();
-
-      // Find new or modified items
-      // NOTE: We only compare by path existence and file size, NOT mtime.
-      // cpSync does not preserve mtimes, so restored files get new mtimes
-      // that would incorrectly appear as "modified" when compared to snapshot.
-      const newItems: string[] = [];
-      for (const [relativePath, stats] of currentItems) {
-        const snapshotStats = snapshotItems.get(relativePath);
-        if (!snapshotStats || stats.size !== snapshotStats.size) {
-          newItems.push(relativePath);
-        }
+      const items = readdirSync(OUTPUTS_DIR);
+      if (items.length === 0) {
+        return 0;
       }
 
-      if (newItems.length === 0) {
-        return 0; // No new outputs to capture
-      }
-
-      // Create run outputs directory
       mkdirSync(runOutputsDir, { recursive: true });
-
-      // Copy new/modified files to run outputs
-      for (const relativePath of newItems) {
-        const sourcePath = join(OUTPUTS_DIR, relativePath);
-        const destPath = join(runOutputsDir, relativePath);
-
-        // Ensure parent directory exists
-        mkdirSync(dirname(destPath), { recursive: true });
-        cpSync(sourcePath, destPath);
-      }
-
-      return newItems.length;
+      cpSync(OUTPUTS_DIR, runOutputsDir, { recursive: true });
+      return items.length;
     } catch (error) {
       this.logger.log(`Failed to capture run outputs: ${error}\n`, { type: 'error' });
       return 0;
@@ -853,102 +805,11 @@ export class AblationManager {
   }
 
   /**
-   * Get all files in a directory recursively with their sizes
-   * Returns a map of relative paths to {size} (directories are traversed but not included)
-   */
-  private getDirectoryContents(dir: string, basePath: string = ''): Map<string, { size: number }> {
-    const contents = new Map<string, { size: number }>();
-
-    try {
-      const items = readdirSync(dir);
-      for (const item of items) {
-        const fullPath = join(dir, item);
-        const relativePath = basePath ? join(basePath, item) : item;
-        const stats = statSync(fullPath);
-
-        if (stats.isDirectory()) {
-          // Recursively get contents of subdirectories (skip directory entries themselves)
-          const subContents = this.getDirectoryContents(fullPath, relativePath);
-          for (const [subPath, subStats] of subContents) {
-            contents.set(subPath, subStats);
-          }
-        } else {
-          contents.set(relativePath, {
-            size: stats.size
-          });
-        }
-      }
-    } catch (error) {
-      // Ignore errors, return what we have
-    }
-
-    return contents;
-  }
-
-  /**
-   * Clean up after ablation completes
-   * Restores the original outputs state from the _initial snapshot
-   */
-  cleanupOutputsSnapshot(runDir: string, restoreOriginal: boolean = true): void {
-    const snapshotDir = this.getSnapshotDir(runDir);
-
-    try {
-      if (restoreOriginal && existsSync(snapshotDir)) {
-        // Restore original outputs state
-        if (existsSync(OUTPUTS_DIR)) {
-          rmSync(OUTPUTS_DIR, { recursive: true, force: true });
-        }
-
-        const emptyMarker = join(snapshotDir, '.empty');
-        if (!existsSync(emptyMarker)) {
-          mkdirSync(OUTPUTS_DIR, { recursive: true });
-          cpSync(snapshotDir, OUTPUTS_DIR, { recursive: true });
-        } else {
-          // Original was empty, just create empty folder
-          mkdirSync(OUTPUTS_DIR, { recursive: true });
-        }
-      }
-
-      // Remove the _initial snapshot from the run directory — it was only needed during the run
-      if (existsSync(snapshotDir)) {
-        rmSync(snapshotDir, { recursive: true, force: true });
-      }
-
-      // Remove any empty directories left in the run folder
-      this.removeEmptyDirs(runDir);
-    } catch (error) {
-      this.logger.log(`Failed to cleanup outputs snapshot: ${error}\n`, { type: 'error' });
-    }
-  }
-
-  /**
-   * Recursively remove empty directories within a path.
-   * Walks bottom-up so nested empty dirs are cleaned first.
-   */
-  private removeEmptyDirs(dir: string): void {
-    if (!existsSync(dir) || !statSync(dir).isDirectory()) return;
-
-    for (const item of readdirSync(dir)) {
-      const fullPath = join(dir, item);
-      if (statSync(fullPath).isDirectory()) {
-        this.removeEmptyDirs(fullPath);
-      }
-    }
-
-    // After cleaning children, remove this dir if now empty (but never the run root)
-    if (readdirSync(dir).length === 0) {
-      rmdirSync(dir);
-    }
-  }
-
-  /**
    * Capture all outputs produced during an entire iteration.
-   * Identifies new/modified files by comparing against the initial snapshot.
    * When runIteration is provided (runs > 1), saves to outputs/run-{N}/
    * Otherwise saves to outputs/
    */
   captureIterationOutputs(runDir: string, runIteration?: number): number {
-    const snapshotDir = this.getSnapshotDir(runDir);
     const runOutputsDir = runIteration !== undefined
       ? join(runDir, 'outputs', `run-${runIteration}`)
       : join(runDir, 'outputs');
@@ -958,37 +819,49 @@ export class AblationManager {
         return 0;
       }
 
-      const currentItems = this.getDirectoryContents(OUTPUTS_DIR);
-      const snapshotItems = existsSync(snapshotDir) && !existsSync(join(snapshotDir, '.empty'))
-        ? this.getDirectoryContents(snapshotDir)
-        : new Map<string, { size: number }>();
-
-      // Find new or modified items (compare by path existence and file size)
-      const newItems: string[] = [];
-      for (const [relativePath, stats] of currentItems) {
-        const snapshotStats = snapshotItems.get(relativePath);
-        if (!snapshotStats || stats.size !== snapshotStats.size) {
-          newItems.push(relativePath);
-        }
-      }
-
-      if (newItems.length === 0) {
+      const items = readdirSync(OUTPUTS_DIR);
+      if (items.length === 0) {
         return 0;
       }
 
       mkdirSync(runOutputsDir, { recursive: true });
-
-      for (const relativePath of newItems) {
-        const sourcePath = join(OUTPUTS_DIR, relativePath);
-        const destPath = join(runOutputsDir, relativePath);
-        mkdirSync(dirname(destPath), { recursive: true });
-        cpSync(sourcePath, destPath);
-      }
-
-      return newItems.length;
+      cpSync(OUTPUTS_DIR, runOutputsDir, { recursive: true });
+      return items.length;
     } catch (error) {
       this.logger.log(`Failed to capture iteration outputs: ${error}\n`, { type: 'error' });
       return 0;
+    }
+  }
+
+  /**
+   * Restore the original outputs from the stash after the ablation completes.
+   * Removes the stash directory afterward.
+   */
+  unstashOutputs(runDir: string): void {
+    const stashDir = this.getStashDir(runDir);
+
+    try {
+      if (!existsSync(stashDir)) {
+        return;
+      }
+
+      // Clear whatever the last run left behind
+      if (existsSync(OUTPUTS_DIR)) {
+        rmSync(OUTPUTS_DIR, { recursive: true, force: true });
+      }
+
+      const emptyMarker = join(stashDir, '.empty');
+      if (existsSync(emptyMarker)) {
+        mkdirSync(OUTPUTS_DIR, { recursive: true });
+      } else {
+        mkdirSync(OUTPUTS_DIR, { recursive: true });
+        cpSync(stashDir, OUTPUTS_DIR, { recursive: true });
+      }
+
+      // Remove the stash — no longer needed
+      rmSync(stashDir, { recursive: true, force: true });
+    } catch (error) {
+      this.logger.log(`Failed to unstash outputs: ${error}\n`, { type: 'error' });
     }
   }
 

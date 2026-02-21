@@ -2114,9 +2114,9 @@ export class AblationCLI {
     // Pass resolved arguments so dynamically-named attachments are detected
     this.ablationManager.copyAttachmentsToRun(runDir, ablation, resolvedArguments);
 
-    // Snapshot current outputs folder to ensure each run starts with the same state
-    this.logger.log('  Snapshotting outputs folder...\n', { type: 'info' });
-    this.ablationManager.snapshotOutputs(runDir);
+    // Stash current outputs so each model run starts with a clean folder
+    this.logger.log('  Stashing outputs folder...\n', { type: 'info' });
+    this.ablationManager.stashOutputs(runDir);
 
     // Initialize run results
     const run: AblationRun = {
@@ -2187,8 +2187,8 @@ export class AblationCLI {
 
         const modelKey = `${model.provider}/${model.model}`;
 
-        // Restore outputs per model (each model starts with clean outputs)
-        this.ablationManager.restoreOutputsFromSnapshot(runDir);
+        // Clear outputs per model (each model starts with clean outputs)
+        this.ablationManager.clearOutputs();
 
         // Create provider instance and switch to this model once (skip in dry run)
         if (!ablation.dryRun) {
@@ -2835,11 +2835,11 @@ export class AblationCLI {
     this.logger.log(`\n  Outputs saved to:\n`, { type: 'info' });
     this.logger.log(`    ${runDir}\n`, { type: 'info' });
 
-    // Restore original outputs folder state
+    // Restore original outputs folder from stash
     this.logger.log('\n  Restoring original outputs folder...\n', {
       type: 'info',
     });
-    this.ablationManager.cleanupOutputsSnapshot(runDir, true);
+    this.ablationManager.unstashOutputs(runDir);
 
     return shouldBreak;
   }
