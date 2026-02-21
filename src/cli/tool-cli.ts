@@ -30,6 +30,7 @@ export class ToolCLI {
    */
   async displayToolsList(): Promise<void> {
     const toolManager = this.client.getToolManager();
+    const disabledServers = this.client.getDisabledServerNames();
 
     // Get all tools from all servers
     const allTools: Array<{ name: string; server: string; enabled: boolean }> =
@@ -39,6 +40,9 @@ export class ToolCLI {
     const servers = (this.client as any).servers as Map<string, any>;
 
     for (const [serverName, connection] of servers.entries()) {
+      // Skip servers disabled in config — they are connected but not exposed to the agent
+      if (disabledServers.has(serverName)) continue;
+
       // Get all tools from server (including disabled ones)
       try {
         const toolsResults = await connection.client.request(
@@ -128,7 +132,8 @@ export class ToolCLI {
     // Save initial state to revert to on cancel
     const initialState = { ...toolManager.getToolStates() };
 
-    // Collect all tools from all servers
+    // Collect all tools from all servers (excluding disabled servers)
+    const disabledServers = this.client.getDisabledServerNames();
     const allTools: Array<{
       name: string;
       server: string;
@@ -139,6 +144,9 @@ export class ToolCLI {
     const serverList: string[] = [];
 
     for (const [serverName, connection] of servers.entries()) {
+      // Skip servers disabled in config — they are connected but not exposed to the agent
+      if (disabledServers.has(serverName)) continue;
+
       serverList.push(serverName);
       try {
         const toolsResults = await connection.client.request(

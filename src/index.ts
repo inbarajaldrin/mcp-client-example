@@ -946,6 +946,7 @@ export class MCPClient {
 
   private async initMCPTools() {
     const allTools: Tool[] = [];
+    const allKnownToolNames = new Set<string>(); // Track ALL tool names across all servers (including disabled) for pruning
     const serversWithTools = new Set<string>();
 
     // Load tools from each server and prefix with server name
@@ -976,6 +977,11 @@ export class MCPClient {
 
         connection.tools = serverTools;
 
+        // Track all tool names from all servers (including disabled) for pruning stale entries
+        for (const tool of serverTools) {
+          allKnownToolNames.add(tool.name);
+        }
+
         // Check if this server was disabled in config
         const serverConfig = this.serverConfigs.find(cfg => cfg.name === serverName);
         const wasDisabledInConfig = serverConfig?.disabledInConfig || false;
@@ -1005,6 +1011,9 @@ export class MCPClient {
 
     // Update state for new tools (set them to enabled by default)
     this.toolManager.updateStateForNewTools(allTools);
+
+    // Prune stale tools that no longer exist on any connected server
+    this.toolManager.pruneStaleTools(allKnownToolNames);
 
     // Filter tools based on enabled state
     const enabledTools = this.toolManager.filterTools(allTools);
@@ -1242,6 +1251,21 @@ export class MCPClient {
    */
   getToolManager(): ToolManager {
     return this.toolManager;
+  }
+
+  /**
+   * Get the set of server names that are disabled in config.
+   * These servers are connected (for direct tool execution) but their tools
+   * are not exposed to the agent.
+   */
+  getDisabledServerNames(): Set<string> {
+    const disabled = new Set<string>();
+    for (const cfg of this.serverConfigs) {
+      if (cfg.disabledInConfig) {
+        disabled.add(cfg.name);
+      }
+    }
+    return disabled;
   }
 
   /**
@@ -3375,10 +3399,13 @@ export class MCPClient {
   /**
    * Re-filter tools based on current toolManager state without re-querying servers.
    * Used after toggling tools on/off via the web UI.
+   * Excludes tools from servers disabled in config.
    */
   reapplyToolFilter(): void {
+    const disabledServers = this.getDisabledServerNames();
     const allTools: Tool[] = [];
-    for (const connection of this.servers.values()) {
+    for (const [serverName, connection] of this.servers) {
+      if (disabledServers.has(serverName)) continue;
       allTools.push(...connection.tools);
     }
     this.tools = this.toolManager.filterTools(allTools);
@@ -3386,10 +3413,13 @@ export class MCPClient {
 
   /**
    * Get all tools across all servers with their enabled/disabled state (for web UI tool management).
+   * Excludes tools from servers that are disabled in config (they are connected but not exposed to the agent).
    */
   getAllToolsWithState(): Array<{ name: string; server: string; description: string; enabled: boolean }> {
+    const disabledServers = this.getDisabledServerNames();
     const result: Array<{ name: string; server: string; description: string; enabled: boolean }> = [];
     for (const [serverName, connection] of this.servers) {
+      if (disabledServers.has(serverName)) continue;
       for (const tool of connection.tools) {
         result.push({
           name: tool.name,

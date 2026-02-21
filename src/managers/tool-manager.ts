@@ -138,6 +138,21 @@ export class ToolManager {
     return hasNewTools;
   }
 
+  /**
+   * Remove entries from tool states that no longer exist on any connected server.
+   * @param knownToolNames Set of all tool names currently available across all servers
+   */
+  pruneStaleTools(knownToolNames: Set<string>): void {
+    const staleKeys = Object.keys(this.toolStates).filter(name => !knownToolNames.has(name));
+    if (staleKeys.length === 0) return;
+
+    for (const key of staleKeys) {
+      delete this.toolStates[key];
+    }
+    this.saveState();
+    this.logger.log(`Pruned ${staleKeys.length} stale tool(s) from tool-states.yaml\n`, { type: 'info' });
+  }
+
   filterTools(tools: Tool[]): Tool[] {
     return tools.filter((tool) => this.isToolEnabled(tool.name));
   }
