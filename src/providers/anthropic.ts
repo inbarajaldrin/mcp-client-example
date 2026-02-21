@@ -465,12 +465,18 @@ export class AnthropicProvider implements ModelProvider {
     toolExecutor: ToolExecutor,
     maxIterations: number = 10,
     cancellationCheck?: () => boolean,
+    system?: string,
   ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
     const anthropicTools: AnthropicTool[] = tools.map((tool) => ({
       name: tool.name,
       description: tool.description,
       input_schema: tool.input_schema,
     }));
+
+    // Prepare system prompt with cache control (breakpoint 2)
+    const systemParam = system
+      ? [{ type: 'text' as const, text: system, cache_control: { type: 'ephemeral' as const } }]
+      : undefined;
 
     let conversationMessages = [...messages];
     let iterations = 0;
@@ -492,19 +498,28 @@ export class AnthropicProvider implements ModelProvider {
       iterations++;
 
       // Step 1: Stream request to Anthropic (using .stream() for real-time response)
-      // Enable prompt caching for tools to save tokens on repeated tool definitions
+      // Prompt caching breakpoints (up to 4 allowed):
+      // 1. Last tool definition — caches all tool schemas (stable across turns and runs)
+      // 2. System prompt — caches system instructions (stable across turns, reusable cross-run)
+      // 3. Last user/tool_result message — caches conversation history (grows each turn)
       const toolsWithCache = anthropicTools.map((tool, index) => ({
         ...tool,
-        // Add cache control to the last tool (marks all tools for caching)
+        // Breakpoint 1: cache all tool definitions
         ...(index === anthropicTools.length - 1 ? { cache_control: { type: 'ephemeral' } } : {}),
       }));
+
+      // Breakpoint 3: cache conversation history up to the last user/tool_result message
+      const convertedMessages = this.addConversationCacheBreakpoint(
+        this.convertToAnthropicMessages(conversationMessages)
+      );
 
       const thinkingParam = isReasoningModel(model, 'anthropic') ? this.resolveThinkingParam() : undefined;
       const streamParams: any = {
         model: model,
         max_tokens: maxTokens,
         tools: toolsWithCache as any,
-        messages: this.convertToAnthropicMessages(conversationMessages),
+        messages: convertedMessages,
+        ...(systemParam && { system: systemParam }),
       };
       if (thinkingParam) streamParams.thinking = thinkingParam;
       const stream = this.anthropicClient.messages.stream(streamParams);
@@ -813,6 +828,61 @@ export class AnthropicProvider implements ModelProvider {
         content: msg.content || '',
       };
     });
+  }
+
+  /**
+   * Add cache_control breakpoint to the last user-role message in the conversation.
+   * This caches the entire conversation prefix (tools + system + all prior messages)
+   * so each new turn only pays full input price for the latest messages.
+   * The last user message is chosen because it's always the end of the cached prefix
+   * (Anthropic conversations alternate user/assistant, and user always comes last before the API call).
+   */
+  private addConversationCacheBreakpoint(
+    messages: Array<{ role: 'user' | 'assistant'; content: any }>
+  ): Array<{ role: 'user' | 'assistant'; content: any }> {
+    if (messages.length < 2) return messages;
+
+    // Find the last user-role message (tool_result messages are also role: 'user')
+    let lastUserIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      if (messages[i].role === 'user') {
+        lastUserIdx = i;
+        break;
+      }
+    }
+
+    if (lastUserIdx < 0) return messages;
+
+    // Clone the array and add cache_control to the last user message
+    const result = messages.map((msg, i) => {
+      if (i !== lastUserIdx) return msg;
+
+      const content = msg.content;
+
+      // If content is a string, wrap in a text block with cache_control
+      if (typeof content === 'string') {
+        return {
+          ...msg,
+          content: [
+            { type: 'text' as const, text: content, cache_control: { type: 'ephemeral' as const } },
+          ],
+        };
+      }
+
+      // If content is an array (tool_results, content_blocks), add cache_control to the last block
+      if (Array.isArray(content) && content.length > 0) {
+        const cloned = content.map((block: any, j: number) =>
+          j === content.length - 1
+            ? { ...block, cache_control: { type: 'ephemeral' as const } }
+            : block
+        );
+        return { ...msg, content: cloned };
+      }
+
+      return msg;
+    });
+
+    return result;
   }
 
   // Helper method to create a non-streaming message (for summarization)

@@ -3,10 +3,9 @@ import { join, dirname, basename } from 'path';
 import { fileURLToPath } from 'url';
 import { Logger } from '../logger.js';
 import type { Message } from '../model-provider.js';
-import { MODEL_PRICING } from '../utils/model-pricing.js';
+import { getModelInfo } from '../utils/models-dev.js';
 import { sanitizeFolderName } from '../utils/path-utils.js';
 import { directoryHasFiles, copyDirectoryRecursive, moveDirectoryRecursive } from '../utils/file-ops.js';
-import { calcPrice, type Usage, type PriceCalculationResult } from '@pydantic/genai-prices';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -114,11 +113,16 @@ export class ChatHistoryManager {
   private sessionStartTime: Date | null = null;
   private index: Map<string, ChatMetadata> = new Map();
   private toolUseCount: number = 0;
+  private providerName: string | undefined;
 
   constructor(logger?: Logger) {
     this.logger = logger || new Logger({ mode: 'verbose' });
     this.initializeChatDirectory();
     this.loadIndex();
+  }
+
+  setProviderName(name: string): void {
+    this.providerName = name;
   }
 
   getCurrentSession(): ChatSession | null {
@@ -405,36 +409,9 @@ export class ChatHistoryManager {
   }
 
   /**
-   * Detect provider ID from model name for @pydantic/genai-prices
-   */
-  private detectProviderId(model: string): string | undefined {
-    const modelLower = model.toLowerCase();
-    if (modelLower.includes('claude') || modelLower.includes('anthropic')) {
-      return 'anthropic';
-    }
-    if (modelLower.includes('gpt') || modelLower.includes('o1') || modelLower.includes('o3') || modelLower.includes('chatgpt')) {
-      return 'openai';
-    }
-    if (modelLower.includes('gemini')) {
-      return 'google';
-    }
-    if (modelLower.includes('grok')) {
-      return 'xai';
-    }
-    // For other models, let the package try to auto-detect
-    return undefined;
-  }
-
-  /**
-   * Calculate estimated cost for a callback using @pydantic/genai-prices
-   * Falls back to hardcoded MODEL_PRICING if the package doesn't have pricing for the model
-   *
-   * @pydantic/genai-prices is a community-maintained package with up-to-date pricing
-   * for 700+ models across 29 providers. It supports:
-   * - Tiered pricing for long contexts (e.g., Gemini >128K)
-   * - Cache read/write pricing
-   * - Historic price tracking
-   * - Variable daily prices (e.g., DeepSeek off-peak)
+   * Calculate estimated cost using models.dev pricing data.
+   * Supports: regular input, cache read/write, output, long context (>200k) tiers.
+   * Prices are per 1 million tokens.
    */
   private calculateCost(
     model: string,
@@ -442,61 +419,25 @@ export class ChatHistoryManager {
     cacheCreationTokens: number,
     cacheReadTokens: number,
     outputTokens: number,
-    totalInputTokens?: number // Total input tokens to determine if long context pricing applies
+    totalInputTokens?: number
   ): number {
-    // Try @pydantic/genai-prices first (community-maintained, up-to-date pricing)
-    try {
-      // The package expects input_tokens to be the TOTAL input count.
-      // cache_write_tokens and cache_read_tokens are SUBSETS of input_tokens
-      // that get charged at their respective rates (the remainder is charged at regular input rate).
-      const usage: Usage = {
-        input_tokens: regularInputTokens + cacheCreationTokens + cacheReadTokens, // TOTAL input
-        output_tokens: outputTokens,
-        cache_read_tokens: cacheReadTokens,   // Subset charged at cache_read rate
-        cache_write_tokens: cacheCreationTokens, // Subset charged at cache_write rate
-      };
+    const info = getModelInfo(model, this.providerName);
+    if (!info?.cost) return 0;
 
-      const providerId = this.detectProviderId(model);
-      const result: PriceCalculationResult = calcPrice(usage, model, { providerId });
+    // Select pricing tier: >200k context gets different rates
+    const totalInput = totalInputTokens || (regularInputTokens + cacheCreationTokens + cacheReadTokens);
+    const cost = (info.cost.context_over_200k && totalInput > 200_000)
+      ? info.cost.context_over_200k : info.cost;
 
-      if (result && result.total_price !== undefined) {
-        return result.total_price;
-      }
-    } catch {
-      // Silently fall back to hardcoded pricing if genai-prices fails
-    }
+    const inputCost = (regularInputTokens / 1_000_000) * cost.input;
+    const cacheWriteCost = (cacheCreationTokens / 1_000_000) * (cost.cache_write ?? cost.input);
+    const cacheReadCost = (cacheReadTokens / 1_000_000) * (cost.cache_read ?? cost.input * 0.1);
+    const outputCost = (outputTokens / 1_000_000) * cost.output;
+    // TODO: Use cost.reasoning for separate reasoning token pricing when reasoning token
+    // counts are tracked separately from output tokens. Currently reasoning tokens are
+    // included in outputTokens by all providers.
 
-    // Fallback to hardcoded MODEL_PRICING
-    const pricing = MODEL_PRICING[model];
-    if (!pricing) {
-      // Unknown model, return 0
-      return 0;
-    }
-
-    // Determine if long context pricing applies
-    // Default threshold is 200K tokens (for Sonnet 4.5, Gemini 2.5 Pro)
-    // Gemini 1.5 models use 128K threshold
-    const threshold = pricing.longContextThreshold || 200_000;
-    const useLongContextPricing = totalInputTokens && totalInputTokens > threshold &&
-                                   pricing.inputLongContext && pricing.outputLongContext;
-
-    const inputPrice = useLongContextPricing ? pricing.inputLongContext! : pricing.input;
-    const outputPrice = useLongContextPricing ? pricing.outputLongContext! : pricing.output;
-
-    // Cost calculation:
-    // - Regular input: full price (or long context price if applicable)
-    // - Cache creation: full price (same as regular input)
-    // - Cache read: uses cachedInput price if available, otherwise falls back to 10% of input price
-    //   - Anthropic: 10% of input price (90% discount)
-    //   - OpenAI: varies by model (o1 series: 50%, GPT-5: 10%, GPT-4o mini Realtime: 50%)
-    // - Output: full output price (or long context price if applicable)
-    const inputCost = (regularInputTokens / 1_000_000) * inputPrice;
-    const cacheCreationCost = (cacheCreationTokens / 1_000_000) * inputPrice;
-    const cachedInputPrice = pricing.cachedInput || pricing.input * 0.1; // Default to 10% if not specified
-    const cacheReadCost = (cacheReadTokens / 1_000_000) * cachedInputPrice;
-    const outputCost = (outputTokens / 1_000_000) * outputPrice;
-
-    return inputCost + cacheCreationCost + cacheReadCost + outputCost;
+    return inputCost + cacheWriteCost + cacheReadCost + outputCost;
   }
 
   /**

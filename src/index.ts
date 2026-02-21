@@ -47,6 +47,7 @@ export type WebStreamEvent =
 export type StreamObserver = (event: WebStreamEvent) => void;
 import { AnthropicProvider, type ToolExecutor } from './providers/anthropic.js';
 import { isReasoningModel } from './utils/model-capabilities.js';
+import { initModelsDevCache, startModelsDevRefresh } from './utils/models-dev.js';
 import { OrchestratorIPCServer } from './ipc-server.js';
 import { ElicitationHandler } from './handlers/elicitation-handler.js';
 import { formatToolCall, formatJSON, formatCompactJSON } from './utils/formatting.js';
@@ -213,6 +214,7 @@ export class MCPClient {
     
     // Initialize chat history manager
     this.chatHistoryManager = new ChatHistoryManager(this.logger);
+    this.chatHistoryManager.setProviderName(this.modelProvider.getProviderName());
     
     // Initialize attachment manager
     this.attachmentManager = new AttachmentManager(this.logger);
@@ -297,6 +299,7 @@ export class MCPClient {
     });
     client.promptManager = new PromptManager(client.logger);
     client.chatHistoryManager = new ChatHistoryManager(client.logger);
+    client.chatHistoryManager.setProviderName(client.modelProvider.getProviderName());
     client.attachmentManager = new AttachmentManager(client.logger);
     client.orchestratorIPCServer = null;
     client.enableOrchestratorIPC = options?.enableOrchestratorIPC ?? false;
@@ -341,6 +344,9 @@ export class MCPClient {
         );
       }
     }
+
+    // Load models.dev data (pricing + capabilities) in parallel with server connections
+    const modelsDevReady = initModelsDevCache().catch(() => {});
 
     const connectionErrors: Array<{ name: string; error: any }> = [];
 
@@ -427,9 +433,13 @@ export class MCPClient {
       );
     }
 
+    // Ensure models.dev data is loaded before first API call (for cost calculation)
+    await modelsDevReady;
+    startModelsDevRefresh();
+
     // Initialize tools from all successfully connected servers
     await this.initMCPTools();
-    
+
     // Initialize prompts from all successfully connected servers
     await this.initMCPPrompts();
 
@@ -1372,6 +1382,7 @@ export class MCPClient {
     // Update provider and model
     this.modelProvider = provider;
     this.model = model;
+    this.chatHistoryManager.setProviderName(provider.getProviderName());
 
     // Reinitialize token counter for new model
     await this.tokenManager.reinitializeTokenCounter();
@@ -1476,6 +1487,7 @@ export class MCPClient {
     if (provider && model) {
       this.modelProvider = provider;
       this.model = model;
+      this.chatHistoryManager.setProviderName(provider.getProviderName());
       // Reinitialize token counter for restored model
       await this.tokenManager.reinitializeTokenCounter();
     }

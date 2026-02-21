@@ -1,9 +1,9 @@
-// Reference: https://github.com/paradite/llm-info
+// Reference: https://models.dev
 // Model reasoning/thinking capability detection.
-// Each provider has its own thinking mechanism — this map tracks which models support it.
-// llm-info's reasoning flag is used as a supplementary signal, not the sole source.
+// Each provider has its own thinking mechanism — models.dev provides the reasoning flag.
+// Thinking levels and budgets are our own config (not from models.dev).
 
-import { ModelInfoMap } from 'llm-info';
+import { getModelInfo } from './models-dev.js';
 
 export interface ThinkingSupport {
   supportsThinking: boolean;
@@ -32,74 +32,14 @@ export const GEMINI_BUDGET_TOKENS: Record<GeminiThinkingLevel, number | undefine
   generous: 24576,
 };
 
-// Canonical map of models that support thinking/reasoning.
-// Each provider implements thinking differently:
-//   OpenAI: reasoning_effort param (low/medium/high)
-//   Anthropic: thinking: { type: 'enabled', budget_tokens } — extended thinking
-//   Google: thinkingConfig: { thinkingBudget } — thinking budget
-//   xAI: reasoning_effort on grok-3-mini only; grok-4 has built-in reasoning (no API control)
-//   Ollama: think: true flag
-const REASONING_MODELS: Record<string, boolean> = {
-  // OpenAI — reasoning_effort supported on all these
-  'o1-preview': true,
-  'o1': true,
-  'o1-mini': true,
-  'o3': true,
-  'o3-mini': true,
-  'o4-mini': true,
-  'gpt-5': true,
-  'gpt-5-mini': true,
-  'gpt-5-nano': true,
-  'gpt-5-codex': true,
-  // Anthropic — extended thinking via budget_tokens
-  'claude-sonnet-4': true,
-  'claude-opus-4': true,
-  'claude-haiku-4-5': true,
-  'claude-sonnet-4-5': true,
-  'claude-opus-4-5': true,
-  // Google — thinkingConfig budget
-  'gemini-2.5-pro': true,
-  'gemini-2.5-flash': true,
-  'gemini-3-pro': true,
-  // xAI — grok-4 has built-in reasoning, grok-3-mini supports reasoning_effort
-  'grok-3-mini': true,
-  'grok-4': true,
-};
-
 /**
- * Check if a model supports thinking/reasoning.
- * Checks our canonical map first (exact then prefix), then llm-info as supplementary.
+ * Check if a model supports thinking/reasoning using models.dev data.
  */
-export function getModelThinkingSupport(modelId: string, _providerName?: string): ThinkingSupport {
-  // 1. Exact match in our map
-  if (modelId in REASONING_MODELS) {
-    return { supportsThinking: REASONING_MODELS[modelId] };
-  }
-
-  // 2. Prefix match on our map (longest key first to avoid false positives)
-  const sortedModels = Object.entries(REASONING_MODELS)
-    .sort((a, b) => b[0].length - a[0].length);
-  for (const [key, value] of sortedModels) {
-    if (modelId.startsWith(key)) {
-      return { supportsThinking: value };
-    }
-  }
-
-  // 3. Supplementary: check llm-info for models we don't explicitly track
-  const info = (ModelInfoMap as Record<string, any>)[modelId];
+export function getModelThinkingSupport(modelId: string, providerName?: string): ThinkingSupport {
+  const info = getModelInfo(modelId, providerName);
   if (info && typeof info.reasoning === 'boolean') {
     return { supportsThinking: info.reasoning };
   }
-
-  // 4. Prefix match in llm-info (longest key first)
-  const sortedEntries = Object.entries(ModelInfoMap as Record<string, any>)
-    .sort((a, b) => b[0].length - a[0].length);
-  for (const [key, value] of sortedEntries) {
-    if (modelId.startsWith(key) && typeof value.reasoning === 'boolean') {
-      return { supportsThinking: value.reasoning };
-    }
-  }
-
   return { supportsThinking: false };
 }
 
