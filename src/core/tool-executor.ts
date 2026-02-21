@@ -88,6 +88,8 @@ export interface MCPToolExecutorCallbacks {
   killAndRestartServer?: (serverName: string) => Promise<void>;
   /** Get hook manager for client-side hooks (fires during regular chat) */
   getHookManager?: () => HookManager | undefined;
+  /** Cancel any pending elicitation (auto-declines dangling prompts) */
+  cancelPendingElicitation?: () => void;
 }
 
 /** Force stop timeout in seconds */
@@ -418,11 +420,19 @@ export class MCPToolExecutor {
         displayText = formatJSON(JSON.stringify([textContent]));
       }
 
-      return {
-        displayText,
-        contentBlocks,
-        hasImages,
-      };
+      const result: ToolExecutionResult = { displayText, contentBlocks, hasImages };
+
+      // Execute immediate after-hooks inline (@tool-exec: and special commands)
+      const hookMgr = this.callbacks.getHookManager?.();
+      if (hookMgr && !hookMgr.isExecuting()) {
+        await hookMgr.executeImmediateAfterHooks(
+          toolName,
+          { ...result, toolInput },
+          (name, args) => this.executeMCPTool(name, args, true),
+        );
+      }
+
+      return result;
     } catch (toolError) {
       // Check if this is a force stop error (user aborted) - handle first before logging
       const isForceStop =
@@ -430,6 +440,8 @@ export class MCPToolExecutor {
         toolError.message.includes('force stopped by user');
 
       if (isForceStop) {
+        // Cancel any pending elicitation from this tool before stopping
+        this.callbacks.cancelPendingElicitation?.();
         // For force stop, throw an error to stop the agent completely
         // This gives control back to the user instead of letting the agent continue
         const forceStopMessage = `Tool execution was force stopped by the user. The tool "${toolName}" was taking too long and the user chose to abort.`;
@@ -450,6 +462,8 @@ export class MCPToolExecutor {
           toolError.message.includes('ETIMEDOUT'));
 
       if (isTimeout) {
+        // Cancel any pending elicitation that was waiting for user input
+        this.callbacks.cancelPendingElicitation?.();
         // For timeout errors, return an error message to the agent instead of throwing
         // This allows the agent to see partial results and handle the error gracefully
         const timeoutMessage = `Tool execution timed out. The tool "${toolName}" did not complete within the configured timeout period. Previous tool results are still available. You can try again with different parameters or continue with other tasks.`;

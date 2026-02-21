@@ -70,6 +70,7 @@ export class ElicitationHandler extends AbstractHandler {
   private externalReadline: readline.Interface | null = null;
   private onElicitationStart: (() => void) | null = null;
   private onElicitationEnd: (() => void) | null = null;
+  private pendingAbortController: AbortController | null = null;
 
   constructor(logger: Logger, createReadline: () => readline.Interface) {
     super(logger);
@@ -107,6 +108,18 @@ export class ElicitationHandler extends AbstractHandler {
     this.onElicitationEnd = onEnd;
   }
 
+  /**
+   * Cancel any pending elicitation prompt (auto-declines).
+   * Called when a tool execution times out or a phase ends, preventing
+   * dangling readline prompts from leaking into subsequent output.
+   */
+  cancelPending(): void {
+    if (this.pendingAbortController) {
+      this.pendingAbortController.abort();
+      this.pendingAbortController = null;
+    }
+  }
+
   async handleElicitation(request: ElicitRequest): Promise<ElicitResult> {
     const params = request.params;
 
@@ -127,22 +140,34 @@ export class ElicitationHandler extends AbstractHandler {
     // Must happen BEFORE getting readline reference since stopKeyboardMonitoring recreates it
     this.onElicitationStart?.();
 
+    // Create abort controller so this elicitation can be cancelled externally
+    const ac = new AbortController();
+    this.pendingAbortController = ac;
+
     // Use external readline if available, otherwise create a new one
     const useExternalRl = this.externalReadline !== null;
     const rl = this.externalReadline ?? this.createReadline();
 
     try {
       // Prompt user for action
-      const action = await this.promptAction(rl);
+      const action = await this.promptAction(rl, ac.signal);
       if (action !== 'accept') {
         return { action };
       }
 
       // Collect form data based on schema
-      const content = await this.collectFormData(rl, requestedSchema);
+      const content = await this.collectFormData(rl, requestedSchema, ac.signal);
 
       return { action: 'accept', content };
+    } catch (error: any) {
+      // AbortError means the elicitation was cancelled externally (e.g., tool timeout)
+      if (error.name === 'AbortError' || error.code === 'ABORT_ERR') {
+        this.logger.log(`  [Elicitation auto-declined (cancelled)]\n`, { type: 'warning' });
+        return { action: 'decline' };
+      }
+      throw error;
     } finally {
+      this.pendingAbortController = null;
       // Only close if we created the readline (don't close external one)
       if (!useExternalRl) {
         rl.close();
@@ -153,9 +178,9 @@ export class ElicitationHandler extends AbstractHandler {
     }
   }
 
-  private async promptAction(rl: readline.Interface): Promise<'accept' | 'decline' | 'cancel'> {
+  private async promptAction(rl: readline.Interface, signal?: AbortSignal): Promise<'accept' | 'decline' | 'cancel'> {
     while (true) {
-      const response = await rl.question('[A]ccept / [D]ecline / [C]ancel: ');
+      const response = await rl.question('[A]ccept / [D]ecline / [C]ancel: ', { signal } as any);
       const normalized = response.trim().toLowerCase();
 
       if (normalized === 'a' || normalized === 'accept') {
@@ -173,6 +198,7 @@ export class ElicitationHandler extends AbstractHandler {
   private async collectFormData(
     rl: readline.Interface,
     schema: ElicitationSchema,
+    signal?: AbortSignal,
   ): Promise<Record<string, string | number | boolean | string[]>> {
     const result: Record<string, string | number | boolean | string[]> = {};
     const requiredFields = new Set(schema.required || []);

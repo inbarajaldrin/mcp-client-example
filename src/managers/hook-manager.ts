@@ -228,31 +228,24 @@ export class HookManager {
   }
 
   /**
-   * Execute matching after-hooks for a completed tool call.
-   * When a hook uses @tool: (inject) and injectToolResult is provided, the hook
-   * result is injected into the conversation so the agent sees it as context.
+   * Execute immediate (non-injecting) after-hooks for a completed tool call.
+   * Fires @tool-exec: hooks and special commands (@complete-phase, @abort) inline
+   * during tool execution. Skips @tool: hooks (those need result injection and
+   * are handled by executeAfterHooks in the deferred path).
    *
-   * Client hooks only fire when not suspended.
-   * Ablation hooks always fire when loaded (even when suspended).
+   * Called from tool-executor.ts right after each MCP tool completes.
    */
-  async executeAfterHooks(
+  async executeImmediateAfterHooks(
     toolName: string,
     toolResult: ToolExecutionResult & { toolInput?: Record<string, unknown> },
     executeTool: (name: string, args: Record<string, unknown>) => Promise<ToolExecutionResult>,
-    injectToolResult?: (
-      name: string,
-      args: Record<string, unknown>,
-      result: { displayText: string; contentBlocks: Array<{ type: string; text?: string; data?: string; mimeType?: string }> },
-    ) => void,
   ): Promise<void> {
     if (this.executing) return;
 
-    // Determine which hooks to check
     const hooksToCheck: ClientHook[] = [];
     if (!this.suspended) {
       hooksToCheck.push(...this.hooks);
     }
-    // Ablation hooks always fire when loaded (they're purpose-loaded for agent-driven phases)
     hooksToCheck.push(...this.ablationHooks);
 
     if (hooksToCheck.length === 0) return;
@@ -278,12 +271,80 @@ export class HookManager {
           continue;
         }
 
+        // Only fire non-injecting hooks inline; @tool: hooks are deferred
+        if (parsed.injectResult) continue;
+
+        this.logger.log(`[Hook triggered: ${parsed.toolName}]\n`, { type: 'info' });
+
+        try {
+          await executeTool(parsed.toolName, parsed.args);
+          this.logger.log(`[Hook completed: ${parsed.toolName}]\n`, { type: 'info' });
+        } catch (error: any) {
+          this.logger.log(`[Hook failed: ${error.message}]\n`, { type: 'warning' });
+        }
+      }
+    } finally {
+      this.executing = false;
+    }
+  }
+
+  /**
+   * Execute deferred (injecting) after-hooks for a completed tool call.
+   * Only fires @tool: hooks that need to inject results into conversation context.
+   * Skips @tool-exec: hooks and special commands (already handled by executeImmediateAfterHooks).
+   *
+   * Called from the deferred hook loop in processQuery after the agent's full response.
+   */
+  async executeAfterHooks(
+    toolName: string,
+    toolResult: ToolExecutionResult & { toolInput?: Record<string, unknown> },
+    executeTool: (name: string, args: Record<string, unknown>) => Promise<ToolExecutionResult>,
+    injectToolResult?: (
+      name: string,
+      args: Record<string, unknown>,
+      result: { displayText: string; contentBlocks: Array<{ type: string; text?: string; data?: string; mimeType?: string }> },
+    ) => void,
+  ): Promise<void> {
+    if (this.executing) return;
+
+    const hooksToCheck: ClientHook[] = [];
+    if (!this.suspended) {
+      hooksToCheck.push(...this.hooks);
+    }
+    hooksToCheck.push(...this.ablationHooks);
+
+    if (hooksToCheck.length === 0) return;
+
+    this.executing = true;
+    try {
+      for (const hook of hooksToCheck) {
+        if (!hook.enabled) continue;
+        if (hook.after !== toolName) continue;
+
+        if (hook.when && !matchesWhenCondition(hook.when, toolResult.displayText, toolResult.toolInput)) {
+          continue;
+        }
+
+        // Special commands were already handled inline — skip
+        const trimmed = hook.run.trim();
+        if (trimmed === '@complete-phase' || trimmed.startsWith('@complete-phase:') || trimmed === '@abort') {
+          continue;
+        }
+
+        const parsed = parseDirectToolCall(hook.run);
+        if (!parsed) {
+          this.logger.log(`[Hook invalid command: ${hook.run}]\n`, { type: 'warning' });
+          continue;
+        }
+
+        // Non-injecting hooks were already handled inline — skip
+        if (!parsed.injectResult) continue;
+
         this.logger.log(`[Hook triggered: ${parsed.toolName}]\n`, { type: 'info' });
 
         try {
           const hookToolResult = await executeTool(parsed.toolName, parsed.args);
           if (
-            parsed.injectResult &&
             injectToolResult &&
             hookToolResult.contentBlocks &&
             hookToolResult.contentBlocks.length > 0

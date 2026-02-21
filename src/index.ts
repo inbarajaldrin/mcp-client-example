@@ -184,6 +184,7 @@ export class MCPClient {
       getServers: () => this.servers,
       getPreferencesManager: () => this.preferencesManager,
       getHookManager: () => this.hookManager,
+      cancelPendingElicitation: () => this.elicitationHandler.cancelPending(),
       isAbortRequested: () => {
         if (this.isAbortRequestedCallback) {
           return this.isAbortRequestedCallback();
@@ -3029,7 +3030,8 @@ export class MCPClient {
       }
 
       // Execute deferred hooks after the agent's full response.
-      // Hooks run visibly in the CLI, inject results, and trigger another agent turn.
+      // Only @tool: (inject) hooks run here — @tool-exec: hooks and special commands
+      // (@complete-phase, @abort) already fired inline during tool execution.
       if (pendingHookChecks && pendingHookChecks.length > 0 &&
           this.hookManager && !(cancellationCheck && cancellationCheck())) {
         const hookInjections: Array<{
@@ -3039,6 +3041,14 @@ export class MCPClient {
         }> = [];
 
         for (const check of pendingHookChecks) {
+          // Stop if phase-complete or abort was signaled by an earlier hook
+          if (this.hookManager.isPhaseCompleteRequested() || this.hookManager.isAbortRunRequested()) {
+            break;
+          }
+          if (cancellationCheck && cancellationCheck()) {
+            break;
+          }
+
           const hookResult: ToolExecutionResult & { toolInput?: Record<string, unknown> } = {
             displayText: check.displayText,
             contentBlocks: [],
