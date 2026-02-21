@@ -13,7 +13,6 @@ import type {
 } from '../model-provider.js';
 
 import type { ToolExecutionResult } from '../core/tool-executor.js';
-import { isReasoningModel } from '../utils/model-capabilities.js';
 
 // Tool Executor Type - function that executes tools on your system
 // Returns ToolExecutionResult with display text and content blocks (including images)
@@ -156,15 +155,18 @@ export class GrokProvider implements ModelProvider {
     this.thinkingConfig = config;
   }
 
-  private resolveReasoningEffort(): string | undefined {
+  // xAI only supports reasoning_effort on grok-3-mini (low/high only)
+  // grok-4 and grok-4-fast-reasoning have built-in reasoning that can't be controlled
+  private resolveReasoningEffort(model: string): string | undefined {
+    if (!model.startsWith('grok-3-mini')) return undefined;
     if (!this.thinkingConfig?.enabled) {
       return 'low';
     }
-    const level = this.thinkingConfig.level || 'medium';
-    if (level === 'low' || level === 'medium' || level === 'high') {
+    const level = this.thinkingConfig.level || 'high';
+    if (level === 'low' || level === 'high') {
       return level;
     }
-    return 'medium';
+    return 'high';
   }
 
   getProviderName(): string {
@@ -286,7 +288,7 @@ export class GrokProvider implements ModelProvider {
       return msg;
     });
 
-    const reasoningEffort = isReasoningModel(model, 'xai') ? this.resolveReasoningEffort() : undefined;
+    const reasoningEffort = this.resolveReasoningEffort(model);
     const createParams: any = {
       model: model,
       messages: openaiMessages,
@@ -447,7 +449,7 @@ export class GrokProvider implements ModelProvider {
       iterations++;
 
       // Stream request to Grok API
-      const reasoningEffort = isReasoningModel(model, 'xai') ? this.resolveReasoningEffort() : undefined;
+      const reasoningEffort = this.resolveReasoningEffort(model);
       const streamParams: any = {
         model: model,
         messages: this.convertToOpenAIMessages(conversationMessages, model),

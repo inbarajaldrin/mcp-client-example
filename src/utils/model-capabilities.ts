@@ -1,6 +1,7 @@
 // Reference: https://github.com/paradite/llm-info
-// Model reasoning/thinking capability detection using llm-info package.
-// Mirrors the pattern of model-pricing.ts — third-party data with hardcoded fallback.
+// Model reasoning/thinking capability detection.
+// Each provider has its own thinking mechanism — this map tracks which models support it.
+// llm-info's reasoning flag is used as a supplementary signal, not the sole source.
 
 import { ModelInfoMap } from 'llm-info';
 
@@ -31,9 +32,15 @@ export const GEMINI_BUDGET_TOKENS: Record<GeminiThinkingLevel, number | undefine
   generous: 24576,
 };
 
-// Fallback map for models not in llm-info
-const REASONING_FALLBACK: Record<string, boolean> = {
-  // OpenAI
+// Canonical map of models that support thinking/reasoning.
+// Each provider implements thinking differently:
+//   OpenAI: reasoning_effort param (low/medium/high)
+//   Anthropic: thinking: { type: 'enabled', budget_tokens } — extended thinking
+//   Google: thinkingConfig: { thinkingBudget } — thinking budget
+//   xAI: reasoning_effort on grok-3-mini only; grok-4 has built-in reasoning (no API control)
+//   Ollama: think: true flag
+const REASONING_MODELS: Record<string, boolean> = {
+  // OpenAI — reasoning_effort supported on all these
   'o1-preview': true,
   'o1': true,
   'o1-mini': true,
@@ -44,40 +51,52 @@ const REASONING_FALLBACK: Record<string, boolean> = {
   'gpt-5-mini': true,
   'gpt-5-nano': true,
   'gpt-5-codex': true,
-  // Google
+  // Anthropic — extended thinking via budget_tokens
+  'claude-sonnet-4': true,
+  'claude-opus-4': true,
+  'claude-haiku-4-5': true,
+  'claude-sonnet-4-5': true,
+  'claude-opus-4-5': true,
+  // Google — thinkingConfig budget
   'gemini-2.5-pro': true,
   'gemini-2.5-flash': true,
-  // xAI
+  'gemini-3-pro': true,
+  // xAI — grok-4 has built-in reasoning, grok-3-mini supports reasoning_effort
+  'grok-3-mini': true,
   'grok-4': true,
 };
 
 /**
  * Check if a model supports thinking/reasoning.
- * Uses llm-info package as the primary source, with hardcoded fallback.
+ * Checks our canonical map first (exact then prefix), then llm-info as supplementary.
  */
 export function getModelThinkingSupport(modelId: string, _providerName?: string): ThinkingSupport {
-  // 1. Try exact match in llm-info
+  // 1. Exact match in our map
+  if (modelId in REASONING_MODELS) {
+    return { supportsThinking: REASONING_MODELS[modelId] };
+  }
+
+  // 2. Prefix match on our map (longest key first to avoid false positives)
+  const sortedModels = Object.entries(REASONING_MODELS)
+    .sort((a, b) => b[0].length - a[0].length);
+  for (const [key, value] of sortedModels) {
+    if (modelId.startsWith(key)) {
+      return { supportsThinking: value };
+    }
+  }
+
+  // 3. Supplementary: check llm-info for models we don't explicitly track
   const info = (ModelInfoMap as Record<string, any>)[modelId];
   if (info && typeof info.reasoning === 'boolean') {
     return { supportsThinking: info.reasoning };
   }
 
-  // 2. Try prefix match in llm-info (e.g. "gpt-5-chat-latest" → "gpt-5")
-  for (const [key, value] of Object.entries(ModelInfoMap as Record<string, any>)) {
+  // 4. Prefix match in llm-info (longest key first)
+  const sortedEntries = Object.entries(ModelInfoMap as Record<string, any>)
+    .sort((a, b) => b[0].length - a[0].length);
+  for (const [key, value] of sortedEntries) {
     if (modelId.startsWith(key) && typeof value.reasoning === 'boolean') {
       return { supportsThinking: value.reasoning };
-    }
-  }
-
-  // 3. Hardcoded fallback
-  if (modelId in REASONING_FALLBACK) {
-    return { supportsThinking: REASONING_FALLBACK[modelId] };
-  }
-
-  // 4. Prefix match on fallback
-  for (const [key, value] of Object.entries(REASONING_FALLBACK)) {
-    if (modelId.startsWith(key)) {
-      return { supportsThinking: value };
     }
   }
 
@@ -103,10 +122,11 @@ export function getThinkingLevelsForProvider(providerName: string): { value: Thi
         { value: 'high', label: 'High (maximum reasoning)' },
       ];
     case 'xai':
+      // Only grok-3-mini supports reasoning_effort (low/high)
+      // grok-4 and grok-4-fast-reasoning have built-in reasoning that can't be controlled
       return [
-        { value: 'low', label: 'Low (minimal reasoning, cheapest)' },
-        { value: 'medium', label: 'Medium (balanced)' },
-        { value: 'high', label: 'High (maximum reasoning)' },
+        { value: 'low', label: 'Low (minimal thinking, faster)' },
+        { value: 'high', label: 'High (maximum thinking)' },
       ];
     case 'anthropic':
       return [
