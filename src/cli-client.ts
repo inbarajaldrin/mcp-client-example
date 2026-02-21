@@ -169,6 +169,7 @@ export class MCPClientCLI {
         stopKeyboardMonitor: () => this.keyboardMonitor.stop(),
         collectInput: (prompt: string) => this.keyboardMonitor.collectInput(prompt),
         getHILManager: () => this.hilManager,
+        routeSlashCommand: (cmd: string) => this.routeSlashCommand(cmd),
       },
     );
 
@@ -811,6 +812,420 @@ export class MCPClientCLI {
     this.logger.log('Your message has been prefilled - edit and press Enter to resend.\n', { type: 'info' });
   }
 
+  /**
+   * Route a slash command to its handler. Returns true if handled.
+   * Used by both the main chat loop and the ablation pause mode.
+   * Session-level commands (/exit) and ablation management commands
+   * (/ablation-create, /ablation-edit, /ablation-run, /ablation-delete)
+   * are NOT handled here — they remain in chat_loop only.
+   */
+  async routeSlashCommand(query: string): Promise<boolean> {
+    const lowerQuery = query.toLowerCase();
+    const baseCommand = lowerQuery.split(' ')[0];
+
+    if (lowerQuery === '/help') {
+      this.displayHelp();
+      return true;
+    }
+
+    if (lowerQuery === '/token-status' || lowerQuery === '/tokens') {
+      const usage = this.client.getTokenUsage();
+      this.logger.log(
+        `\n📊 Token Usage Status:\n` +
+        `  Current: ${usage.current} tokens\n` +
+        `  Limit: ${usage.limit} tokens\n` +
+        `  Usage: ${usage.percentage}%\n` +
+        `  Status: ${usage.suggestion}\n` +
+        `  Messages: ${this.client['messages'].length}\n`,
+        { type: 'info' },
+      );
+      return true;
+    }
+
+    if (lowerQuery === '/summarize' || lowerQuery === '/summarize-now') {
+      this.logger.log('\n🔧 Manually triggering summarization...\n', { type: 'info' });
+      await this.client.manualSummarize();
+      const usage = this.client.getTokenUsage();
+      this.logger.log(
+        `\n📊 Token Usage After Summarization:\n` +
+        `  Current: ${usage.current} tokens\n` +
+        `  Usage: ${usage.percentage}%\n`,
+        { type: 'info' },
+      );
+      return true;
+    }
+
+    if (lowerQuery === '/settings') {
+      try {
+        await this.displaySettings();
+      } catch (error) {
+        this.logger.log(`\nFailed to display settings: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/refresh-servers' || lowerQuery === '/refresh') {
+      try {
+        const savedHistory = this.rl ? [...(this.rl as any).history] : [];
+        await this.client.refreshServers();
+        if (this.rl && savedHistory.length > 0) {
+          (this.rl as any).history = savedHistory;
+        }
+      } catch (error) {
+        this.logger.log(`\nFailed to refresh servers: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/refresh-select') {
+      try {
+        await this.serverRefreshCLI.interactiveServerSelection();
+      } catch (error) {
+        this.logger.log(`\nFailed to open server refresh selection: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (baseCommand === '/set-timeout') {
+      try {
+        const parts = query.split(' ');
+        if (parts.length < 2) {
+          this.logger.log('\nUsage: /set-timeout <seconds> or /set-timeout infinity\n', { type: 'error' });
+          return true;
+        }
+        const timeoutValue = parts.slice(1).join(' ');
+        this.preferencesManager.setMCPTimeout(timeoutValue);
+        const newTimeout = this.preferencesManager.getMCPTimeout();
+        const timeoutDisplay = newTimeout === -1 ? 'unlimited' : `${newTimeout} seconds`;
+        this.logger.log(`\n✓ MCP tool timeout set to ${timeoutDisplay}\n`, { type: 'success' });
+      } catch (error) {
+        this.logger.log(`\nFailed to set timeout: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (baseCommand === '/set-max-iterations') {
+      try {
+        const parts = query.split(' ');
+        if (parts.length < 2) {
+          this.logger.log('\nUsage: /set-max-iterations <number> or /set-max-iterations infinity\n', { type: 'error' });
+          return true;
+        }
+        const maxIterationsValue = parts.slice(1).join(' ');
+        this.preferencesManager.setMaxIterations(maxIterationsValue);
+        const newMaxIterations = this.preferencesManager.getMaxIterations();
+        const maxIterationsDisplay = newMaxIterations === -1 ? 'unlimited' : newMaxIterations.toString();
+        this.logger.log(`\n✓ Max iterations set to ${maxIterationsDisplay}\n`, { type: 'success' });
+      } catch (error) {
+        this.logger.log(`\nFailed to set max iterations: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/hil') {
+      this.hilManager.toggle();
+      const enabled = this.hilManager.isEnabled();
+      this.preferencesManager.setHILEnabled(enabled);
+      const status = enabled ? 'enabled' : 'disabled';
+      this.logger.log(
+        `\nHuman-in-the-loop tool approval ${status}\n`,
+        { type: enabled ? 'success' : 'warning' },
+      );
+      return true;
+    }
+
+    if (lowerQuery === '/todo-on') {
+      try {
+        if (!this.client.isTodoServerConfigured()) {
+          this.logger.log(
+            '\nTodo server not configured. Please add "todo" server to mcp_config.json before using this feature.\n',
+            { type: 'error' },
+          );
+          return true;
+        }
+        await this.client.enableTodoMode(
+          (todosList) => this.askUserToClearTodos(todosList),
+          (todosList) => this.askUserAboutCompletedTodos(todosList),
+        );
+      } catch (error) {
+        this.logger.log(`\nFailed to enable todo mode: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/todo-off') {
+      try {
+        await this.client.disableTodoMode();
+      } catch (error) {
+        this.logger.log(`\nFailed to disable todo mode: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/orchestrator-on') {
+      try {
+        if (!this.client.isOrchestratorServerConfigured()) {
+          this.logger.log(
+            '\nmcp-tools-orchestrator server not configured. Please add "mcp-tools-orchestrator" to mcp_config.json and start with --all.\n',
+            { type: 'error' },
+          );
+          return true;
+        }
+        await this.client.enableOrchestratorMode();
+      } catch (error) {
+        this.logger.log(`\nFailed to enable orchestrator mode: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/orchestrator-off') {
+      try {
+        await this.client.disableOrchestratorMode();
+      } catch (error) {
+        this.logger.log(`\nFailed to disable orchestrator mode: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/tools-list' || lowerQuery === '/tools') {
+      try {
+        await this.toolCLI.displayToolsList();
+      } catch (error) {
+        this.logger.log(`\nFailed to list tools: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/tools-manager' || lowerQuery === '/tools-select') {
+      try {
+        await this.toolCLI.interactiveToolSelection();
+      } catch (error) {
+        this.logger.log(`\nFailed to open tool manager: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    // Hooks commands
+    if (lowerQuery === '/hooks' || lowerQuery === '/hooks-list') {
+      await this.hooksCLI.handleHooksList();
+      return true;
+    }
+
+    if (lowerQuery === '/hooks-add') {
+      await this.hooksCLI.handleHooksAdd();
+      return true;
+    }
+
+    if (baseCommand === '/hooks-remove') {
+      const args = query.slice('/hooks-remove'.length).trim();
+      await this.hooksCLI.handleHooksRemove(args);
+      return true;
+    }
+
+    if (baseCommand === '/hooks-enable') {
+      const args = query.slice('/hooks-enable'.length).trim();
+      await this.hooksCLI.handleHooksEnable(args);
+      return true;
+    }
+
+    if (baseCommand === '/hooks-disable') {
+      const args = query.slice('/hooks-disable'.length).trim();
+      await this.hooksCLI.handleHooksDisable(args);
+      return true;
+    }
+
+    if (lowerQuery === '/hooks-reload') {
+      await this.hooksCLI.handleHooksReload();
+      return true;
+    }
+
+    if (lowerQuery === '/add-prompt') {
+      try {
+        await this.promptCLI.addPromptToContext();
+      } catch (error) {
+        this.logger.log(`\nFailed to add prompt: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/prompts' || lowerQuery === '/prompts-list') {
+      try {
+        await this.promptCLI.displayPromptsList();
+      } catch (error) {
+        this.logger.log(`\nFailed to list prompts: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/prompts-manager' || lowerQuery === '/prompts-select') {
+      try {
+        await this.promptCLI.interactivePromptManager();
+      } catch (error) {
+        this.logger.log(`\nFailed to open prompt manager: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    // Chat history commands
+    if (lowerQuery === '/chat-list') {
+      try {
+        await this.chatHistoryCLI.displayChatList();
+      } catch (error) {
+        this.logger.log(`\nFailed to list chats: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery.startsWith('/chat-search ')) {
+      try {
+        const keyword = query.substring('/chat-search '.length).trim();
+        if (!keyword) {
+          this.logger.log('\nUsage: /chat-search <keyword>\n', { type: 'error' });
+          return true;
+        }
+        await this.chatHistoryCLI.searchChats(keyword);
+      } catch (error) {
+        this.logger.log(`\nFailed to search chats: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/chat-restore') {
+      try {
+        await this.chatHistoryCLI.restoreChat();
+      } catch (error) {
+        this.logger.log(`\nFailed to restore chat: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/chat-export') {
+      try {
+        await this.chatHistoryCLI.exportChat();
+      } catch (error) {
+        this.logger.log(`\nFailed to export chat: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/chat-rename') {
+      try {
+        await this.chatHistoryCLI.renameChat();
+      } catch (error) {
+        this.logger.log(`\nFailed to rename chat: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/chat-clear') {
+      try {
+        await this.chatHistoryCLI.clearChat();
+      } catch (error) {
+        this.logger.log(`\nFailed to clear chat: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    // Tool replay
+    if (lowerQuery === '/tool-replay') {
+      try {
+        await this.toolReplayCLI.enterReplayMode();
+      } catch (error) {
+        this.logger.log(`\nFailed to enter tool replay mode: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    // Ablation read-only commands (list/results are safe during pause)
+    if (lowerQuery === '/ablation-list') {
+      try {
+        await this.ablationCLI.handleAblationList();
+      } catch (error) {
+        this.logger.log(`\nFailed to list ablations: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/ablation-results') {
+      try {
+        await this.ablationCLI.handleAblationResults();
+      } catch (error) {
+        this.logger.log(`\nFailed to show ablation results: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/rewind') {
+      try {
+        await this.handleRewind();
+      } catch (error) {
+        this.logger.log(`\nFailed to rewind: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/clear' || lowerQuery === '/clear-context') {
+      try {
+        this.client.clearContext();
+        process.stdout.write('\x1B[2J\x1B[3J\x1B[H');
+        this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
+        this.logger.log('✓ Context cleared. Starting fresh session.\n', { type: 'success' });
+        this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
+      } catch (error) {
+        this.logger.log(`\nFailed to clear context: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    // Attachment commands
+    if (lowerQuery === '/attachment-upload') {
+      try {
+        await this.attachmentCLI.handleAttachmentCommand();
+      } catch (error) {
+        this.logger.log(`\nFailed to handle attachment: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/attachment-list') {
+      try {
+        await this.attachmentCLI.handleAttachmentListCommand();
+      } catch (error) {
+        this.logger.log(`\nFailed to list attachments: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/attachment-insert') {
+      try {
+        await this.attachmentCLI.handleAttachmentSelectCommand();
+      } catch (error) {
+        this.logger.log(`\nFailed to select attachments: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/attachment-rename') {
+      try {
+        await this.attachmentCLI.handleAttachmentRenameCommand();
+      } catch (error) {
+        this.logger.log(`\nFailed to rename attachment: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/attachment-clear') {
+      try {
+        await this.attachmentCLI.handleAttachmentClearCommand();
+      } catch (error) {
+        this.logger.log(`\nFailed to clear attachments: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    return false; // Not handled
+  }
+
   private async chat_loop() {
     if (!this.rl) {
       throw new Error('Readline interface not initialized');
@@ -948,437 +1363,12 @@ export class MCPClientCLI {
           }
         }
 
-        // Handle help command
-        if (query.toLowerCase() === '/help') {
-          this.displayHelp();
-          continue;
-        }
-
-        // Handle special commands for testing
-        if (query.toLowerCase() === '/token-status' || query.toLowerCase() === '/tokens') {
-          const usage = this.client.getTokenUsage();
-          this.logger.log(
-            `\n📊 Token Usage Status:\n` +
-            `  Current: ${usage.current} tokens\n` +
-            `  Limit: ${usage.limit} tokens\n` +
-            `  Usage: ${usage.percentage}%\n` +
-            `  Status: ${usage.suggestion}\n` +
-            `  Messages: ${this.client['messages'].length}\n`,
-            { type: 'info' },
-          );
-          continue;
-        }
-
-        if (query.toLowerCase() === '/summarize' || query.toLowerCase() === '/summarize-now') {
-          this.logger.log('\n🔧 Manually triggering summarization...\n', { type: 'info' });
-          await this.client.manualSummarize();
-          const usage = this.client.getTokenUsage();
-          this.logger.log(
-            `\n📊 Token Usage After Summarization:\n` +
-            `  Current: ${usage.current} tokens\n` +
-            `  Usage: ${usage.percentage}%\n`,
-            { type: 'info' },
-          );
-          continue;
-        }
-
-        if (query.toLowerCase() === '/settings') {
-          try {
-            await this.displaySettings();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to display settings: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/refresh-servers' || query.toLowerCase() === '/refresh') {
-          try {
-            // Preserve readline history before refresh (server stdio can affect terminal state)
-            const savedHistory = this.rl ? [...(this.rl as any).history] : [];
-
-            await this.client.refreshServers();
-
-            // Restore readline history after refresh
-            if (this.rl && savedHistory.length > 0) {
-              (this.rl as any).history = savedHistory;
-            }
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to refresh servers: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/refresh-select') {
-          try {
-            await this.serverRefreshCLI.interactiveServerSelection();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to open server refresh selection: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase().startsWith('/set-timeout')) {
-          try {
-            const parts = query.split(' ');
-            if (parts.length < 2) {
-              this.logger.log(
-                '\nUsage: /set-timeout <seconds> or /set-timeout infinity\n',
-                { type: 'error' },
-              );
-              continue;
-            }
-            const timeoutValue = parts.slice(1).join(' '); // Join in case user types "infinity" or "unlimited"
-            this.preferencesManager.setMCPTimeout(timeoutValue);
-            const newTimeout = this.preferencesManager.getMCPTimeout();
-            const timeoutDisplay = newTimeout === -1 ? 'unlimited' : `${newTimeout} seconds`;
-            this.logger.log(
-              `\n✓ MCP tool timeout set to ${timeoutDisplay}\n`,
-              { type: 'success' },
-            );
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to set timeout: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase().startsWith('/set-max-iterations')) {
-          try {
-            const parts = query.split(' ');
-            if (parts.length < 2) {
-              this.logger.log(
-                '\nUsage: /set-max-iterations <number> or /set-max-iterations infinity\n',
-                { type: 'error' },
-              );
-              continue;
-            }
-            const maxIterationsValue = parts.slice(1).join(' '); // Join in case user types "infinity" or "unlimited"
-            this.preferencesManager.setMaxIterations(maxIterationsValue);
-            const newMaxIterations = this.preferencesManager.getMaxIterations();
-            const maxIterationsDisplay = newMaxIterations === -1 ? 'unlimited' : newMaxIterations.toString();
-            this.logger.log(
-              `\n✓ Max iterations set to ${maxIterationsDisplay}\n`,
-              { type: 'success' },
-            );
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to set max iterations: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/hil') {
-          this.hilManager.toggle();
-          const enabled = this.hilManager.isEnabled();
-          this.preferencesManager.setHILEnabled(enabled);
-          const status = enabled ? 'enabled' : 'disabled';
-          this.logger.log(
-            `\nHuman-in-the-loop tool approval ${status}\n`,
-            { type: enabled ? 'success' : 'warning' },
-          );
-          continue;
-        }
-
-        if (query.toLowerCase() === '/todo-on') {
-          try {
-            if (!this.client.isTodoServerConfigured()) {
-              this.logger.log(
-                '\nTodo server not configured. Please add "todo" server to mcp_config.json before using this feature.\n',
-                { type: 'error' },
-              );
-              continue;
-            }
-            
-            // Pass the callbacks to ask user about clearing todos and completed todos
-            await this.client.enableTodoMode(
-              (todosList) => this.askUserToClearTodos(todosList),
-              (todosList) => this.askUserAboutCompletedTodos(todosList)
-            );
-            // Don't send prompt immediately - it will be sent with the first user message
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to enable todo mode: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/todo-off') {
-          try {
-            await this.client.disableTodoMode();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to disable todo mode: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/orchestrator-on') {
-          try {
-            if (!this.client.isOrchestratorServerConfigured()) {
-              this.logger.log(
-                '\nmcp-tools-orchestrator server not configured. Please add "mcp-tools-orchestrator" to mcp_config.json and start with --all.\n',
-                { type: 'error' },
-              );
-              continue;
-            }
-
-            await this.client.enableOrchestratorMode();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to enable orchestrator mode: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/orchestrator-off') {
-          try {
-            await this.client.disableOrchestratorMode();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to disable orchestrator mode: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/tools-list') {
-          try {
-            await this.toolCLI.displayToolsList();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to list tools: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/tools') {
-          try {
-            await this.toolCLI.displayToolsList();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to list tools: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/tools-manager' || query.toLowerCase() === '/tools-select') {
-          try {
-            await this.toolCLI.interactiveToolSelection();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to open tool manager: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        // ==================== Hooks Commands ====================
-        if (query.toLowerCase() === '/hooks' || query.toLowerCase() === '/hooks-list') {
-          await this.hooksCLI.handleHooksList();
-          continue;
-        }
-
-        if (query.toLowerCase() === '/hooks-add') {
-          await this.hooksCLI.handleHooksAdd();
-          continue;
-        }
-
-        if (query.toLowerCase().startsWith('/hooks-remove')) {
-          const args = query.slice('/hooks-remove'.length).trim();
-          await this.hooksCLI.handleHooksRemove(args);
-          continue;
-        }
-
-        if (query.toLowerCase().startsWith('/hooks-enable')) {
-          const args = query.slice('/hooks-enable'.length).trim();
-          await this.hooksCLI.handleHooksEnable(args);
-          continue;
-        }
-
-        if (query.toLowerCase().startsWith('/hooks-disable')) {
-          const args = query.slice('/hooks-disable'.length).trim();
-          await this.hooksCLI.handleHooksDisable(args);
-          continue;
-        }
-
-        if (query.toLowerCase() === '/hooks-reload') {
-          await this.hooksCLI.handleHooksReload();
-          continue;
-        }
-
-        if (query.toLowerCase() === '/add-prompt') {
-          try {
-            await this.promptCLI.addPromptToContext();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to add prompt: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/prompts' || query.toLowerCase() === '/prompts-list') {
-          try {
-            await this.promptCLI.displayPromptsList();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to list prompts: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/prompts-manager' || query.toLowerCase() === '/prompts-select') {
-          try {
-            await this.promptCLI.interactivePromptManager();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to open prompt manager: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        // Chat history commands
-        if (query.toLowerCase() === '/chat-list') {
-          try {
-            await this.chatHistoryCLI.displayChatList();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to list chats: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase().startsWith('/chat-search ')) {
-          try {
-            const keyword = query.substring('/chat-search '.length).trim();
-            if (!keyword) {
-              this.logger.log('\nUsage: /chat-search <keyword>\n', { type: 'error' });
-              continue;
-            }
-            await this.chatHistoryCLI.searchChats(keyword);
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to search chats: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/chat-restore') {
-          try {
-            await this.chatHistoryCLI.restoreChat();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to restore chat: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/chat-export') {
-          try {
-            await this.chatHistoryCLI.exportChat();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to export chat: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/chat-rename') {
-          try {
-            await this.chatHistoryCLI.renameChat();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to rename chat: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/chat-clear') {
-          try {
-            await this.chatHistoryCLI.clearChat();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to clear chat: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        // Tool replay
-        if (query.toLowerCase() === '/tool-replay') {
-          try {
-            await this.toolReplayCLI.enterReplayMode();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to enter tool replay mode: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        // Ablation study commands
+        // Session-level commands not in routeSlashCommand
         if (query.toLowerCase() === '/ablation-create') {
           try {
             await this.ablationCLI.handleAblationCreate();
           } catch (error) {
-            this.logger.log(
-              `\nFailed to create ablation: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/ablation-list') {
-          try {
-            await this.ablationCLI.handleAblationList();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to list ablations: ${error}\n`,
-              { type: 'error' },
-            );
+            this.logger.log(`\nFailed to create ablation: ${error}\n`, { type: 'error' });
           }
           continue;
         }
@@ -1387,10 +1377,7 @@ export class MCPClientCLI {
           try {
             await this.ablationCLI.handleAblationEdit();
           } catch (error) {
-            this.logger.log(
-              `\nFailed to edit ablation: ${error}\n`,
-              { type: 'error' },
-            );
+            this.logger.log(`\nFailed to edit ablation: ${error}\n`, { type: 'error' });
           }
           continue;
         }
@@ -1399,10 +1386,7 @@ export class MCPClientCLI {
           try {
             await this.ablationCLI.handleAblationRun();
           } catch (error) {
-            this.logger.log(
-              `\nFailed to run ablation: ${error}\n`,
-              { type: 'error' },
-            );
+            this.logger.log(`\nFailed to run ablation: ${error}\n`, { type: 'error' });
           }
           continue;
         }
@@ -1411,110 +1395,15 @@ export class MCPClientCLI {
           try {
             await this.ablationCLI.handleAblationDelete();
           } catch (error) {
-            this.logger.log(
-              `\nFailed to delete ablation: ${error}\n`,
-              { type: 'error' },
-            );
+            this.logger.log(`\nFailed to delete ablation: ${error}\n`, { type: 'error' });
           }
           continue;
         }
 
-        if (query.toLowerCase() === '/ablation-results') {
-          try {
-            await this.ablationCLI.handleAblationResults();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to show ablation results: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/rewind') {
-          try {
-            await this.handleRewind();
-          } catch (error) {
-            this.logger.log(`\nFailed to rewind: ${error}\n`, { type: 'error' });
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/clear' || query.toLowerCase() === '/clear-context') {
-          try {
-            this.client.clearContext();
-            // Clear the terminal screen
-            process.stdout.write('\x1B[2J\x1B[3J\x1B[H');
-            this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
-            this.logger.log('✓ Context cleared. Starting fresh session.\n', { type: 'success' });
-            this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to clear context: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/attachment-upload') {
-          try {
-            await this.attachmentCLI.handleAttachmentCommand();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to handle attachment: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/attachment-list') {
-          try {
-            await this.attachmentCLI.handleAttachmentListCommand();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to list attachments: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/attachment-insert') {
-          try {
-            await this.attachmentCLI.handleAttachmentSelectCommand();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to select attachments: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/attachment-rename') {
-          try {
-            await this.attachmentCLI.handleAttachmentRenameCommand();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to rename attachment: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
-        }
-
-        if (query.toLowerCase() === '/attachment-clear') {
-          try {
-            await this.attachmentCLI.handleAttachmentClearCommand();
-          } catch (error) {
-            this.logger.log(
-              `\nFailed to clear attachments: ${error}\n`,
-              { type: 'error' },
-            );
-          }
-          continue;
+        // Route all other slash commands through the shared handler
+        if (query.startsWith('/')) {
+          const handled = await this.routeSlashCommand(query);
+          if (handled) continue;
         }
 
         // Check if system prompt needs to be logged and log it FIRST (before user message)

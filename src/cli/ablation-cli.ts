@@ -105,6 +105,9 @@ export interface AblationCLICallbacks {
   collectInput: (prompt: string) => Promise<string | null>;
   /** Get HIL manager */
   getHILManager: () => any; // HumanInTheLoopManager
+  /** Route a slash command through the main CLI's full command handler.
+   * Returns true if the command was handled, false if unrecognized. */
+  routeSlashCommand: (command: string) => Promise<boolean>;
 }
 
 /**
@@ -135,19 +138,10 @@ export class AblationCLI {
     this.callbacks = callbacks;
   }
 
-  // Slash commands available during an ablation pause (Ctrl+A)
-  private static readonly PAUSE_SLASH_COMMANDS = new Set([
-    '/refresh', '/refresh-servers', '/refresh-select',
-    '/tools', '/tools-list',
-    '/prompts', '/prompts-list',
-    '/token-status', '/tokens',
-    '/help', '/settings',
-  ]);
-
   /**
    * Handle user input during an ablation pause (Ctrl+A).
-   * Routes slash commands to their handlers; sends everything else to processQuery.
-   * Returns false if the user entered empty input (resume), or null on Ctrl+C.
+   * Routes slash commands through the main CLI's handler; sends everything else to processQuery.
+   * Returns 'resume' if the user entered empty input, 'handled' if a command was processed.
    */
   private async handlePauseInput(
     input: string,
@@ -156,86 +150,33 @@ export class AblationCLI {
     const trimmed = input.trim();
     if (!trimmed) return 'resume';
 
-    // Check for slash commands
+    // Route slash commands through the main CLI's full command handler
     if (trimmed.startsWith('/')) {
-      const cmd = trimmed.split(/\s+/)[0].toLowerCase();
-
-      if (cmd === '/refresh' || cmd === '/refresh-servers') {
-        try {
-          await this.client.refreshServers();
-          this.logger.log('  Servers refreshed.\n', { type: 'success' });
-        } catch (error) {
-          this.logger.log(`  Failed to refresh servers: ${error}\n`, { type: 'error' });
-        }
-        return 'handled';
+      const handled = await this.callbacks.routeSlashCommand(trimmed);
+      if (!handled) {
+        const cmd = trimmed.split(/\s+/)[0];
+        this.logger.log(`  Unknown command: ${cmd}\n`, { type: 'warning' });
+        this.logger.log('  Type /help for available commands.\n', { type: 'info' });
       }
-
-      if (cmd === '/refresh-select') {
-        try {
-          const serversInfo = this.client.getServersInfo();
-          const serverNames = serversInfo.map(s => s.name);
-          if (serverNames.length === 0) {
-            this.logger.log('  No servers connected.\n', { type: 'warning' });
-            return 'handled';
-          }
-          this.logger.log('  Connected servers:\n', { type: 'info' });
-          for (let i = 0; i < serverNames.length; i++) {
-            this.logger.log(`    ${i + 1}. ${serverNames[i]}\n`, { type: 'info' });
-          }
-          const rl = this.callbacks.getReadline();
-          if (rl) {
-            const selection = (await rl.question('  Refresh which server? (number or name): ')).trim();
-            const idx = parseInt(selection) - 1;
-            const serverName = (!isNaN(idx) && idx >= 0 && idx < serverNames.length)
-              ? serverNames[idx] : selection;
-            await this.client.refreshServer(serverName);
-            this.logger.log(`  Server "${serverName}" refreshed.\n`, { type: 'success' });
-          }
-        } catch (error) {
-          this.logger.log(`  Failed to refresh server: ${error}\n`, { type: 'error' });
-        }
-        return 'handled';
-      }
-
-      if (cmd === '/tools' || cmd === '/tools-list') {
-        await this.callbacks.getToolCLI().displayToolsList();
-        return 'handled';
-      }
-
-      if (cmd === '/prompts' || cmd === '/prompts-list') {
-        await this.callbacks.getPromptCLI().displayPromptsList();
-        return 'handled';
-      }
-
-      if (cmd === '/token-status' || cmd === '/tokens') {
-        const usage = this.client.getTokenUsage();
-        this.logger.log(`  Tokens: ${JSON.stringify(usage)}\n`, { type: 'info' });
-        return 'handled';
-      }
-
-      if (cmd === '/help') {
-        this.logger.log('\n  Available commands during pause:\n', { type: 'info' });
-        for (const c of AblationCLI.PAUSE_SLASH_COMMANDS) {
-          this.logger.log(`    ${c}\n`, { type: 'info' });
-        }
-        this.logger.log('  Or type a message to send to the agent.\n', { type: 'info' });
-        return 'handled';
-      }
-
-      if (cmd === '/settings') {
-        await this.callbacks.displaySettings();
-        return 'handled';
-      }
-
-      // Unknown slash command — warn but don't send to model
-      this.logger.log(`  Unknown command: ${cmd}\n`, { type: 'warning' });
-      this.logger.log('  Type /help for available pause commands.\n', { type: 'info' });
       return 'handled';
     }
 
     // Regular text — send to the agent
     await this.client.processQuery(trimmed, false, undefined, stopCondition);
     return 'handled';
+  }
+
+  /**
+   * Prompt the user during a dry-run pause (Ctrl+A after a @tool-exec).
+   * Returns 'retry' to re-run the same command, 'resume' to continue, or 'cancel' to skip remaining.
+   */
+  private async promptDryRunPause(command: string): Promise<'retry' | 'resume' | 'cancel'> {
+    this.logger.log(`\n  ⏸ Paused after: ${command}\n`, { type: 'warning' });
+    this.logger.log('  [r]etry | [Enter] resume | [c]ancel\n', { type: 'info' });
+    const input = await this.callbacks.collectInput('  Choice: ');
+    if (input === null || input.trim().toLowerCase() === 'c') return 'cancel';
+    if (input.trim().toLowerCase() === 'r') return 'retry';
+    return 'resume';
   }
 
   /**
@@ -1417,40 +1358,57 @@ export class AblationCLI {
 
               for (const msg of promptResult.messages) {
                 if (msg.content.type === 'text') {
-                  // Pass pending attachments on the first message, then clear them
-                  const attachments = (!attachmentsConsumed && promptAttachments.length > 0)
-                    ? promptAttachments : undefined;
+                  const cancellationCheck = () => hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
 
-                  // Process the prompt text as a query
-                  await this.client.processQuery(
-                    msg.content.text,
-                    false,
-                    attachments,
-                    () => hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested(),
-                  );
+                  // Resume loop: after pause+resume, re-invoke processQuery so the agent can continue
+                  let isFirstAttempt = true;
+                  let continueAfterPause = false;
 
-                  if (!attachmentsConsumed && promptAttachments.length > 0) {
-                    attachmentsConsumed = true;
-                    this.callbacks.setPendingAttachments([]);
-                  }
+                  do {
+                    const queryText = isFirstAttempt ? msg.content.text : 'Continue from where you left off.';
+                    const attachments = (isFirstAttempt && !attachmentsConsumed && promptAttachments.length > 0)
+                      ? promptAttachments : undefined;
 
-                  // Handle soft interrupt (Ctrl+A): let user send messages or slash commands
-                  while (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()) {
-                    this.callbacks.resetInterrupt();
-                    this.callbacks.stopKeyboardMonitor();
+                    await this.client.processQuery(queryText, false, attachments, cancellationCheck);
 
-                    const rl = this.callbacks.getReadline();
-                    if (!rl) break;
+                    if (isFirstAttempt && !attachmentsConsumed && promptAttachments.length > 0) {
+                      attachmentsConsumed = true;
+                      this.callbacks.setPendingAttachments([]);
+                    }
+                    isFirstAttempt = false;
+                    continueAfterPause = false;
 
-                    this.logger.log('\n  ⏸ Agent paused. Type a message, /command, or press Enter to resume. (/help for commands)\n', { type: 'warning' });
-                    const userInput = (await rl.question('  You: ')).trim();
+                    // Handle soft interrupt (Ctrl+A): let user send messages or run commands
+                    // Loop stays active until explicit resume (Enter) or abort (Ctrl+C)
+                    // Skip if phase is already complete — @complete-phase takes priority over interrupt
+                    if (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()
+                        && !hookMgr.isPhaseCompleteRequested()) {
+                      this.callbacks.resetInterrupt();
+                      this.callbacks.stopKeyboardMonitor();
 
-                    this.callbacks.startKeyboardMonitor();
+                      const rl = this.callbacks.getReadline();
+                      if (rl) {
+                        this.logger.log('\n  ⏸ Agent paused. Type a message, /command, or press Enter to resume. (/help for commands)\n', { type: 'warning' });
 
-                    const stopCond = () => hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
-                    const result = await this.handlePauseInput(userInput, stopCond);
-                    if (result === 'resume') break;
-                  }
+                        let paused = true;
+                        while (paused && !this.callbacks.isAbortRequested()) {
+                          const userInput = (await rl.question('  You: ')).trim();
+
+                          const stopCond = () => hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
+                          const result = await this.handlePauseInput(userInput, stopCond);
+                          if (result === 'resume') {
+                            continueAfterPause = true;
+                            paused = false;
+                          }
+                          // 'handled' → stay in pause loop, prompt again
+                        }
+                      }
+
+                      this.callbacks.startKeyboardMonitor();
+                    }
+                  } while (continueAfterPause
+                    && !hookMgr.isPhaseCompleteRequested()
+                    && !this.callbacks.isAbortRequested());
 
                   // Stop processing further messages if phase complete or aborted
                   if (hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested()) break;
@@ -1564,30 +1522,53 @@ export class AblationCLI {
 
       const pendingAttachments = this.callbacks.getPendingAttachments();
       try {
-        await this.client.processQuery(
-          trimmedCommand,
-          false,
-          pendingAttachments.length > 0 ? pendingAttachments : undefined,
-          () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested(),
-        );
+        // Resume loop: after pause+resume, re-invoke processQuery so the agent can continue
+        let isFirstAttempt = true;
+        let continueAfterPause = false;
+        const cancellationCheck = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
 
-        // Handle soft interrupt (Ctrl+A): let user send messages to the agent
-        // Stay in raw mode to prevent Ctrl+C from sending OS SIGINT to child processes
-        while (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()) {
-          this.callbacks.resetInterrupt();
+        do {
+          const query = isFirstAttempt ? trimmedCommand : 'Continue from where you left off.';
+          const atts = isFirstAttempt
+            ? (pendingAttachments.length > 0 ? pendingAttachments : undefined)
+            : undefined;
 
-          this.logger.log('\n  ⏸ Agent paused. Type a message, /command, or press Enter to resume. (/help for commands)\n', { type: 'warning' });
-          const userInput = await this.callbacks.collectInput('  You: ');
+          await this.client.processQuery(query, false, atts, cancellationCheck);
+          isFirstAttempt = false;
+          continueAfterPause = false;
 
-          // null means Ctrl+C was pressed — treat as abort
-          if (userInput === null) {
-            break;
+          // Handle soft interrupt (Ctrl+A): let user send messages or run commands
+          // Stay in raw mode to prevent Ctrl+C from sending OS SIGINT to child processes
+          // Loop stays active until explicit resume (Enter) or abort (Ctrl+C)
+          // Skip if phase/abort already signaled — those take priority over interrupt
+          if (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()
+              && !hookManager.isPhaseCompleteRequested() && !hookManager.isAbortRunRequested()) {
+            this.callbacks.resetInterrupt();
+            this.logger.log('\n  ⏸ Agent paused. Type a message, /command, or press Enter to resume. (/help for commands)\n', { type: 'warning' });
+
+            let paused = true;
+            while (paused && !this.callbacks.isAbortRequested()) {
+              const userInput = await this.callbacks.collectInput('  You: ');
+
+              // null means Ctrl+C was pressed — treat as abort
+              if (userInput === null) {
+                paused = false;
+                break;
+              }
+
+              const stopCond = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
+              const result = await this.handlePauseInput(userInput, stopCond);
+              if (result === 'resume') {
+                continueAfterPause = true;
+                paused = false;
+              }
+              // 'handled' → stay in pause loop, prompt again
+            }
           }
-
-          const stopCond = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
-          const result = await this.handlePauseInput(userInput, stopCond);
-          if (result === 'resume') break;
-        }
+        } while (continueAfterPause
+          && !hookManager.isPhaseCompleteRequested()
+          && !hookManager.isAbortRunRequested()
+          && !this.callbacks.isAbortRequested());
       } finally {
         // Cleanup: remove temporary ablation hooks
         if (ablationHooksLoaded) {
@@ -2446,6 +2427,21 @@ export class AblationCLI {
                   success: cmdResult.toolExecResult.success,
                   displayText: cmdResult.toolExecResult.displayText,
                 });
+              }
+
+              // Dry-run pause: after each tool-exec, check for Ctrl+A interrupt
+              if (ablation.dryRun && this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()) {
+                this.callbacks.resetInterrupt();
+                const choice = await this.promptDryRunPause(command);
+                if (choice === 'retry') {
+                  i--; // Decrement so the for-loop re-runs this command
+                  continue;
+                } else if (choice === 'cancel') {
+                  aborted = true;
+                  shouldBreak = true;
+                  break;
+                }
+                // 'resume' → continue to next command
               }
 
               // Phase completed via @complete-phase (from agent-driven prompt or direct command)
