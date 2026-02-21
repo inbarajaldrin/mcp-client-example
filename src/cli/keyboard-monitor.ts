@@ -88,7 +88,10 @@ export class KeyboardMonitor {
     }
 
     this._isMonitoring = true;
-    this._abortRequested = false;
+    // NOTE: Do NOT reset _abortRequested here. Callers that need a clean state
+    // (e.g., chat_loop, ablation start) explicitly reset it before calling start().
+    // Other callers (elicitation callbacks, HIL approval) temporarily stop/start
+    // the monitor mid-execution and need the abort flag preserved.
 
     // Pause readline to allow raw mode
     const rl = this.callbacks.getReadline();
