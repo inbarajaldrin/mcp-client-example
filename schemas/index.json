@@ -28,12 +28,28 @@
       "description": "Client-side hooks that trigger actions before/after MCP tool execution with conditional matching"
     },
     {
-      "schema": "preferences.schema.json",
-      "title": "Preferences",
-      "filePath": ".mcp-client-data/preferences.json",
+      "schema": "settings.schema.json",
+      "title": "Settings",
+      "filePath": ".mcp-client-data/settings.yaml",
       "io": "input/output",
-      "format": "json",
-      "description": "User settings for tool states, timeouts, iteration limits, and human-in-the-loop mode"
+      "format": "yaml",
+      "description": "User settings for timeouts, iteration limits, and human-in-the-loop mode"
+    },
+    {
+      "schema": "tool-states.schema.json",
+      "title": "Tool States",
+      "filePath": ".mcp-client-data/tool-states.yaml",
+      "io": "input/output",
+      "format": "yaml",
+      "description": "Per-tool enable/disable states for MCP tools"
+    },
+    {
+      "schema": "prompt-states.schema.json",
+      "title": "Prompt States",
+      "filePath": ".mcp-client-data/prompt-states.yaml",
+      "io": "input/output",
+      "format": "yaml",
+      "description": "Per-prompt enable/disable states for MCP prompts"
     },
     {
       "schema": "mcp-config.schema.json",
@@ -127,7 +143,9 @@
       "chats/": "Chat session storage (JSON + MD per session, index.json)",
       "chats/index.json": "Session metadata index",
       "hooks.yaml": "Client-side hook definitions",
-      "preferences.json": "User preferences",
+      "settings.yaml": "User settings (timeouts, iterations, approval mode)",
+      "tool-states.yaml": "Per-tool enable/disable states",
+      "prompt-states.yaml": "Per-prompt enable/disable states",
       "attachments/": "Uploaded file attachments",
       "ablations/": "Ablation study definitions (YAML)",
       "ablations/runs/": "Ablation run results organized by date/name/timestamp",

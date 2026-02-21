@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tool-states.schema.json",
+  "title": "ToolStates",
+  "description": "Per-tool enable/disable states stored at .mcp-client-data/tool-states.yaml.",
+  "type": "object",
+  "additionalProperties": { "type": "boolean" }
+}

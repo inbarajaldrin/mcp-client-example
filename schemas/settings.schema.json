@@ -1,0 +1,29 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "settings.schema.json",
+  "title": "ClientSettings",
+  "description": "User settings stored at .mcp-client-data/settings.yaml. Controls timeouts, iteration limits, and approval mode.",
+  "type": "object",
+  "properties": {
+    "mcpTimeout": {
+      "type": "number",
+      "description": "MCP tool call timeout in seconds. -1 for unlimited.",
+      "default": 60
+    },
+    "maxIterations": {
+      "type": "integer",
+      "description": "Maximum iterations between agent calls. -1 for unlimited.",
+      "default": -1
+    },
+    "hilEnabled": {
+      "type": "boolean",
+      "description": "Human-in-the-loop mode: require approval before each tool execution",
+      "default": false
+    },
+    "approveAll": {
+      "type": "boolean",
+      "description": "Auto-approve all tools without prompting. Persists across sessions.",
+      "default": false
+    }
+  }
+}

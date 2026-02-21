@@ -1,0 +1,8 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "prompt-states.schema.json",
+  "title": "PromptStates",
+  "description": "Per-prompt enable/disable states stored at .mcp-client-data/prompt-states.yaml.",
+  "type": "object",
+  "additionalProperties": { "type": "boolean" }
+}
