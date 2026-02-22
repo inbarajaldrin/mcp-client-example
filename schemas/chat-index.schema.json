@@ -30,7 +30,9 @@
         },
         "name": { "type": "string", "description": "User-assigned session name" },
         "filePath": { "type": "string", "description": "Path to the full JSON chat session file" },
-        "mdFilePath": { "type": "string", "description": "Path to the markdown export" }
+        "mdFilePath": { "type": "string", "description": "Path to the markdown export" },
+        "thinkingEnabled": { "type": "boolean", "description": "Whether thinking/reasoning was enabled during this session" },
+        "thinkingLevel": { "type": "string", "description": "Thinking budget level used (provider-specific)" }
       }
     }
   }

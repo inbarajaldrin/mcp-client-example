@@ -82,7 +82,11 @@ export class MCPClientCLI {
     }
     this.logger = new Logger({ mode: 'verbose' });
     this.attachmentManager = new AttachmentManager(this.logger);
-    this.preferencesManager = new PreferencesManager(this.logger);
+    // Share the MCPClient's preferences manager so /set-thinking changes
+    // are visible in processQuery (avoids stale in-memory copies)
+    this.preferencesManager = this.client.getPreferencesManager();
+    // Always start with thinking off — user must explicitly /set-thinking on each session
+    this.preferencesManager.setThinkingEnabled(false);
     this.hilManager = new HumanInTheLoopManager(this.logger, {
       approveAll: this.preferencesManager.getApproveAll(),
       hilEnabled: this.preferencesManager.getHILEnabled(),
@@ -951,6 +955,7 @@ export class MCPClientCLI {
         const value = parts[1].toLowerCase().trim();
         if (value === 'off') {
           this.preferencesManager.setThinkingEnabled(false);
+          this.client.getChatHistoryManager().updateThinkingConfig({ enabled: false });
           this.logger.log('\nThinking/reasoning mode disabled\n', { type: 'success' });
         } else if (value === 'on') {
           const providerName = this.client.getProviderName();
@@ -972,6 +977,7 @@ export class MCPClientCLI {
             // Ollama or providers with no level choices — just turn on
             this.preferencesManager.setThinkingEnabled(true);
             this.preferencesManager.setThinkingLevel(levels[0]?.value);
+            this.client.getChatHistoryManager().updateThinkingConfig({ enabled: true, level: levels[0]?.value, provider: providerName });
             this.logger.log('\nThinking/reasoning mode enabled\n', { type: 'success' });
           } else {
             // Prompt user for level selection
@@ -980,24 +986,14 @@ export class MCPClientCLI {
               this.logger.log(`  ${i + 1}. ${levels[i].label}\n`, { type: 'info' });
             }
 
-            // Use synchronous readline for level selection
-            const rlSync = readlineSync.createInterface({
-              input: process.stdin,
-              output: process.stdout,
-            });
-
-            const answer = await new Promise<string>((resolve) => {
-              rlSync.question('\nEnter selection (number): ', (ans) => {
-                rlSync.close();
-                resolve(ans.trim());
-              });
-            });
+            const answer = (await this.rl!.question('\nEnter selection (number): ')).trim();
 
             const selection = parseInt(answer, 10);
             if (selection >= 1 && selection <= levels.length) {
               const selectedLevel = levels[selection - 1];
               this.preferencesManager.setThinkingEnabled(true);
               this.preferencesManager.setThinkingLevel(selectedLevel.value);
+              this.client.getChatHistoryManager().updateThinkingConfig({ enabled: true, level: selectedLevel.value, provider: providerName });
               this.logger.log(
                 `\nThinking/reasoning mode enabled (level: ${selectedLevel.value})\n`,
                 { type: 'success' },

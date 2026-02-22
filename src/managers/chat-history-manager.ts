@@ -38,6 +38,9 @@ export interface ChatMetadata {
   name?: string;
   filePath: string;
   mdFilePath: string;
+  // Whether thinking/reasoning was enabled during this session
+  thinkingEnabled?: boolean;
+  thinkingLevel?: string; // Thinking level used (provider-specific)
 }
 
 export interface ChatSession {
@@ -55,13 +58,21 @@ export interface ChatSession {
       required?: string[];
     };
   }>;
+  // Thinking/reasoning configuration active during this session
+  thinkingConfig?: {
+    enabled: boolean;
+    level?: string;   // 'small'|'medium'|'large' (Anthropic) or 'low'|'medium'|'high' (OpenAI/xAI)
+    provider?: string; // Provider name for level interpretation
+  };
   messages: Array<{
     timestamp: string;
     role: 'user' | 'assistant' | 'tool' | 'client';
     content: string;
-    // For assistant messages with thinking/reasoning content
+    // For assistant messages: thinking/reasoning text produced by the model
     thinking?: string;
-    // For assistant messages with tool_use blocks (preserves full structure for restore)
+    // For assistant messages: full content blocks including thinking, text, and tool_use blocks
+    // Thinking blocks contain { type: 'thinking', thinking: string, signature?: string }
+    // Redacted blocks contain { type: 'redacted_thinking', data: string }
     content_blocks?: Array<{ type: string; [key: string]: any }>;
     // For tool result messages (preserves tool_use_id for proper pairing on restore)
     tool_use_id?: string;
@@ -190,7 +201,7 @@ export class ChatHistoryManager {
   /**
    * Start a new chat session
    */
-  startSession(model: string, servers: string[], tools?: Array<{ name: string; description: string; input_schema?: { type: 'object'; properties?: Record<string, any>; required?: string[] } }>, resumeSessionId?: string): string {
+  startSession(model: string, servers: string[], tools?: Array<{ name: string; description: string; input_schema?: { type: 'object'; properties?: Record<string, any>; required?: string[] } }>, resumeSessionId?: string, thinkingConfig?: { enabled: boolean; level?: string; provider?: string }): string {
     const sessionId = resumeSessionId || this.generateSessionId();
     const now = new Date();
 
@@ -200,6 +211,7 @@ export class ChatHistoryManager {
       model,
       servers,
       tools: tools?.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.input_schema })),
+      ...(thinkingConfig?.enabled && { thinkingConfig }),
       messages: [],
       metadata: {
         messageCount: 0,
@@ -256,6 +268,18 @@ export class ChatHistoryManager {
     });
 
     this.currentSession.metadata.messageCount++;
+  }
+
+  /**
+   * Update thinking config on the current session (e.g. when /set-thinking is toggled mid-session)
+   */
+  updateThinkingConfig(config: { enabled: boolean; level?: string; provider?: string }): void {
+    if (!this.currentSession) return;
+    if (config.enabled) {
+      this.currentSession.thinkingConfig = config;
+    } else {
+      delete this.currentSession.thinkingConfig;
+    }
   }
 
   /**
@@ -598,6 +622,10 @@ export class ChatHistoryManager {
         // summary,
         filePath: jsonPath,
         mdFilePath: mdPath,
+        ...(sessionToSave.thinkingConfig?.enabled && {
+          thinkingEnabled: true,
+          thinkingLevel: sessionToSave.thinkingConfig.level,
+        }),
       };
 
       // Update index
@@ -701,6 +729,11 @@ export class ChatHistoryManager {
       md += `**IPC Calls (Automatic):** ${session.metadata.ipcCallCount}\n`;
     }
 
+    // Display thinking configuration if enabled
+    if (session.thinkingConfig?.enabled) {
+      md += `**Thinking:** enabled (level: ${session.thinkingConfig.level || 'default'})\n`;
+    }
+
     // Display peak context (max conversation size)
     if (session.metadata.peakContextTokens !== undefined && session.metadata.peakContextTokens > 0) {
       md += `**Peak Context:** ${session.metadata.peakContextTokens.toLocaleString()} tokens\n`;
@@ -774,13 +807,16 @@ export class ChatHistoryManager {
       } else if (msg.role === 'assistant') {
         md += `### Assistant (${time})\n\n`;
         // Render thinking/reasoning content if present
+        // Format as blockquote with italic header for universal markdown readability
         if (msg.thinking) {
-          md += `<details>\n<summary>Thinking</summary>\n\n${msg.thinking}\n\n</details>\n\n`;
+          const quoted = msg.thinking.split('\n').map((line: string) => `> ${line}`).join('\n');
+          md += `> *Thinking:*\n>\n${quoted}\n\n`;
         } else if (msg.content_blocks) {
           const thinkingBlocks = (msg.content_blocks as any[]).filter((b: any) => b.type === 'thinking');
           if (thinkingBlocks.length > 0) {
             const thinkingText = thinkingBlocks.map((b: any) => b.thinking).join('\n');
-            md += `<details>\n<summary>Thinking</summary>\n\n${thinkingText}\n\n</details>\n\n`;
+            const quoted = thinkingText.split('\n').map((line: string) => `> ${line}`).join('\n');
+            md += `> *Thinking:*\n>\n${quoted}\n\n`;
           }
         }
         md += `${msg.content}\n\n`;

@@ -2339,14 +2339,10 @@ export class MCPClient {
       if (chunk.type === 'content_block_delta' && chunk.delta?.type === 'thinking_delta') {
         const thinkingText = chunk.delta.thinking;
         currentThinking += thinkingText;
-        // CLI: dimmed text with left border, "Thinking:" header on first chunk
         if (!thinkingStarted) {
-          this.logger.log(chalk.dim('\n  Thinking:\n'));
           thinkingStarted = true;
         }
-        const lines = thinkingText.split('\n');
-        const bordered = lines.map((line: string) => '  ' + chalk.dim('\u2502 ' + line)).join('\n');
-        this.logger.log(bordered);
+        this.logger.log(chalk.dim(thinkingText));
         observer?.({ type: 'thinking_delta', text: thinkingText });
         hasOutputContent = true;
         continue;
@@ -2498,6 +2494,7 @@ export class MCPClient {
           const assistantMessage: Message = {
             role: 'assistant',
             content: currentMessage,
+            ...(currentThinking && { thinking: currentThinking }),
             // Include tool_calls for OpenAI (required before tool role messages)
             tool_calls: toolCallsArray,
             // Include content_blocks for Gemini (convertMessagesToGeminiFormat reads function_call blocks)
@@ -2926,31 +2923,85 @@ export class MCPClient {
       if (this.modelProvider.setThinkingConfig) {
         const thinkingEnabled = this.preferencesManager.getThinkingEnabled();
         const modelSupportsThinking = isReasoningModel(this.model, this.modelProvider.getProviderName());
+        const thinkingLevel = this.preferencesManager.getThinkingLevel();
         this.modelProvider.setThinkingConfig({
           enabled: thinkingEnabled && modelSupportsThinking,
           model: this.model,
-          level: this.preferencesManager.getThinkingLevel(),
+          level: thinkingLevel,
         });
       }
 
-      const stream = (this.modelProvider as any).createMessageStreamWithToolUse(
-        this.messages,
-        this.model,
-        this.tools,
-        8192,
-        toolExecutor,
-        (() => {
-          const maxIter = this.preferencesManager.getMaxIterations();
-          // -1 means unlimited, use a very large number
-          return maxIter === -1 ? 999999 : maxIter;
-        })(), // maxIterations
-        cancellationCheck, // Pass cancellation check to provider
-      );
+      // Helper: create stream and process it
+      const createAndProcessStream = async () => {
+        // Ensure max_tokens exceeds thinking budget (Anthropic requires budget_tokens < max_tokens)
+        let maxTokens = 8192;
+        const providerName = this.modelProvider.getProviderName();
+        if (providerName === 'anthropic' && this.preferencesManager.getThinkingEnabled()) {
+          const level = this.preferencesManager.getThinkingLevel() as string;
+          const budgetMap: Record<string, number> = { small: 5000, medium: 10000, large: 25000 };
+          const budget = budgetMap[level] || budgetMap.medium;
+          if (maxTokens <= budget) {
+            maxTokens = budget + 4096; // Ensure room for the actual response
+          }
+        }
 
-      // Process the stream and collect final assistant message
-      // Don't break immediately on cancellation - let current chunk finish
-      // Pass initial token count for tracking
-      const { pendingToolResults, lastTokenUsage, deferredHookData } = await this.processToolUseStream(stream, cancellationCheck, tokenCountBeforeStream, observer);
+        const s = (this.modelProvider as any).createMessageStreamWithToolUse(
+          this.messages,
+          this.model,
+          this.tools,
+          maxTokens,
+          toolExecutor,
+          (() => {
+            const maxIter = this.preferencesManager.getMaxIterations();
+            // -1 means unlimited, use a very large number
+            return maxIter === -1 ? 999999 : maxIter;
+          })(), // maxIterations
+          cancellationCheck, // Pass cancellation check to provider
+        );
+        return await this.processToolUseStream(s, cancellationCheck, tokenCountBeforeStream, observer);
+      };
+
+      // Detect thinking-related API errors (model rejects thinking/reasoning parameters)
+      const isThinkingError = (err: any): boolean => {
+        const msg = (err?.message || String(err)).toLowerCase();
+        const patterns = ['budget_tokens', 'thinking', 'reasoning', 'extended_thinking', 'thinkingbudget', 'includethoughts'];
+        const triggers = ['not supported', 'invalid_request', 'invalid', 'unsupported', 'unknown'];
+        return patterns.some(p => msg.includes(p)) && triggers.some(t => msg.includes(t));
+      };
+
+      // Process the stream with thinking error fallback
+      // If the model rejects thinking parameters, auto-disable thinking and retry once
+      let streamResult: { pendingToolResults: any; lastTokenUsage: any; deferredHookData: any };
+      try {
+        streamResult = await createAndProcessStream();
+      } catch (thinkingErr: any) {
+        if (isThinkingError(thinkingErr) && this.preferencesManager.getThinkingEnabled()) {
+          // Auto-disable thinking and retry
+          this.preferencesManager.setThinkingEnabled(false);
+          this.logger.log(
+            '\n⚠️  Thinking mode disabled — model rejected thinking parameters. Retrying...\n',
+            { type: 'warning' },
+          );
+          observer?.({ type: 'warning', message: 'Thinking mode disabled — model rejected thinking parameters. Retrying...' });
+          if (this.modelProvider.setThinkingConfig) {
+            this.modelProvider.setThinkingConfig({ enabled: false, model: this.model, level: undefined });
+          }
+          // Strip thinking blocks from conversation history so the retry doesn't send
+          // empty/invalid thinking blocks back to the API
+          for (const msg of this.messages) {
+            if (msg.role === 'assistant' && msg.content_blocks) {
+              msg.content_blocks = msg.content_blocks.filter(
+                (block: any) => block.type !== 'thinking' && block.type !== 'redacted_thinking'
+              );
+            }
+            if (msg.thinking) delete msg.thinking;
+          }
+          streamResult = await createAndProcessStream();
+        } else {
+          throw thinkingErr; // Not a thinking error or thinking already off — rethrow
+        }
+      }
+      const { pendingToolResults, lastTokenUsage, deferredHookData } = streamResult;
 
       // Flush any remaining pending tool results (in case we aborted before they were added)
       if (pendingToolResults && pendingToolResults.length > 0) {
@@ -2966,7 +3017,7 @@ export class MCPClient {
               if (toolUseBlocks.length > 0) {
                 // Verify that all pending tool results have matching tool_use_ids
                 const toolUseIds = new Set(toolUseBlocks.map((block: any) => block.id));
-                const validToolResults = pendingToolResults.filter(tr => 
+                const validToolResults = pendingToolResults.filter((tr: any) =>
                   tr.toolUseId && toolUseIds.has(tr.toolUseId)
                 );
                 
@@ -2989,7 +3040,7 @@ export class MCPClient {
                     const toolResultsMessage: Message = {
                       role: 'user',
                       content: '',
-                      tool_results: validToolResults.map(tr => ({
+                      tool_results: validToolResults.map((tr: any) => ({
                         type: 'tool_result',
                         tool_use_id: tr.toolUseId!,
                         content: tr.content,
@@ -3012,7 +3063,7 @@ export class MCPClient {
             if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
               // Verify that pending tool results have matching tool_call_ids
               const toolCallIds = new Set(msg.tool_calls.map((tc: any) => tc.id));
-              const validToolResults = pendingToolResults.filter(tr =>
+              const validToolResults = pendingToolResults.filter((tr: any) =>
                 tr.toolCallId && toolCallIds.has(tr.toolCallId)
               );
 

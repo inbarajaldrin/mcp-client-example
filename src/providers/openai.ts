@@ -173,18 +173,18 @@ export class OpenAIProvider implements ModelProvider {
   }
 
   /**
-   * Resolve reasoning_effort for the API call.
+   * Resolve reasoning params for the API call (Chat Completions API).
    * OpenAI gpt-5 family defaults to 'medium' reasoning. 'low' is the minimum (can't use 'none').
+   * Note: reasoning_summary and include are Responses API only — not supported in Chat Completions.
+   * The reasoning_content field streams automatically when reasoning_effort is set.
    */
-  private resolveReasoningEffort(): string | undefined {
+  private resolveReasoningParams(): Record<string, any> | undefined {
     if (!this.thinkingConfig?.enabled) {
-      return 'low'; // Minimize reasoning cost when thinking is off
+      return { reasoning_effort: 'low' }; // Minimize reasoning cost when thinking is off
     }
     const level = this.thinkingConfig.level || 'medium';
-    if (level === 'low' || level === 'medium' || level === 'high') {
-      return level;
-    }
-    return 'medium';
+    const effort = (level === 'low' || level === 'medium' || level === 'high') ? level : 'medium';
+    return { reasoning_effort: effort };
   }
 
   getProviderName(): string {
@@ -300,7 +300,7 @@ export class OpenAIProvider implements ModelProvider {
       return msg;
     });
 
-    const reasoningEffort = isReasoningModel(model, 'openai') ? this.resolveReasoningEffort() : undefined;
+    const reasoningParams = isReasoningModel(model, 'openai') ? this.resolveReasoningParams() : undefined;
     const createParams: any = {
       model: model,
       messages: openaiMessages,
@@ -308,8 +308,8 @@ export class OpenAIProvider implements ModelProvider {
       tools: openaiTools.length > 0 ? openaiTools : undefined,
       stream: true,
       stream_options: { include_usage: true },
+      ...(reasoningParams || {}),
     };
-    if (reasoningEffort) createParams.reasoning_effort = reasoningEffort;
     const stream: any = await this.openaiClient.chat.completions.create(createParams);
 
     const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
@@ -485,7 +485,7 @@ export class OpenAIProvider implements ModelProvider {
       iterations++;
 
       // Step 1: Stream request to OpenAI
-      const reasoningEffort = isReasoningModel(model, 'openai') ? this.resolveReasoningEffort() : undefined;
+      const reasoningParams = isReasoningModel(model, 'openai') ? this.resolveReasoningParams() : undefined;
       const streamParams: any = {
         model: model,
         messages: this.convertToOpenAIMessages(conversationMessages, model),
@@ -493,8 +493,8 @@ export class OpenAIProvider implements ModelProvider {
         tools: openaiTools.length > 0 ? openaiTools : undefined,
         stream: true,
         stream_options: { include_usage: true },
+        ...(reasoningParams || {}),
       };
-      if (reasoningEffort) streamParams.reasoning_effort = reasoningEffort;
       const stream: any = await this.openaiClient.chat.completions.create(streamParams);
 
       // Track tool calls as they stream in

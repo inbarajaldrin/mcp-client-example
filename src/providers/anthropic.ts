@@ -430,13 +430,16 @@ export class AnthropicProvider implements ModelProvider {
         content: msg.content || '',
       }));
 
-    const stream = await this.anthropicClient.messages.create({
+    const thinkingParam = isReasoningModel(model, 'anthropic') ? this.resolveThinkingParam() : undefined;
+    const createParams: any = {
       messages: anthropicMessages,
       model: model,
       max_tokens: maxTokens,
       tools: anthropicTools,
       stream: true,
-    });
+    };
+    if (thinkingParam) createParams.thinking = thinkingParam;
+    const stream: any = await this.anthropicClient.messages.create(createParams);
 
     // Yield events from Anthropic stream
     for await (const chunk of stream) {
@@ -525,12 +528,41 @@ export class AnthropicProvider implements ModelProvider {
       const stream = this.anthropicClient.messages.stream(streamParams);
 
       // Stream events to user (they see text in real-time)
+      // Also accumulate thinking content and signature manually because the SDK (v0.32.x)
+      // does not assemble thinking_delta or signature_delta events into finalMessage()
+      // content blocks — it only handles text_delta and input_json_delta.
+      let accumulatedThinking = '';
+      let accumulatedSignature = '';
       for await (const chunk of stream) {
+        const delta = (chunk as any).delta;
+        if ((chunk as any).type === 'content_block_delta') {
+          if (delta?.type === 'thinking_delta') {
+            accumulatedThinking += delta.thinking || '';
+          } else if (delta?.type === 'signature_delta') {
+            accumulatedSignature += delta.signature || '';
+          }
+        }
         yield chunk as MessageStreamEvent;
       }
 
       // Get the final complete message
       const response = await stream.finalMessage();
+
+      // Patch thinking blocks: the SDK doesn't assemble thinking_delta/signature_delta
+      // into content blocks, so thinking blocks from finalMessage() have empty fields.
+      // Replace with the manually accumulated content. Both thinking text and signature
+      // are required for valid multi-turn conversations (API verifies signature).
+      if (accumulatedThinking) {
+        for (const block of response.content as any[]) {
+          if (block.type === 'thinking' && !block.thinking) {
+            block.thinking = accumulatedThinking;
+            if (accumulatedSignature) {
+              block.signature = accumulatedSignature;
+            }
+            break; // Only one thinking block per response
+          }
+        }
+      }
 
       // Step 2: Add Anthropic's response to conversation
       // Store full content blocks to preserve tool_use blocks for tool_result references
@@ -822,9 +854,22 @@ export class AnthropicProvider implements ModelProvider {
 
       // Handle assistant messages with content_blocks (preserves tool_use blocks)
       if (msg.role === 'assistant' && msg.content_blocks && Array.isArray(msg.content_blocks)) {
+        // Filter out thinking blocks with empty thinking text — the API rejects them
+        // with "each thinking block must contain thinking". Also strip thinking blocks
+        // when thinking is disabled to avoid invalid turn structure.
+        const thinkingEnabled = this.thinkingConfig?.enabled;
+        const filteredBlocks = msg.content_blocks.filter((block: any) => {
+          if (block.type === 'thinking') {
+            return thinkingEnabled && block.thinking;
+          }
+          if (block.type === 'redacted_thinking') {
+            return thinkingEnabled;
+          }
+          return true;
+        });
         return {
           role: 'assistant' as const,
-          content: msg.content_blocks,
+          content: filteredBlocks.length > 0 ? filteredBlocks : (msg.content || ''),
         };
       }
 

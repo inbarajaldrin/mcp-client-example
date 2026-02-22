@@ -149,18 +149,18 @@ export class GeminiProvider implements ModelProvider {
    * Gemini 2.5 models default to dynamic thinking.
    * When disabled: Flash models use thinkingBudget: 0, Pro models use 128 (can't fully disable).
    */
-  private resolveGeminiThinkingConfig(model: string): { thinkingBudget: number } | undefined {
+  private resolveGeminiThinkingConfig(model: string): { includeThoughts: boolean; thinkingBudget?: number } | undefined {
     if (!this.thinkingConfig?.enabled) {
       // Disable thinking — Flash can use 0, Pro minimum is 128
       const isProModel = model.includes('pro');
-      return { thinkingBudget: isProModel ? 128 : 0 };
+      return { includeThoughts: false, thinkingBudget: isProModel ? 128 : 0 };
     }
     const level = (this.thinkingConfig.level || 'dynamic') as GeminiThinkingLevel;
     const budget = GEMINI_BUDGET_TOKENS[level];
     if (budget === undefined) {
-      return undefined; // Omit → let Gemini choose dynamically
+      return { includeThoughts: true }; // Omit thinkingBudget → let Gemini choose dynamically
     }
-    return { thinkingBudget: budget };
+    return { includeThoughts: true, thinkingBudget: budget };
   }
 
   getProviderName(): string {

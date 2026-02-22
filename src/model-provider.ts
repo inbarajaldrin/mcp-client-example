@@ -73,7 +73,21 @@ export interface TokenCounter {
 export interface ThinkingConfig {
   enabled: boolean;
   model: string;
-  level?: string; // Provider-specific level (e.g. 'low'|'medium'|'high' for OpenAI)
+  level?: string; // Thinking level: 'small'|'medium'|'large' for Anthropic budget_tokens,
+                  // 'low'|'medium'|'high' for OpenAI/xAI reasoning_effort
+}
+
+// Thinking content block from model responses (Anthropic extended thinking)
+export interface ThinkingBlock {
+  type: 'thinking';
+  thinking: string;      // Thinking/reasoning text (summary for Claude 4 models)
+  signature?: string;    // Encrypted full thinking content (for multi-turn verification)
+}
+
+// Redacted thinking block (when content is filtered)
+export interface RedactedThinkingBlock {
+  type: 'redacted_thinking';
+  data: string;          // Encrypted redacted content
 }
 
 // Model information returned by listAvailableModels

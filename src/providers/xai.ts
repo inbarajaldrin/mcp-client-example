@@ -157,16 +157,16 @@ export class GrokProvider implements ModelProvider {
 
   // xAI only supports reasoning_effort on grok-3-mini (low/high only)
   // grok-4 and grok-4-fast-reasoning have built-in reasoning that can't be controlled
-  private resolveReasoningEffort(model: string): string | undefined {
+  // Note: xAI Chat Completions API does not support reasoning_summary — only reasoning_effort.
+  // reasoning_content streams automatically when reasoning_effort is set.
+  private resolveReasoningParams(model: string): Record<string, any> | undefined {
     if (!model.startsWith('grok-3-mini')) return undefined;
     if (!this.thinkingConfig?.enabled) {
-      return 'low';
+      return { reasoning_effort: 'low' };
     }
     const level = this.thinkingConfig.level || 'high';
-    if (level === 'low' || level === 'high') {
-      return level;
-    }
-    return 'high';
+    const effort = (level === 'low' || level === 'high') ? level : 'high';
+    return { reasoning_effort: effort };
   }
 
   getProviderName(): string {
@@ -288,7 +288,7 @@ export class GrokProvider implements ModelProvider {
       return msg;
     });
 
-    const reasoningEffort = this.resolveReasoningEffort(model);
+    const reasoningParams = this.resolveReasoningParams(model);
     const createParams: any = {
       model: model,
       messages: openaiMessages,
@@ -296,8 +296,8 @@ export class GrokProvider implements ModelProvider {
       tools: openaiTools.length > 0 ? openaiTools : undefined,
       stream: true,
       stream_options: { include_usage: true },
+      ...(reasoningParams || {}),
     };
-    if (reasoningEffort) createParams.reasoning_effort = reasoningEffort;
     const stream: any = await this.client.chat.completions.create(createParams);
 
     const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
@@ -457,7 +457,7 @@ export class GrokProvider implements ModelProvider {
       iterations++;
 
       // Stream request to Grok API
-      const reasoningEffort = this.resolveReasoningEffort(model);
+      const reasoningParams = this.resolveReasoningParams(model);
       const streamParams: any = {
         model: model,
         messages: this.convertToOpenAIMessages(conversationMessages, model),
@@ -465,8 +465,8 @@ export class GrokProvider implements ModelProvider {
         tools: openaiTools.length > 0 ? openaiTools : undefined,
         stream: true,
         stream_options: { include_usage: true },
+        ...(reasoningParams || {}),
       };
-      if (reasoningEffort) streamParams.reasoning_effort = reasoningEffort;
       const stream: any = await this.client.chat.completions.create(streamParams);
 
       // Track tool calls as they stream in

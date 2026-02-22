@@ -57,15 +57,59 @@
     },
     "thinking": {
       "type": "string",
-      "description": "Accumulated thinking/reasoning content from model (Anthropic extended thinking, OpenAI reasoning_content, Gemini thought parts, Ollama thinking)"
+      "description": "Accumulated thinking/reasoning text from model. Sources: Anthropic extended thinking (thinking blocks), OpenAI reasoning_content, Gemini thought parts, Ollama <think> tags. Stored as plain text for display; structured thinking blocks with signatures are in content_blocks."
     },
     "content_blocks": {
       "type": "array",
-      "description": "Preserved tool_use blocks from assistant responses",
+      "description": "Full structured content blocks from assistant responses. Preserves thinking blocks (with signature for multi-turn verification), text blocks, and tool_use blocks. Passed back to the API in subsequent turns.",
       "items": {
-        "type": "object",
-        "properties": { "type": { "type": "string" } },
-        "additionalProperties": true
+        "oneOf": [
+          {
+            "type": "object",
+            "description": "Thinking block — model's chain-of-thought reasoning",
+            "required": ["type", "thinking"],
+            "properties": {
+              "type": { "const": "thinking" },
+              "thinking": { "type": "string", "description": "Thinking/reasoning text (summary for Claude 4 models)" },
+              "signature": { "type": "string", "description": "Encrypted full thinking content for multi-turn verification. Must be passed back unmodified." }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Redacted thinking block — filtered thinking content",
+            "required": ["type", "data"],
+            "properties": {
+              "type": { "const": "redacted_thinking" },
+              "data": { "type": "string", "description": "Encrypted redacted content" }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Text block — model's text response",
+            "required": ["type", "text"],
+            "properties": {
+              "type": { "const": "text" },
+              "text": { "type": "string" }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Tool use block — model requests tool execution",
+            "required": ["type", "id", "name", "input"],
+            "properties": {
+              "type": { "const": "tool_use" },
+              "id": { "type": "string" },
+              "name": { "type": "string" },
+              "input": { "type": "object", "additionalProperties": true }
+            }
+          },
+          {
+            "type": "object",
+            "description": "Other provider-specific block types",
+            "properties": { "type": { "type": "string" } },
+            "additionalProperties": true
+          }
+        ]
       }
     }
   }

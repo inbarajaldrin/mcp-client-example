@@ -34,6 +34,19 @@
       "description": "Available tools during the session",
       "items": { "$ref": "tool.schema.json" }
     },
+    "thinkingConfig": {
+      "type": "object",
+      "description": "Thinking/reasoning configuration active during this session. Only present when thinking was enabled.",
+      "required": ["enabled"],
+      "properties": {
+        "enabled": { "type": "boolean", "description": "Whether thinking mode was active" },
+        "level": {
+          "type": "string",
+          "description": "Thinking budget level. Anthropic: 'small' (~5K), 'medium' (~10K), 'large' (~25K). OpenAI/xAI: 'low'/'medium'/'high' reasoning_effort."
+        },
+        "provider": { "type": "string", "description": "Provider name for interpreting level values" }
+      }
+    },
     "messages": {
       "type": "array",
       "description": "Ordered conversation messages",
@@ -71,16 +84,14 @@
         },
         "thinking": {
           "type": "string",
-          "description": "Accumulated thinking/reasoning content from model (Anthropic extended thinking, OpenAI reasoning_content, Gemini thought parts, Ollama thinking)"
+          "description": "Accumulated thinking/reasoning text from model. Sources: Anthropic extended thinking (thinking blocks), OpenAI reasoning_content, Gemini thought parts, Ollama <think> tags. Plain text for display; structured blocks with signatures are in content_blocks."
         },
         "content_blocks": {
           "type": "array",
-          "description": "Structured content blocks preserving tool_use blocks from assistant",
+          "description": "Full structured content blocks from assistant responses. Contains thinking blocks (type: 'thinking' with thinking text and optional signature), text blocks (type: 'text'), and tool_use blocks (type: 'tool_use'). Thinking blocks include a 'signature' field for multi-turn verification that must be passed back to the API unmodified.",
           "items": {
             "type": "object",
-            "properties": {
-              "type": { "type": "string" }
-            },
+            "properties": { "type": { "type": "string" } },
             "additionalProperties": true
           }
         },

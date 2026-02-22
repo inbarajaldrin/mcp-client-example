@@ -24,6 +24,16 @@
       "type": "boolean",
       "description": "Auto-approve all tools without prompting. Persists across sessions.",
       "default": false
+    },
+    "thinkingEnabled": {
+      "type": "boolean",
+      "description": "Enable thinking/reasoning mode for supported models. When enabled, models produce visible chain-of-thought before responding.",
+      "default": false
+    },
+    "thinkingLevel": {
+      "type": "string",
+      "description": "Thinking budget level. Anthropic: 'small' (~5K tokens), 'medium' (~10K), 'large' (~25K). OpenAI/xAI: 'low', 'medium', 'high' reasoning_effort. Ollama: not applicable.",
+      "enum": ["small", "medium", "large", "low", "high"]
     }
   }
 }
