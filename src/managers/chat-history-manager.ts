@@ -88,6 +88,19 @@ export interface ChatSession {
     toolOutputTime?: string; // ISO timestamp when tool output was received
     orchestratorMode?: boolean; // Track if tool was called in orchestrator mode
     isIPCCall?: boolean; // Track if this was an IPC call (automatic, not by agent)
+    isHookCall?: boolean; // Track if this was triggered by a hook (@tool-exec:, @tool:, or onStart)
+    hookTrigger?: {
+      type: 'before' | 'after' | 'on-start';
+      triggerTool?: string;
+      action: 'tool-exec' | 'tool-inject';
+      whenOutput?: Record<string, unknown>;
+      whenInput?: Record<string, unknown>;
+    };
+    phaseEvent?: {
+      type: 'phase-start' | 'phase-complete' | 'phase-abort';
+      phaseName: string;
+      trigger?: { after?: string; whenOutput?: Record<string, unknown> };
+    };
   }>;
   tokenUsagePerCallback?: Array<{
     timestamp: string;
@@ -364,6 +377,65 @@ export class ChatHistoryManager {
       this.currentSession.metadata.toolUseCount++;
       this.toolUseCount++;
     }
+  }
+
+  /**
+   * Add a hook-triggered tool execution to current session.
+   * These are tool calls made by hooks (@tool-exec:, @tool:, onStart), not by the LLM.
+   * They do not count toward toolUseCount or ipcCallCount.
+   */
+  addHookToolExecution(
+    toolName: string,
+    toolInput: Record<string, any>,
+    toolOutput: string,
+    hookTrigger: {
+      type: 'before' | 'after' | 'on-start';
+      triggerTool?: string;
+      action: 'tool-exec' | 'tool-inject';
+      whenOutput?: Record<string, unknown>;
+      whenInput?: Record<string, unknown>;
+    },
+  ): void {
+    if (!this.currentSession) return;
+
+    const now = new Date().toISOString();
+    this.currentSession.messages.push({
+      timestamp: now,
+      role: 'tool',
+      content: toolOutput,
+      toolName,
+      toolInput,
+      toolOutput,
+      toolInputTime: now,
+      toolOutputTime: now,
+      isHookCall: true,
+      hookTrigger,
+    });
+    this.currentSession.metadata.messageCount++;
+  }
+
+  /**
+   * Add a phase lifecycle event to current session.
+   * Records phase start, complete, and abort signals.
+   */
+  addPhaseEvent(
+    type: 'phase-start' | 'phase-complete' | 'phase-abort',
+    phaseName: string,
+    trigger?: { after?: string; whenOutput?: Record<string, unknown> },
+  ): void {
+    if (!this.currentSession) return;
+
+    const message: any = {
+      timestamp: new Date().toISOString(),
+      role: 'client',
+      content: `Phase ${type.replace('phase-', '')}: ${phaseName}`,
+      phaseEvent: { type, phaseName },
+    };
+    if (trigger) {
+      message.phaseEvent.trigger = trigger;
+    }
+    this.currentSession.messages.push(message);
+    this.currentSession.metadata.messageCount++;
   }
 
   /**
@@ -728,6 +800,14 @@ export class ChatHistoryManager {
     if (session.metadata.ipcCallCount > 0) {
       md += `**IPC Calls (Automatic):** ${session.metadata.ipcCallCount}\n`;
     }
+    const hookCallCount = session.messages.filter(m => m.isHookCall).length;
+    if (hookCallCount > 0) {
+      md += `**Hook Calls (Client):** ${hookCallCount}\n`;
+    }
+    const phaseEventCount = session.messages.filter(m => m.phaseEvent).length;
+    if (phaseEventCount > 0) {
+      md += `**Phase Events:** ${phaseEventCount}\n`;
+    }
 
     // Display thinking configuration if enabled
     if (session.thinkingConfig?.enabled) {
@@ -803,7 +883,20 @@ export class ChatHistoryManager {
         }
         md += `${msg.content}\n\n`;
       } else if (msg.role === 'client') {
-        md += `### Client (${time})\n\n${msg.content}\n\n`;
+        if (msg.phaseEvent) {
+          const pe = msg.phaseEvent;
+          const icon = pe.type === 'phase-start' ? '▶' : pe.type === 'phase-complete' ? '✓' : '✗';
+          md += `### ${icon} Phase ${pe.type.replace('phase-', '')}: ${pe.phaseName} (${time})\n\n`;
+          if (pe.trigger?.after) {
+            md += `**Triggered by:** \`${pe.trigger.after}\`\n`;
+          }
+          if (pe.trigger?.whenOutput) {
+            md += `**When Output:** \`${JSON.stringify(pe.trigger.whenOutput)}\`\n`;
+          }
+          md += '\n';
+        } else {
+          md += `### Client (${time})\n\n${msg.content}\n\n`;
+        }
       } else if (msg.role === 'assistant') {
         md += `### Assistant (${time})\n\n`;
         // Render thinking/reasoning content if present
@@ -876,23 +969,38 @@ export class ChatHistoryManager {
       } else if (msg.role === 'tool') {
         // Determine the mode indicator
         let modeIndicator = '';
-        if (msg.isIPCCall) {
+        if (msg.isHookCall) {
+          const ht = msg.hookTrigger;
+          const action = ht?.action === 'tool-inject' ? 'Inject' : 'Exec';
+          const trigger = ht?.type === 'on-start' ? 'onStart'
+            : ht?.type === 'before' ? 'Before' : 'After';
+          modeIndicator = ` *Hook ${action} (${trigger}${ht?.triggerTool ? ` → ${ht.triggerTool}` : ''})*`;
+        } else if (msg.isIPCCall) {
           modeIndicator = ' *IPC Tool Call*';
         } else if (msg.orchestratorMode) {
           modeIndicator = ' *Orchestrator Mode*';
         }
-        
+
         // Display timestamps for input and output separately
-        const inputTime = msg.toolInputTime 
+        const inputTime = msg.toolInputTime
           ? new Date(msg.toolInputTime).toLocaleTimeString()
           : time;
-        const outputTime = msg.toolOutputTime 
+        const outputTime = msg.toolOutputTime
           ? new Date(msg.toolOutputTime).toLocaleTimeString()
           : time;
-        
+
         md += `### Tool: ${msg.toolName}${modeIndicator}\n\n`;
+
+        // Show hook trigger conditions if present
+        if (msg.hookTrigger?.whenOutput) {
+          md += `**When Output:** \`${JSON.stringify(msg.hookTrigger.whenOutput)}\`\n\n`;
+        }
+        if (msg.hookTrigger?.whenInput) {
+          md += `**When Input:** \`${JSON.stringify(msg.hookTrigger.whenInput)}\`\n\n`;
+        }
+
         md += `**Input (${inputTime}):**\n\`\`\`json\n${JSON.stringify(msg.toolInput, null, 2)}\n\`\`\`\n\n`;
-        
+
         // Try to parse output as JSON for consistent formatting
         const toolOutput = msg.toolOutput || '';
         let outputFormatted = toolOutput;
@@ -908,7 +1016,7 @@ export class ChatHistoryManager {
           outputFormatted = toolOutput;
           outputLang = '';
         }
-        
+
         md += `**Output (${outputTime}):**\n\`\`\`${outputLang ? ' ' + outputLang : ''}\n${outputFormatted}\n\`\`\`\n\n`;
       }
     }

@@ -217,7 +217,8 @@ export class MCPClient {
     // Initialize chat history manager
     this.chatHistoryManager = new ChatHistoryManager(this.logger);
     this.chatHistoryManager.setProviderName(this.modelProvider.getProviderName());
-    
+    this.hookManager.setChatLogger(this.chatHistoryManager);
+
     // Initialize attachment manager
     this.attachmentManager = new AttachmentManager(this.logger);
 
@@ -302,6 +303,7 @@ export class MCPClient {
     client.promptManager = new PromptManager(client.logger);
     client.chatHistoryManager = new ChatHistoryManager(client.logger);
     client.chatHistoryManager.setProviderName(client.modelProvider.getProviderName());
+    client.hookManager.setChatLogger(client.chatHistoryManager);
     client.attachmentManager = new AttachmentManager(client.logger);
     client.orchestratorIPCServer = null;
     client.enableOrchestratorIPC = options?.enableOrchestratorIPC ?? false;
@@ -3099,8 +3101,10 @@ export class MCPClient {
         }
       }
       
-      // Check if query was cancelled - messages are kept visible even when aborted
-      if (cancellationCheck && cancellationCheck()) {
+      // Check if query was cancelled - messages are kept visible even when aborted.
+      // Don't early-return for pending tool injection — deferred hooks still need to fire.
+      const hasPendingInjection = this.hookManager?.hasPendingInjection?.() || false;
+      if (cancellationCheck && cancellationCheck() && !hasPendingInjection) {
         // SAFETY CHECK for OpenAI: Ensure all tool_calls have corresponding tool messages
         // This prevents "tool_call_id did not have response messages" errors on the next query
         if (this.modelProvider.getProviderName() === 'openai') {
@@ -3144,30 +3148,41 @@ export class MCPClient {
       // Execute deferred hooks (conditional @tool-exec: and all @tool: hooks) now that
       // the agent's response is complete. These fire after the response so the agent
       // doesn't interfere, and a follow-up stream lets the agent react to injected results.
-      if (deferredHookData.length > 0 && this.hookManager && !(cancellationCheck && cancellationCheck())) {
+      // Loop: follow-up streams may produce more deferred hooks (e.g., another @tool: injection).
+      let currentDeferredData = deferredHookData;
+      while (currentDeferredData.length > 0 && this.hookManager) {
+        // Fire deferred hooks unless a hard cancellation (abort/interrupt/phaseComplete) is active.
+        // Pending injection is NOT a hard cancellation — it's the reason we stopped.
+        const pendingInj = this.hookManager.hasPendingInjection?.() || false;
+        const isHardCancelled = cancellationCheck && cancellationCheck() && !pendingInj;
+        if (isHardCancelled) break;
+
+        if (pendingInj) this.hookManager.resetPendingInjection();
+
         const hasInjections = await this.hookManager.executeDeferredAfterHooks(
-          deferredHookData,
+          currentDeferredData,
           (name, args) => this.toolExecutor.executeMCPTool(name, args, true),
           (name, args, result) => this.injectToolResult(name, args, result),
         );
 
         // If @tool: hooks injected messages, start a follow-up stream so the agent
         // can see and react to them (e.g., scene was randomized, now continue).
-        if (hasInjections && !(cancellationCheck && cancellationCheck())) {
-          const hookFollowUpStream = (this.modelProvider as any).createMessageStreamWithToolUse(
-            this.messages,
-            this.model,
-            this.tools,
-            8192,
-            toolExecutor,
-            (() => {
-              const maxIter = this.preferencesManager.getMaxIterations();
-              return maxIter === -1 ? 999999 : maxIter;
-            })(),
-            cancellationCheck,
-          );
-          await this.processToolUseStream(hookFollowUpStream, cancellationCheck, this.currentTokenCount, observer);
-        }
+        if (!hasInjections || (cancellationCheck && cancellationCheck())) break;
+
+        const hookFollowUpStream = (this.modelProvider as any).createMessageStreamWithToolUse(
+          this.messages,
+          this.model,
+          this.tools,
+          8192,
+          toolExecutor,
+          (() => {
+            const maxIter = this.preferencesManager.getMaxIterations();
+            return maxIter === -1 ? 999999 : maxIter;
+          })(),
+          cancellationCheck,
+        );
+        const followUpResult = await this.processToolUseStream(hookFollowUpStream, cancellationCheck, this.currentTokenCount, observer);
+        currentDeferredData = followUpResult.deferredHookData;
       }
 
       // Always update token count using official API after stream completes
@@ -3344,29 +3359,37 @@ export class MCPClient {
             }
           }
 
-          // Execute deferred hooks from the continue stream
-          if (continueDeferredHookData.length > 0 && this.hookManager && !(cancellationCheck && cancellationCheck())) {
+          // Execute deferred hooks from the continue stream (same loop pattern as main query)
+          let contDeferredData = continueDeferredHookData;
+          while (contDeferredData.length > 0 && this.hookManager) {
+            const contPendingInj = this.hookManager.hasPendingInjection?.() || false;
+            const contIsHardCancelled = cancellationCheck && cancellationCheck() && !contPendingInj;
+            if (contIsHardCancelled) break;
+
+            if (contPendingInj) this.hookManager.resetPendingInjection();
+
             const hasInjections = await this.hookManager.executeDeferredAfterHooks(
-              continueDeferredHookData,
+              contDeferredData,
               (name, args) => this.toolExecutor.executeMCPTool(name, args, true),
               (name, args, result) => this.injectToolResult(name, args, result),
             );
 
-            if (hasInjections && !(cancellationCheck && cancellationCheck())) {
-              const hookFollowUpStream = (this.modelProvider as any).createMessageStreamWithToolUse(
-                this.messages,
-                this.model,
-                this.tools,
-                8192,
-                toolExecutor,
-                (() => {
-                  const maxIter = this.preferencesManager.getMaxIterations();
-                  return maxIter === -1 ? 999999 : maxIter;
-                })(),
-                cancellationCheck,
-              );
-              await this.processToolUseStream(hookFollowUpStream, cancellationCheck, this.currentTokenCount, observer);
-            }
+            if (!hasInjections || (cancellationCheck && cancellationCheck())) break;
+
+            const hookFollowUpStream = (this.modelProvider as any).createMessageStreamWithToolUse(
+              this.messages,
+              this.model,
+              this.tools,
+              8192,
+              toolExecutor,
+              (() => {
+                const maxIter = this.preferencesManager.getMaxIterations();
+                return maxIter === -1 ? 999999 : maxIter;
+              })(),
+              cancellationCheck,
+            );
+            const contFollowUpResult = await this.processToolUseStream(hookFollowUpStream, cancellationCheck, this.currentTokenCount, observer);
+            contDeferredData = contFollowUpResult.deferredHookData;
           }
 
           // Check if query was cancelled

@@ -17,11 +17,11 @@ import {
   type AblationRun,
   type AblationRunResult,
   type AblationCommandResult,
-  type ToolExecLogEntry,
   type PostToolHook,
   type AblationArgument,
   type AblationArgumentType,
 } from '../managers/ablation-manager.js';
+import { sanitizeFolderName } from '../utils/path-utils.js';
 
 // ==================== Tool Schema Types ====================
 
@@ -142,8 +142,8 @@ export class AblationCLI {
   /**
    * Save chat history to the global chats directory and copy files into the run's phase directory.
    * Called on every exit path (success, failure, abort) so chat is always preserved.
-   * Skipped in dry runs (no model = no chat). When context persists across phases,
-   * the caller is responsible for deferring until all phases complete.
+   * In dry runs, the chat contains hook tool executions and phase events (no LLM messages).
+   * When context persists across phases, the caller defers until all phases complete.
    */
   private savePhaseChatHistory(
     endReason: string,
@@ -159,11 +159,12 @@ export class AblationCLI {
     const chatMetadata = chatHistoryManager.endSession(endReason);
 
     if (chatMetadata) {
-      const chatFileName = this.ablationManager.getChatFileName(model);
-      const chatPrefix = hasMultipleIterations ? `chats/run-${iteration}` : 'chats';
-      const relativeChatPath = `${chatPrefix}/${phaseName}/${chatFileName}`;
-      const destJsonPath = join(phaseDir, chatFileName);
-      const destMdPath = join(phaseDir, chatFileName.replace('.json', '.md'));
+      const modelDir = this.ablationManager.getModelDirName(model);
+      const phaseSanitized = sanitizeFolderName(phaseName);
+      const runPrefix = hasMultipleIterations ? `run-${iteration}/` : '';
+      const relativeChatPath = `${modelDir}/${runPrefix}${phaseSanitized}/chat.json`;
+      const destJsonPath = join(phaseDir, 'chat.json');
+      const destMdPath = join(phaseDir, 'chat.md');
 
       try {
         if (existsSync(chatMetadata.filePath)) cpSync(chatMetadata.filePath, destJsonPath);
@@ -1424,7 +1425,7 @@ export class AblationCLI {
 
               for (const msg of promptResult.messages) {
                 if (msg.content.type === 'text') {
-                  const cancellationCheck = () => hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
+                  const cancellationCheck = () => hookMgr.isPhaseCompleteRequested() || hookMgr.hasPendingInjection() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
 
                   // Resume loop: after pause+resume, re-invoke processQuery so the agent can continue
                   let isFirstAttempt = true;
@@ -1434,6 +1435,10 @@ export class AblationCLI {
                     const queryText = isFirstAttempt ? msg.content.text : 'Continue from where you left off.';
                     const attachments = (isFirstAttempt && !attachmentsConsumed && promptAttachments.length > 0)
                       ? promptAttachments : undefined;
+
+                    // Log user prompt to chat history (ablation path doesn't go through cli-client)
+                    this.client.getChatHistoryManager().addUserMessage(queryText,
+                      attachments?.map(a => ({ fileName: a.fileName, ext: a.ext, mediaType: a.mediaType })));
 
                     await this.client.processQuery(queryText, false, attachments, cancellationCheck);
 
@@ -1502,6 +1507,7 @@ export class AblationCLI {
             // — treat as implicit phase completion so the run continues to the next phase/model
             if (ablation && phaseName && !this.callbacks.isAbortRequested()) {
               this.logger.log(`  ℹ Phase "${phaseName}": agent stopped without @complete-phase — treating as complete\n`, { type: 'info' });
+              this.client.getChatHistoryManager().addPhaseEvent('phase-abort', phaseName, { after: 'agent-stopped' });
               return { phaseComplete: true };
             }
           }
@@ -1607,13 +1613,17 @@ export class AblationCLI {
         // Resume loop: after pause+resume, re-invoke processQuery so the agent can continue
         let isFirstAttempt = true;
         let continueAfterPause = false;
-        const cancellationCheck = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
+        const cancellationCheck = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || hookManager.hasPendingInjection() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
 
         do {
           const query = isFirstAttempt ? trimmedCommand : 'Continue from where you left off.';
           const atts = isFirstAttempt
             ? (pendingAttachments.length > 0 ? pendingAttachments : undefined)
             : undefined;
+
+          // Log user prompt to chat history (ablation path doesn't go through cli-client)
+          this.client.getChatHistoryManager().addUserMessage(query,
+            atts?.map(a => ({ fileName: a.fileName, ext: a.ext, mediaType: a.mediaType })));
 
           await this.client.processQuery(query, false, atts, cancellationCheck);
           isFirstAttempt = false;
@@ -1679,6 +1689,7 @@ export class AblationCLI {
       // — treat as implicit phase completion so the run continues to the next phase/model
       if (ablation && phaseName && !this.callbacks.isAbortRequested()) {
         this.logger.log(`  ℹ Phase "${phaseName}": agent stopped without @complete-phase — treating as complete\n`, { type: 'info' });
+        this.client.getChatHistoryManager().addPhaseEvent('phase-abort', phaseName, { after: 'agent-stopped' });
         return { phaseComplete: true };
       }
     }
@@ -2192,6 +2203,9 @@ export class AblationCLI {
       ablation.name,
     );
 
+    // Save a frozen copy of the ablation definition for provenance
+    this.ablationManager.saveDefinitionSnapshot(runDir, ablation);
+
     // Copy attachments to run directory (same for all runs)
     // Pass resolved arguments so dynamically-named attachments are detected
     this.ablationManager.copyAttachmentsToRun(runDir, ablation, resolvedArguments);
@@ -2335,6 +2349,7 @@ export class AblationCLI {
 
           const phaseDir = this.ablationManager.createPhaseDirectory(
             runDir,
+            model,
             phase.name,
             getRunIter(iteration),
           );
@@ -2373,9 +2388,6 @@ export class AblationCLI {
 
           const startTime = Date.now();
 
-          // Collect tool exec log entries for dry run
-          const toolExecLog: ToolExecLogEntry[] = [];
-
           // Substitute argument placeholders in all command arrays for this phase
           const sub = (cmds: string[]) =>
             resolvedArguments ? this.ablationManager.substituteArguments(cmds, resolvedArguments) : cmds;
@@ -2384,6 +2396,9 @@ export class AblationCLI {
           const phaseOnEnd = phase.onEnd ? sub(phase.onEnd) : undefined;
 
           try {
+            // Log phase-start event to chat history
+            this.client.getChatHistoryManager().addPhaseEvent('phase-start', phase.name);
+
             // Execute onStart lifecycle hooks
             let aborted = false;
             let abortCurrentModel = false;
@@ -2407,22 +2422,17 @@ export class AblationCLI {
                   phase.name,
                 );
 
-                if (ablation.dryRun && hookResult.toolExecResult) {
-                  const hookDuration = Date.now() - hookStartTime;
-                  toolExecLog.push({
-                    commandIndex: -1,
-                    command: startCmd,
-                    toolName: hookResult.toolExecResult.toolName,
-                    args: hookResult.toolExecResult.args,
-                    timestamp: new Date(hookStartTime).toISOString(),
-                    duration: hookDuration,
-                    durationFormatted: formatDuration(hookDuration),
-                    success: hookResult.toolExecResult.success,
-                    displayText: hookResult.toolExecResult.displayText,
-                    isHook: true,
-                    triggeredBy: 'onStart',
-                  });
+                // Log onStart tool execution to chat history
+                if (hookResult.toolExecResult) {
+                  const chatHist = this.client.getChatHistoryManager();
+                  chatHist.addHookToolExecution(
+                    hookResult.toolExecResult.toolName,
+                    hookResult.toolExecResult.args,
+                    hookResult.toolExecResult.displayText || '',
+                    { type: 'on-start', action: 'tool-exec' },
+                  );
                 }
+
               }
             }
 
@@ -2461,6 +2471,7 @@ export class AblationCLI {
             // Execute remaining (non-staged) commands for this phase
             const remainingCount = phaseCommands.length - stagedIndices.size;
             let remainingIdx = 0;
+            let phaseCompletedViaSignal = false;
             for (let i = 0; i < phaseCommands.length && !aborted; i++) {
               if (stagedIndices.has(i)) continue; // Already pre-staged
               remainingIdx++;
@@ -2512,22 +2523,6 @@ export class AblationCLI {
                         phase.name,
                       );
 
-                      if (ablation.dryRun && hookResult.toolExecResult) {
-                        const hookDuration = Date.now() - hookStartTime;
-                        toolExecLog.push({
-                          commandIndex: i,
-                          command: hook.run,
-                          toolName: hookResult.toolExecResult.toolName,
-                          args: hookResult.toolExecResult.args,
-                          timestamp: new Date(hookStartTime).toISOString(),
-                          duration: hookDuration,
-                          durationFormatted: formatDuration(hookDuration),
-                          success: hookResult.toolExecResult.success,
-                          displayText: hookResult.toolExecResult.displayText,
-                          isHook: true,
-                          triggeredBy: parsed.toolName,
-                        });
-                      }
                     }
                   }
                 }
@@ -2541,22 +2536,6 @@ export class AblationCLI {
                 ablation,
                 phase.name,
               );
-
-              // Collect tool exec log entry for dry run
-              if (ablation.dryRun && cmdResult.toolExecResult) {
-                const cmdDuration = Date.now() - cmdStartTime;
-                toolExecLog.push({
-                  commandIndex: i,
-                  command,
-                  toolName: cmdResult.toolExecResult.toolName,
-                  args: cmdResult.toolExecResult.args,
-                  timestamp: new Date(cmdStartTime).toISOString(),
-                  duration: cmdDuration,
-                  durationFormatted: formatDuration(cmdDuration),
-                  success: cmdResult.toolExecResult.success,
-                  displayText: cmdResult.toolExecResult.displayText,
-                });
-              }
 
               // Dry-run pause: after each tool-exec, check for Ctrl+A interrupt
               if (ablation.dryRun && this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()) {
@@ -2576,6 +2555,7 @@ export class AblationCLI {
               // Phase completed via @complete-phase (from agent-driven prompt or direct command)
               if (cmdResult.phaseComplete) {
                 this.logger.log(`  ✓ Phase "${phase.name}" completed via signal\n`, { type: 'success' });
+                phaseCompletedViaSignal = true;
                 break;
               }
 
@@ -2624,23 +2604,6 @@ export class AblationCLI {
                       break;
                     }
 
-                    // Collect hook tool exec log entry for dry run
-                    if (ablation.dryRun && hookResult.toolExecResult) {
-                      const hookDuration = Date.now() - hookStartTime;
-                      toolExecLog.push({
-                        commandIndex: i,
-                        command: hook.run,
-                        toolName: hookResult.toolExecResult.toolName,
-                        args: hookResult.toolExecResult.args,
-                        timestamp: new Date(hookStartTime).toISOString(),
-                        duration: hookDuration,
-                        durationFormatted: formatDuration(hookDuration),
-                        success: hookResult.toolExecResult.success,
-                        displayText: hookResult.toolExecResult.displayText,
-                        isHook: true,
-                        triggeredBy: cmdResult.toolExecResult.toolName,
-                      });
-                    }
                   }
                 }
               }
@@ -2678,44 +2641,34 @@ export class AblationCLI {
                   phase.name,
                 );
 
-                if (ablation.dryRun && hookResult.toolExecResult) {
-                  const hookDuration = Date.now() - hookStartTime;
-                  toolExecLog.push({
-                    commandIndex: -1,
-                    command: endCmd,
-                    toolName: hookResult.toolExecResult.toolName,
-                    args: hookResult.toolExecResult.args,
-                    timestamp: new Date(hookStartTime).toISOString(),
-                    duration: hookDuration,
-                    durationFormatted: formatDuration(hookDuration),
-                    success: hookResult.toolExecResult.success,
-                    displayText: hookResult.toolExecResult.displayText,
-                    isHook: true,
-                    triggeredBy: 'onEnd',
-                  });
+                // Log onEnd tool execution to chat history
+                if (hookResult.toolExecResult) {
+                  const chatHist = this.client.getChatHistoryManager();
+                  chatHist.addHookToolExecution(
+                    hookResult.toolExecResult.toolName,
+                    hookResult.toolExecResult.args,
+                    hookResult.toolExecResult.displayText || '',
+                    { type: 'after', action: 'tool-exec' },
+                  );
                 }
+
               }
             }
 
             if (aborted) {
               // Stop any active video recording so the file is finalized before capture
               await this.client.cleanupVideoRecording();
+              this.client.getChatHistoryManager().addPhaseEvent('phase-abort', phase.name);
 
               result.status = 'aborted';
               result.duration = Date.now() - startTime;
               result.durationFormatted = formatDuration(result.duration);
 
-              // Save partial tool exec logs on abort
-              if (ablation.dryRun && toolExecLog.length > 0) {
-                const logsDir = this.ablationManager.createLogsDirectory(runDir, phase.name, getRunIter(iteration));
-                result.logFile = this.ablationManager.saveToolExecLog(runDir, logsDir, toolExecLog, phase.name);
-              }
-
               // Capture any outputs produced before abort (for diagnostics)
               this.ablationManager.captureRunOutputs(runDir, phase.name, model, getRunIter(iteration));
 
               // Save chat history on abort so it's preserved in the run directory
-              if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases !== false) {
+              if (ablation.settings.clearContextBetweenPhases !== false) {
                 this.savePhaseChatHistory(
                   `Ablation run (aborted): ${phase.name} with ${model.provider}/${model.model}`,
                   runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
@@ -2734,16 +2687,11 @@ export class AblationCLI {
               result.duration = Date.now() - startTime;
               result.durationFormatted = formatDuration(result.duration);
 
-              if (ablation.dryRun && toolExecLog.length > 0) {
-                const logsDir = this.ablationManager.createLogsDirectory(runDir, phase.name, getRunIter(iteration));
-                result.logFile = this.ablationManager.saveToolExecLog(runDir, logsDir, toolExecLog, phase.name);
-              }
-
               // Capture any outputs produced before @abort (for diagnostics)
               this.ablationManager.captureRunOutputs(runDir, phase.name, model, getRunIter(iteration));
 
               // Save chat history on @abort so it's preserved in the run directory
-              if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases !== false) {
+              if (ablation.settings.clearContextBetweenPhases !== false) {
                 this.savePhaseChatHistory(
                   `Ablation run (@abort): ${phase.name} with ${model.provider}/${model.model}`,
                   runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
@@ -2770,18 +2718,17 @@ export class AblationCLI {
             result.duration = Date.now() - startTime;
             result.durationFormatted = formatDuration(result.duration);
 
-            // Save tool exec logs for dry run
-            if (ablation.dryRun && toolExecLog.length > 0) {
-              const logsDir = this.ablationManager.createLogsDirectory(runDir, phase.name, getRunIter(iteration));
-              result.logFile = this.ablationManager.saveToolExecLog(runDir, logsDir, toolExecLog, phase.name);
+            // Log phase-complete if not already logged by a signal (@complete-phase or agent-stopped)
+            if (!phaseCompletedViaSignal) {
+              this.client.getChatHistoryManager().addPhaseEvent('phase-complete', phase.name, { after: 'commands-exhausted' });
             }
 
             // Stop any active video recording so the file is finalized before capture
             await this.client.cleanupVideoRecording();
 
-            // Save chat history and copy to phase directory (skip in dry run)
+            // Save chat history and copy to phase directory
             // When context persists across phases, defer saving until all phases complete
-            if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases !== false) {
+            if (ablation.settings.clearContextBetweenPhases !== false) {
               this.savePhaseChatHistory(
                 `Ablation run: ${phase.name} with ${model.provider}/${model.model}`,
                 runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
@@ -2798,33 +2745,11 @@ export class AblationCLI {
             result.duration = Date.now() - startTime;
             result.durationFormatted = formatDuration(result.duration);
 
-            // Collect failed tool exec entry if available
-            if (ablation.dryRun && error._toolExecResult) {
-              const cmdDuration = Date.now() - startTime;
-              toolExecLog.push({
-                commandIndex: toolExecLog.length,
-                command: phaseCommands[toolExecLog.length] || '',
-                toolName: error._toolExecResult.toolName,
-                args: error._toolExecResult.args,
-                timestamp: new Date().toISOString(),
-                duration: cmdDuration,
-                durationFormatted: formatDuration(cmdDuration),
-                success: false,
-                error: error._toolExecResult.error,
-              });
-            }
-
-            // Save partial tool exec logs on error
-            if (ablation.dryRun && toolExecLog.length > 0) {
-              const logsDir = this.ablationManager.createLogsDirectory(runDir, phase.name, getRunIter(iteration));
-              result.logFile = this.ablationManager.saveToolExecLog(runDir, logsDir, toolExecLog, phase.name);
-            }
-
             // Stop any active video recording so the file is finalized before capture
             await this.client.cleanupVideoRecording();
 
             // Save chat history on error so it's preserved in the run directory
-            if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases !== false) {
+            if (ablation.settings.clearContextBetweenPhases !== false) {
               this.savePhaseChatHistory(
                 `Ablation run (failed): ${phase.name} with ${model.provider}/${model.model}`,
                 runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
@@ -2860,13 +2785,14 @@ export class AblationCLI {
           );
 
           if (chatMetadata) {
-            // Save cumulative chat to model-level directory under chats/
-            const chatFileName = this.ablationManager.getChatFileName(model);
-            const chatPrefix = hasMultipleIterations ? `chats/run-${iteration}` : 'chats';
-            const modelChatDir = join(runDir, chatPrefix);
+            // Save cumulative chat to model-level directory: {modelDir}/(run-{N}/)
+            const modelDir = this.ablationManager.getModelDirName(model);
+            const modelChatDir = hasMultipleIterations
+              ? join(runDir, modelDir, `run-${iteration}`)
+              : join(runDir, modelDir);
             mkdirSync(modelChatDir, { recursive: true });
-            const destJsonPath = join(modelChatDir, chatFileName);
-            const destMdPath = join(modelChatDir, chatFileName.replace('.json', '.md'));
+            const destJsonPath = join(modelChatDir, 'chat.json');
+            const destMdPath = join(modelChatDir, 'chat.md');
 
             try {
               if (existsSync(chatMetadata.filePath)) {
@@ -2882,16 +2808,6 @@ export class AblationCLI {
         }
       }
 
-      // Capture all outputs produced during this iteration (final sweep)
-      const iterCapturedCount = this.ablationManager.captureIterationOutputs(
-        runDir,
-        getRunIter(iteration),
-      );
-      if (iterCapturedCount > 0) {
-        this.logger.log(`  📁 Captured ${iterCapturedCount} output files for iteration${hasMultipleIterations ? ` ${iteration}` : ''}\n`, {
-          type: 'info',
-        });
-      }
     }
     } finally {
       // Resume client-side hooks

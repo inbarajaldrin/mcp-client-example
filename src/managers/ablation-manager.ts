@@ -9,6 +9,7 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
 const ABLATIONS_DIR = join(__dirname, '../..', '.mcp-client-data', 'ablations');
+const DEFINITIONS_DIR = join(ABLATIONS_DIR, 'definitions');
 const RUNS_DIR = join(ABLATIONS_DIR, 'runs');
 const OUTPUTS_DIR = join(__dirname, '../..', '.mcp-client-data', 'outputs');
 const ATTACHMENTS_DIR = join(__dirname, '../..', '.mcp-client-data', 'attachments');
@@ -76,7 +77,6 @@ export interface AblationRunResult {
   duration?: number; // milliseconds
   durationFormatted?: string; // human-readable (e.g. "4m 5s")
   chatFile?: string;
-  logFile?: string;       // Path to tool-exec log (dry run only)
   error?: string;
 }
 
@@ -89,21 +89,6 @@ export interface AblationRun {
   totalTokens?: number;
   totalDuration?: number;
   totalDurationFormatted?: string; // human-readable (e.g. "1h 23m 45s")
-}
-
-export interface ToolExecLogEntry {
-  commandIndex: number;
-  command: string;
-  toolName: string;
-  args: Record<string, unknown>;
-  timestamp: string;
-  duration: number;        // milliseconds
-  durationFormatted: string;
-  success: boolean;
-  displayText?: string;
-  error?: string;
-  isHook?: boolean;        // True if this entry was triggered by a post-tool hook
-  triggeredBy?: string;    // Tool name that triggered this hook
 }
 
 export interface AblationCommandResult {
@@ -138,6 +123,9 @@ export class AblationManager {
       if (!existsSync(ABLATIONS_DIR)) {
         mkdirSync(ABLATIONS_DIR, { recursive: true });
       }
+      if (!existsSync(DEFINITIONS_DIR)) {
+        mkdirSync(DEFINITIONS_DIR, { recursive: true });
+      }
       if (!existsSync(RUNS_DIR)) {
         mkdirSync(RUNS_DIR, { recursive: true });
       }
@@ -150,7 +138,7 @@ export class AblationManager {
    * Get path to an ablation definition file
    */
   private getAblationPath(name: string): string {
-    return join(ABLATIONS_DIR, `${sanitizeFolderName(name)}.yaml`);
+    return join(DEFINITIONS_DIR, `${sanitizeFolderName(name)}.yaml`);
   }
 
   /**
@@ -222,12 +210,12 @@ export class AblationManager {
   list(): AblationDefinition[] {
     const ablations: AblationDefinition[] = [];
 
-    if (!existsSync(ABLATIONS_DIR)) {
+    if (!existsSync(DEFINITIONS_DIR)) {
       return ablations;
     }
 
     try {
-      const files = readdirSync(ABLATIONS_DIR);
+      const files = readdirSync(DEFINITIONS_DIR);
 
       for (const file of files) {
         if (file.endsWith('.yaml')) {
@@ -441,8 +429,7 @@ export class AblationManager {
    */
   getRunDirectory(ablationName: string, timestamp?: string): string {
     const ts = timestamp || this.formatTimestamp(new Date());
-    const dateFolder = ts.substring(0, 10); // YYYY-MM-DD
-    return join(RUNS_DIR, dateFolder, sanitizeFolderName(ablationName), ts);
+    return join(RUNS_DIR, sanitizeFolderName(ablationName), ts);
   }
 
   /**
@@ -464,22 +451,30 @@ export class AblationManager {
   createRunDirectory(ablationName: string): { runDir: string; timestamp: string } {
     const timestamp = this.formatTimestamp(new Date());
     const runDir = this.getRunDirectory(ablationName, timestamp);
-    const chatsDir = join(runDir, 'chats');
 
     mkdirSync(runDir, { recursive: true });
-    mkdirSync(chatsDir, { recursive: true });
 
     return { runDir, timestamp };
   }
 
   /**
-   * Create phase directory within a run
-   * When runIteration is provided (runs > 1), creates chats/run-{N}/{phase}/
+   * Get the directory name for a model within a run.
+   * Format: {provider}--{model} (e.g. "openai--gpt-5-mini")
+   * Each part is sanitized separately so the -- separator is preserved.
    */
-  createPhaseDirectory(runDir: string, phaseName: string, runIteration?: number): string {
+  getModelDirName(model: AblationModel): string {
+    return `${sanitizeFolderName(model.provider)}--${sanitizeFolderName(model.model)}`;
+  }
+
+  /**
+   * Create phase directory within a run under the model's directory.
+   * Structure: {runDir}/{modelDir}/(run-{N}/){phase}/
+   */
+  createPhaseDirectory(runDir: string, model: AblationModel, phaseName: string, runIteration?: number): string {
+    const modelDir = this.getModelDirName(model);
     const basePath = runIteration !== undefined
-      ? join(runDir, 'chats', `run-${runIteration}`, sanitizeFolderName(phaseName))
-      : join(runDir, 'chats', sanitizeFolderName(phaseName));
+      ? join(runDir, modelDir, `run-${runIteration}`, sanitizeFolderName(phaseName))
+      : join(runDir, modelDir, sanitizeFolderName(phaseName));
     mkdirSync(basePath, { recursive: true });
     return basePath;
   }
@@ -490,6 +485,19 @@ export class AblationManager {
   saveRunResults(runDir: string, run: AblationRun): void {
     const summaryPath = join(runDir, 'summary.json');
     writeFileSync(summaryPath, JSON.stringify(run, null, 2), 'utf-8');
+  }
+
+  /**
+   * Save a frozen copy of the ablation definition into the run directory for provenance.
+   */
+  saveDefinitionSnapshot(runDir: string, ablation: AblationDefinition): void {
+    try {
+      const snapshotPath = join(runDir, 'definition.yaml');
+      const yamlContent = yaml.stringify(ablation);
+      writeFileSync(snapshotPath, yamlContent, 'utf-8');
+    } catch (error) {
+      this.logger.log(`Failed to save definition snapshot: ${error}\n`, { type: 'error' });
+    }
   }
 
   /**
@@ -520,21 +528,17 @@ export class AblationManager {
     try {
       if (!existsSync(RUNS_DIR)) return runs;
 
-      // Scan date folders (YYYY-MM-DD) under runs/
-      const dateFolders = readdirSync(RUNS_DIR);
-      for (const dateFolder of dateFolders) {
-        const ablationDir = join(RUNS_DIR, dateFolder, sanitizeFolderName(ablationName));
-        if (!existsSync(ablationDir) || !statSync(ablationDir).isDirectory()) continue;
+      const ablationDir = join(RUNS_DIR, sanitizeFolderName(ablationName));
+      if (!existsSync(ablationDir) || !statSync(ablationDir).isDirectory()) return runs;
 
-        const timestampFolders = readdirSync(ablationDir);
-        for (const tsFolder of timestampFolders) {
-          const folderPath = join(ablationDir, tsFolder);
-          if (!statSync(folderPath).isDirectory()) continue;
+      const timestampFolders = readdirSync(ablationDir);
+      for (const tsFolder of timestampFolders) {
+        const folderPath = join(ablationDir, tsFolder);
+        if (!statSync(folderPath).isDirectory()) continue;
 
-          const run = this.loadRunResults(folderPath);
-          if (run) {
-            runs.push({ timestamp: tsFolder, run });
-          }
+        const run = this.loadRunResults(folderPath);
+        if (run) {
+          runs.push({ timestamp: tsFolder, run });
         }
       }
     } catch (error) {
@@ -582,10 +586,10 @@ export class AblationManager {
   }
 
   /**
-   * Get chat file name for a run
+   * Get chat file name for a run (always "chat.json" — model is encoded in the parent directory)
    */
-  getChatFileName(model: AblationModel): string {
-    return `${sanitizeFolderName(model.model)}.json`;
+  getChatFileName(_model: AblationModel): string {
+    return 'chat.json';
   }
 
   // ==================== Argument Placeholders ====================
@@ -732,10 +736,11 @@ export class AblationManager {
   // ==================== Outputs Management ====================
 
   /**
-   * Get the stash directory path for preserving original outputs during an ablation
+   * Get the stash directory path for preserving original outputs during an ablation.
+   * Stored at the ablations level (not inside the run) since it's a temporary working area.
    */
-  private getStashDir(runDir: string): string {
-    return join(runDir, '_stashed_outputs');
+  private getStashDir(_runDir: string): string {
+    return join(ABLATIONS_DIR, '_stashed_outputs');
   }
 
   /**
@@ -813,12 +818,13 @@ export class AblationManager {
    * Capture all outputs currently in the outputs folder to the run archive.
    * No diffing needed — since outputs were stashed at the start, everything
    * in the folder was produced by the current run.
-   * When runIteration is provided (runs > 1), saves to outputs/run-{N}/{phase}/{model}/
+   * Saves to {modelDir}/(run-{N}/){phase}/ under the run directory.
    */
   captureRunOutputs(runDir: string, phaseName: string, model: AblationModel, runIteration?: number): number {
-    const runOutputsDir = runIteration !== undefined
-      ? join(runDir, 'outputs', `run-${runIteration}`, sanitizeFolderName(phaseName), sanitizeFolderName(model.model))
-      : join(runDir, 'outputs', sanitizeFolderName(phaseName), sanitizeFolderName(model.model));
+    const modelDir = this.getModelDirName(model);
+    const phaseDir = runIteration !== undefined
+      ? join(runDir, modelDir, `run-${runIteration}`, sanitizeFolderName(phaseName))
+      : join(runDir, modelDir, sanitizeFolderName(phaseName));
 
     try {
       if (!existsSync(OUTPUTS_DIR)) {
@@ -830,40 +836,11 @@ export class AblationManager {
         return 0;
       }
 
-      mkdirSync(runOutputsDir, { recursive: true });
-      cpSync(OUTPUTS_DIR, runOutputsDir, { recursive: true });
+      mkdirSync(phaseDir, { recursive: true });
+      cpSync(OUTPUTS_DIR, phaseDir, { recursive: true });
       return items.length;
     } catch (error) {
       this.logger.log(`Failed to capture run outputs: ${error}\n`, { type: 'error' });
-      return 0;
-    }
-  }
-
-  /**
-   * Capture all outputs produced during an entire iteration.
-   * When runIteration is provided (runs > 1), saves to outputs/run-{N}/
-   * Otherwise saves to outputs/
-   */
-  captureIterationOutputs(runDir: string, runIteration?: number): number {
-    const runOutputsDir = runIteration !== undefined
-      ? join(runDir, 'outputs', `run-${runIteration}`)
-      : join(runDir, 'outputs');
-
-    try {
-      if (!existsSync(OUTPUTS_DIR)) {
-        return 0;
-      }
-
-      const items = readdirSync(OUTPUTS_DIR);
-      if (items.length === 0) {
-        return 0;
-      }
-
-      mkdirSync(runOutputsDir, { recursive: true });
-      cpSync(OUTPUTS_DIR, runOutputsDir, { recursive: true });
-      return items.length;
-    } catch (error) {
-      this.logger.log(`Failed to capture iteration outputs: ${error}\n`, { type: 'error' });
       return 0;
     }
   }
@@ -901,118 +878,14 @@ export class AblationManager {
   }
 
   /**
-   * Get the outputs directory for a specific run result
+   * Get the phase directory for a specific run result (contains outputs, chat, logs)
    */
   getRunOutputsDir(runDir: string, phaseName: string, model: AblationModel, runIteration?: number): string {
+    const modelDir = this.getModelDirName(model);
     if (runIteration !== undefined) {
-      return join(runDir, 'outputs', `run-${runIteration}`, sanitizeFolderName(phaseName), sanitizeFolderName(model.model));
+      return join(runDir, modelDir, `run-${runIteration}`, sanitizeFolderName(phaseName));
     }
-    return join(runDir, 'outputs', sanitizeFolderName(phaseName), sanitizeFolderName(model.model));
-  }
-
-  // ==================== Tool Execution Logs ====================
-
-  /**
-   * Create logs directory for a phase within a run.
-   * When runIteration is provided (runs > 1), creates logs/run-{N}/{phase}/
-   * Otherwise creates logs/{phase}/
-   */
-  createLogsDirectory(runDir: string, phaseName: string, runIteration?: number): string {
-    const logsDir = runIteration !== undefined
-      ? join(runDir, 'logs', `run-${runIteration}`, sanitizeFolderName(phaseName))
-      : join(runDir, 'logs', sanitizeFolderName(phaseName));
-    mkdirSync(logsDir, { recursive: true });
-    return logsDir;
-  }
-
-  /**
-   * Save tool execution log entries as both JSON and Markdown.
-   * @returns The relative path to the log file (for storing in AblationRunResult)
-   */
-  saveToolExecLog(runDir: string, logsDir: string, entries: ToolExecLogEntry[], phaseName: string): string {
-    const jsonPath = join(logsDir, 'tool-exec-log.json');
-    const mdPath = join(logsDir, 'tool-exec-log.md');
-
-    writeFileSync(jsonPath, JSON.stringify(entries, null, 2), 'utf-8');
-    writeFileSync(mdPath, this.formatToolExecLogAsMarkdown(entries, phaseName), 'utf-8');
-
-    // Return relative path from runDir
-    const relativePath = logsDir.replace(runDir + '/', '');
-    return `${relativePath}/tool-exec-log.json`;
-  }
-
-  /**
-   * Format tool execution log entries as a human-readable Markdown report.
-   * Follows the same style as chat log markdown (generateMarkdownChat).
-   */
-  private formatToolExecLogAsMarkdown(entries: ToolExecLogEntry[], phaseName: string): string {
-    let md = `# Tool Execution Log\n\n`;
-
-    // Header metadata (same style as chat logs)
-    md += `**Phase:** ${phaseName}\n`;
-    md += `**Generated:** ${new Date().toISOString()}\n`;
-    const hookCount = entries.filter(e => e.isHook).length;
-    const commandCount = entries.length - hookCount;
-    md += `**Total Commands:** ${commandCount}\n`;
-    if (hookCount > 0) {
-      md += `**Hook Executions:** ${hookCount}\n`;
-    }
-
-    const successCount = entries.filter(e => e.success).length;
-    const failCount = entries.length - successCount;
-    md += `**Succeeded:** ${successCount}\n`;
-    if (failCount > 0) {
-      md += `**Failed:** ${failCount}\n`;
-    }
-
-    // Total duration
-    const totalDuration = entries.reduce((sum, e) => sum + e.duration, 0);
-    md += `**Total Duration:** ${this.formatDuration(totalDuration)}\n`;
-
-    md += '\n---\n\n';
-
-    // Tool calls (same style as chat log tool messages)
-    md += '## Execution Log\n\n';
-
-    for (const entry of entries) {
-      const time = new Date(entry.timestamp).toLocaleTimeString();
-      const statusIndicator = entry.success ? '' : ' *Failed*';
-
-      if (entry.isHook) {
-        md += `### Hook → Tool: ${entry.toolName}${statusIndicator}\n\n`;
-        md += `Triggered by: \`${entry.triggeredBy}\` | Duration: ${entry.durationFormatted}\n\n`;
-      } else {
-        md += `### Tool: ${entry.toolName}${statusIndicator}\n\n`;
-        md += `Command ${entry.commandIndex + 1}: \`${entry.command}\` | Duration: ${entry.durationFormatted}\n\n`;
-      }
-
-      // Input (same format as chat logs)
-      md += `**Input (${time}):**\n\`\`\`json\n${JSON.stringify(entry.args, null, 2)}\n\`\`\`\n\n`;
-
-      // Output or error (same format as chat logs)
-      if (entry.error) {
-        const endTime = new Date(new Date(entry.timestamp).getTime() + entry.duration).toLocaleTimeString();
-        md += `**Error (${endTime}):**\n\`\`\`\n${entry.error}\n\`\`\`\n\n`;
-      } else if (entry.displayText) {
-        const endTime = new Date(new Date(entry.timestamp).getTime() + entry.duration).toLocaleTimeString();
-
-        // Try to parse output as JSON for consistent formatting (same as chat logs)
-        let outputFormatted = entry.displayText;
-        let outputLang = '';
-        try {
-          const cleanOutput = entry.displayText.replace(/\u001b\[[0-9;]*m/g, '');
-          const parsed = JSON.parse(cleanOutput);
-          outputFormatted = JSON.stringify(parsed, null, 2);
-          outputLang = 'json';
-        } catch {
-          // Not JSON, use as-is
-        }
-
-        md += `**Output (${endTime}):**\n\`\`\`${outputLang ? ' ' + outputLang : ''}\n${outputFormatted}\n\`\`\`\n\n`;
-      }
-    }
-
-    return md;
+    return join(runDir, modelDir, sanitizeFolderName(phaseName));
   }
 
   /**

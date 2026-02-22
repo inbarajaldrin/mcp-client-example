@@ -76,14 +76,6 @@
       "description": "Results of ablation study execution including per-phase status, tokens, duration, and chat file references"
     },
     {
-      "schema": "tool-exec-log.schema.json",
-      "title": "Tool Execution Log",
-      "filePath": ".mcp-client-data/ablations/runs/.../logs/{phase}/tool-exec-log.json",
-      "io": "output",
-      "format": "json",
-      "description": "Ordered log of tool executions during ablation dry-run phases with timing, success, and hook tracking"
-    },
-    {
       "schema": "tool.schema.json",
       "title": "Tool Definition",
       "filePath": null,

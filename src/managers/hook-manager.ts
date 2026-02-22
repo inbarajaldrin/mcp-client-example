@@ -36,21 +36,49 @@ interface HooksConfig {
  * Also supports temporary ablation hooks loaded during agent-driven ablation phases.
  * Ablation hooks fire even when client hooks are suspended.
  */
+/** Minimal interface for hook logging — avoids circular import of ChatHistoryManager */
+interface HookChatLogger {
+  addHookToolExecution(
+    toolName: string,
+    toolInput: Record<string, any>,
+    toolOutput: string,
+    hookTrigger: {
+      type: 'before' | 'after' | 'on-start';
+      triggerTool?: string;
+      action: 'tool-exec' | 'tool-inject';
+      whenOutput?: Record<string, unknown>;
+      whenInput?: Record<string, unknown>;
+    },
+  ): void;
+  addPhaseEvent(
+    type: 'phase-start' | 'phase-complete' | 'phase-abort',
+    phaseName: string,
+    trigger?: { after?: string; whenOutput?: Record<string, unknown> },
+  ): void;
+}
+
 export class HookManager {
   private logger: Logger;
   private hooks: ClientHook[] = [];
   private executing: boolean = false;
   private suspended: boolean = false;
+  private chatLogger?: HookChatLogger;
 
   // Ablation hook support: temporary hooks loaded from ablation YAML during agent-driven phases
   private ablationHooks: ClientHook[] = [];
   private currentPhaseName: string = '';
   private phaseCompleteRequested: boolean = false;
   private abortRunRequested: boolean = false;
+  private pendingToolInjection: boolean = false;
 
   constructor(logger?: Logger) {
     this.logger = logger || new Logger({ mode: 'verbose' });
     this.loadHooks();
+  }
+
+  /** Set the chat history logger for recording hook executions */
+  setChatLogger(chatLogger: HookChatLogger): void {
+    this.chatLogger = chatLogger;
   }
 
   // ==================== Config CRUD ====================
@@ -178,7 +206,7 @@ export class HookManager {
   isPhaseCompleteRequested(): boolean { return this.phaseCompleteRequested; }
 
   /** Reset phase complete flag for the next phase */
-  resetPhaseComplete(): void { this.phaseCompleteRequested = false; }
+  resetPhaseComplete(): void { this.phaseCompleteRequested = false; this.pendingToolInjection = false; }
 
   // ==================== Abort Run Signaling ====================
 
@@ -191,6 +219,14 @@ export class HookManager {
   /** Reset abort run flag */
   resetAbortRun(): void { this.abortRunRequested = false; }
 
+  // ==================== Pending Tool Injection Signaling ====================
+
+  /** Check if a @tool: hook matched and is pending injection */
+  hasPendingInjection(): boolean { return this.pendingToolInjection; }
+
+  /** Reset pending injection flag after deferred hooks have fired */
+  resetPendingInjection(): void { this.pendingToolInjection = false; }
+
   // ==================== Runtime Hook Execution ====================
 
   /** Whether hook execution is currently in progress (recursion guard) */
@@ -201,7 +237,12 @@ export class HookManager {
    * and regular tool execution hooks.
    * Returns true if the hook was a special command (no tool execution needed).
    */
-  private handleSpecialCommand(run: string): boolean {
+  private handleSpecialCommand(
+    run: string,
+    triggerTool?: string,
+    whenOutput?: Record<string, unknown>,
+    whenInput?: Record<string, unknown>,
+  ): boolean {
     const trimmed = run.trim();
 
     // @complete-phase or @complete-phase:phase_name
@@ -214,6 +255,10 @@ export class HookManager {
       const label = phaseName || this.currentPhaseName || 'current';
       this.logger.log(`[Hook complete-phase: ending phase "${label}"]\n`, { type: 'info' });
       this.phaseCompleteRequested = true;
+      this.chatLogger?.addPhaseEvent('phase-complete', label, {
+        after: triggerTool,
+        whenOutput,
+      });
       return true;
     }
 
@@ -221,6 +266,10 @@ export class HookManager {
     if (trimmed === '@abort') {
       this.logger.log(`[Hook abort: skipping remaining phases for current model]\n`, { type: 'warning' });
       this.abortRunRequested = true;
+      this.chatLogger?.addPhaseEvent('phase-abort', this.currentPhaseName || 'unknown', {
+        after: triggerTool,
+        whenOutput,
+      });
       return true;
     }
 
@@ -250,7 +299,7 @@ export class HookManager {
       if (!hook.whenInput) continue;
       if (!matchesWhenInputCondition(hook.whenInput, toolInput)) continue;
       // Only fire special commands early; regular tool-exec hooks still wait for completion
-      if (this.handleSpecialCommand(hook.run)) {
+      if (this.handleSpecialCommand(hook.run, toolName, undefined, hook.whenInput as Record<string, unknown>)) {
         triggered = true;
       }
     }
@@ -297,7 +346,7 @@ export class HookManager {
         }
 
         // Special commands (@complete-phase, @abort) always fire immediately for cancellation
-        if (this.handleSpecialCommand(hook.run)) {
+        if (this.handleSpecialCommand(hook.run, toolName, hook.whenOutput as Record<string, unknown>, hook.whenInput as Record<string, unknown>)) {
           continue;
         }
 
@@ -307,8 +356,12 @@ export class HookManager {
           continue;
         }
 
-        // Defer @tool: hooks (injecting) — agent can't see injections mid-stream anyway
-        if (parsed.injectResult) continue;
+        // Defer @tool: hooks (injecting) — signal provider to stop so injection
+        // can happen before the model continues its response.
+        if (parsed.injectResult) {
+          this.pendingToolInjection = true;
+          continue;
+        }
 
         // Defer conditional @tool-exec: hooks — fire after agent response for consistency
         if (hook.whenInput || hook.whenOutput) continue;
@@ -316,8 +369,13 @@ export class HookManager {
         this.logger.log(`[Hook triggered: ${parsed.toolName}]\n`, { type: 'info' });
 
         try {
-          await executeTool(parsed.toolName, parsed.args);
+          const hookResult = await executeTool(parsed.toolName, parsed.args);
           this.logger.log(`[Hook completed: ${parsed.toolName}]\n`, { type: 'info' });
+          this.chatLogger?.addHookToolExecution(parsed.toolName, parsed.args, hookResult.displayText, {
+            type: 'after',
+            triggerTool: toolName,
+            action: 'tool-exec',
+          });
         } catch (error: any) {
           this.logger.log(`[Hook failed: ${error.message}]\n`, { type: 'warning' });
         }
@@ -393,17 +451,23 @@ export class HookManager {
 
           try {
             const hookToolResult = await executeTool(parsed.toolName, parsed.args);
-            if (
-              parsed.injectResult &&
+            const isInjection = parsed.injectResult &&
               injectToolResult &&
               hookToolResult.contentBlocks &&
-              hookToolResult.contentBlocks.length > 0
-            ) {
+              hookToolResult.contentBlocks.length > 0;
+            if (isInjection) {
               injectToolResult(parsed.toolName, parsed.args, hookToolResult);
               hasInjections = true;
               this.logger.log(`[Hook result injected into context]\n`, { type: 'info' });
             }
             this.logger.log(`[Hook completed: ${parsed.toolName}]\n`, { type: 'info' });
+            this.chatLogger?.addHookToolExecution(parsed.toolName, parsed.args, hookToolResult.displayText, {
+              type: 'after',
+              triggerTool: completion.toolName,
+              action: isInjection ? 'tool-inject' : 'tool-exec',
+              ...(hook.whenOutput && { whenOutput: hook.whenOutput as Record<string, unknown> }),
+              ...(hook.whenInput && { whenInput: hook.whenInput as Record<string, unknown> }),
+            });
           } catch (error: any) {
             this.logger.log(`[Hook failed: ${error.message}]\n`, { type: 'warning' });
           }
@@ -441,7 +505,7 @@ export class HookManager {
         if (hook.before !== toolName) continue;
 
         // Handle special commands
-        if (this.handleSpecialCommand(hook.run)) {
+        if (this.handleSpecialCommand(hook.run, toolName)) {
           continue;
         }
 
@@ -454,8 +518,13 @@ export class HookManager {
         this.logger.log(`[Hook before-trigger: ${parsed.toolName}]\n`, { type: 'info' });
 
         try {
-          await executeTool(parsed.toolName, parsed.args);
+          const hookResult = await executeTool(parsed.toolName, parsed.args);
           this.logger.log(`[Hook before-completed: ${parsed.toolName}]\n`, { type: 'info' });
+          this.chatLogger?.addHookToolExecution(parsed.toolName, parsed.args, hookResult.displayText, {
+            type: 'before',
+            triggerTool: toolName,
+            action: 'tool-exec',
+          });
         } catch (error: any) {
           this.logger.log(`[Hook before-failed: ${error.message}]\n`, { type: 'warning' });
         }

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "ablation-run.schema.json",
   "title": "AblationRun",
-  "description": "Ablation run summary stored at .mcp-client-data/ablations/runs/YYYY-MM-DD/{ablation-name}/{timestamp}/summary.json",
+  "description": "Ablation run summary stored at .mcp-client-data/ablations/runs/{ablation-name}/{timestamp}/summary.json",
   "type": "object",
   "required": ["ablationName", "startedAt", "results"],
   "properties": {
@@ -46,7 +46,6 @@
         "duration": { "type": "number", "description": "Duration in milliseconds" },
         "durationFormatted": { "type": "string" },
         "chatFile": { "type": "string", "description": "Path to the chat session JSON for this result" },
-        "logFile": { "type": "string", "description": "Path to tool-exec log JSON (dry-run mode)" },
         "error": { "type": "string", "description": "Error message if status is failed" }
       }
     }

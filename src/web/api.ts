@@ -1173,7 +1173,7 @@ export function createApiRouter(client: MCPClient): Router {
     let currentAblationDef: any = null;
     let currentPhaseName: string = '';
 
-    const execCmd = async (command: string, dryRun: boolean) => {
+    const execCmd = async (command: string, dryRun: boolean, hookType: 'on-start' | 'before' | 'after' = 'before') => {
       const trimmed = command.trim();
 
       // @abort — signal to skip remaining phases for current model
@@ -1190,6 +1190,11 @@ export function createApiRouter(client: MCPClient): Router {
         if (parsed.inject && result.contentBlocks?.length > 0) {
           client.injectToolResult(parsed.toolName, parsed.args, result);
         }
+        // Log tool execution to chat history
+        client.getChatHistoryManager().addHookToolExecution(
+          parsed.toolName, parsed.args as Record<string, any>, result.displayText || '',
+          { type: hookType, action: parsed.inject ? 'tool-inject' : 'tool-exec' },
+        );
         return;
       }
 
@@ -1229,7 +1234,8 @@ export function createApiRouter(client: MCPClient): Router {
       }
 
       try {
-        await client.processQuery(trimmed, false, undefined, () => ablationCancelRequested || hm.isPhaseCompleteRequested());
+        client.getChatHistoryManager().addUserMessage(trimmed);
+        await client.processQuery(trimmed, false, undefined, () => ablationCancelRequested || hm.isPhaseCompleteRequested() || hm.hasPendingInjection());
       } finally {
         if (ablHooksLoaded) hm.clearAblationHooks();
       }
@@ -1249,8 +1255,9 @@ export function createApiRouter(client: MCPClient): Router {
       const originalThinkingLevel = prefs.getThinkingLevel();
       const savedState = client.saveState();
 
-      // Create run directory
+      // Create run directory and save definition snapshot for provenance
       const { runDir } = ablationManager.createRunDirectory(ablationName);
+      ablationManager.saveDefinitionSnapshot(runDir, ablation);
       ablationManager.stashOutputs(runDir);
 
       // Substitute arguments
@@ -1310,7 +1317,7 @@ export function createApiRouter(client: MCPClient): Router {
               }
             }
 
-            ablationManager.createPhaseDirectory(runDir, phase.name, hasMultiIter ? iteration : undefined);
+            ablationManager.createPhaseDirectory(runDir, model, phase.name, hasMultiIter ? iteration : undefined);
 
             runNumber++;
 
@@ -1329,11 +1336,14 @@ export function createApiRouter(client: MCPClient): Router {
               currentAblationDef = ablation;
               currentPhaseName = phase.name;
 
+              // Log phase-start event to chat history
+              client.getChatHistoryManager().addPhaseEvent('phase-start', phase.name);
+
               // Execute onStart hooks
               if (phaseOnStart) {
                 for (const cmd of phaseOnStart) {
                   if (ablationCancelRequested) break;
-                  await execCmd(cmd, ablation.dryRun || false);
+                  await execCmd(cmd, ablation.dryRun || false, 'on-start');
                 }
               }
 
@@ -1363,9 +1373,14 @@ export function createApiRouter(client: MCPClient): Router {
 
               if (ablationCancelRequested) {
                 result.status = 'aborted';
+                client.getChatHistoryManager().addPhaseEvent('phase-abort', phase.name);
                 shouldBreak = true;
               } else {
                 result.status = 'completed';
+                // Log implicit phase completion if not already logged by @complete-phase hook
+                if (!phaseCompleted) {
+                  client.getChatHistoryManager().addPhaseEvent('phase-abort', phase.name, { after: 'agent-stopped' });
+                }
                 if (!ablation.dryRun) {
                   result.tokens = client.getTokenUsage().current;
                 }
@@ -1374,6 +1389,7 @@ export function createApiRouter(client: MCPClient): Router {
               if (err instanceof AbortRunSignal) {
                 // @abort: skip remaining phases for this model
                 result.status = 'aborted';
+                client.getChatHistoryManager().addPhaseEvent('phase-abort', phase.name);
                 modelAborted = true;
               } else {
                 result.status = 'failed';
@@ -1412,8 +1428,6 @@ export function createApiRouter(client: MCPClient): Router {
           }
         }
 
-        // Capture iteration outputs (final sweep)
-        ablationManager.captureIterationOutputs(runDir, hasMultiIter ? iteration : undefined);
       }
 
       // Save run results

@@ -142,6 +142,38 @@
         "isIPCCall": {
           "type": "boolean",
           "description": "Whether this tool call was made by orchestrator code via IPC (a child call). These messages are logged to chat history but not sent to the LLM context. To find the parent, find the execute_composed_code message whose [toolInputTime, toolOutputTime] window contains this message's toolInputTime. See OrchestratorWorkflow."
+        },
+        "isHookCall": {
+          "type": "boolean",
+          "description": "Whether this tool call was triggered by a hook (@tool-exec:, @tool:, or onStart). Hook calls are not initiated by the LLM and are not counted in toolUseCount. Similar to isIPCCall but for hook-driven executions."
+        },
+        "hookTrigger": {
+          "type": "object",
+          "description": "Metadata about the hook that triggered this tool execution or event. Present on tool messages with isHookCall=true and on client messages for @tool: injections.",
+          "properties": {
+            "type": { "type": "string", "enum": ["before", "after", "on-start"], "description": "When the hook fires relative to the triggering tool" },
+            "triggerTool": { "type": "string", "description": "The tool whose execution triggered this hook (e.g. 'ros-mcp-server__verify_assembly')" },
+            "action": { "type": "string", "enum": ["tool-exec", "tool-inject"], "description": "Whether the hook executed silently (tool-exec) or injected results into LLM context (tool-inject)" },
+            "whenOutput": { "type": "object", "description": "The whenOutput condition that matched", "additionalProperties": true },
+            "whenInput": { "type": "object", "description": "The whenInput condition that matched", "additionalProperties": true }
+          }
+        },
+        "phaseEvent": {
+          "type": "object",
+          "description": "Phase lifecycle event data. Present on client role messages that mark phase boundaries during ablation runs.",
+          "required": ["type", "phaseName"],
+          "properties": {
+            "type": { "type": "string", "enum": ["phase-start", "phase-complete", "phase-abort"] },
+            "phaseName": { "type": "string" },
+            "trigger": {
+              "type": "object",
+              "description": "What triggered this phase event (for complete/abort)",
+              "properties": {
+                "after": { "type": "string", "description": "Tool name whose hook triggered this event" },
+                "whenOutput": { "type": "object", "additionalProperties": true }
+              }
+            }
+          }
         }
       }
     },
