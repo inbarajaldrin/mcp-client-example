@@ -185,28 +185,73 @@ export class PromptCLI {
 
         for (const arg of prompt.arguments) {
           const required = arg.required !== false; // Default to required if not specified
-          const defaultValue = required
+          const optionalHint = required
             ? ''
             : ' (optional, press Enter to skip)';
 
-          this.logger.log(
-            `  ${arg.name}${arg.description ? ` - ${arg.description}` : ''}${defaultValue}:\n`,
-            { type: 'info' },
-          );
+          // Check for embedded JSON schema with enum (e.g. from FastMCP Literal types)
+          const enumOptions = this.extractEnumFromDescription(arg.description);
 
-          const value = (await rl.question('  > ')).trim();
-
-          if (required && !value) {
+          if (enumOptions && enumOptions.length > 0) {
+            // Show dropdown-style selection for enum/Literal arguments
+            const cleanDescription = this.getCleanDescription(arg.description);
             this.logger.log(
-              `\n⚠️ Required argument "${arg.name}" is missing. Skipping this prompt.\n`,
-              { type: 'warning' },
+              `  ${arg.name}${cleanDescription ? ` - ${cleanDescription}` : ''}${optionalHint}:\n`,
+              { type: 'info' },
             );
-            promptArgs = {}; // Clear args to skip this prompt
-            break;
-          }
+            this.logger.log('  Options:\n', { type: 'info' });
+            enumOptions.forEach((opt, idx) => {
+              this.logger.log(`    ${idx + 1}. ${opt}\n`, { type: 'info' });
+            });
 
-          if (value) {
-            promptArgs[arg.name] = value;
+            const value = (await rl.question('  Select (number or value): ')).trim();
+
+            if (required && !value) {
+              this.logger.log(
+                `\n⚠️ Required argument "${arg.name}" is missing. Skipping this prompt.\n`,
+                { type: 'warning' },
+              );
+              promptArgs = {};
+              break;
+            }
+
+            if (value) {
+              // Try as number first
+              const num = parseInt(value, 10);
+              if (!isNaN(num) && num >= 1 && num <= enumOptions.length) {
+                promptArgs[arg.name] = enumOptions[num - 1];
+              } else if (enumOptions.includes(value)) {
+                promptArgs[arg.name] = value;
+              } else {
+                this.logger.log(
+                  `\n⚠️ Invalid selection "${value}" for "${arg.name}". Skipping this prompt.\n`,
+                  { type: 'warning' },
+                );
+                promptArgs = {};
+                break;
+              }
+            }
+          } else {
+            // Free-text input for regular arguments
+            this.logger.log(
+              `  ${arg.name}${arg.description ? ` - ${arg.description}` : ''}${optionalHint}:\n`,
+              { type: 'info' },
+            );
+
+            const value = (await rl.question('  > ')).trim();
+
+            if (required && !value) {
+              this.logger.log(
+                `\n⚠️ Required argument "${arg.name}" is missing. Skipping this prompt.\n`,
+                { type: 'warning' },
+              );
+              promptArgs = {};
+              break;
+            }
+
+            if (value) {
+              promptArgs[arg.name] = value;
+            }
           }
         }
       }
@@ -561,5 +606,41 @@ export class PromptCLI {
       });
       await new Promise((resolve) => setTimeout(resolve, 1000));
     }
+  }
+
+  /**
+   * Extract enum options from a prompt argument description.
+   * FastMCP embeds Literal type schemas in the description like:
+   * "Description\n\nProvide as a JSON string matching the following schema: {\"enum\":[\"sim\",\"real\"],\"type\":\"string\"}"
+   */
+  private extractEnumFromDescription(description?: string): string[] | null {
+    if (!description) return null;
+
+    const schemaMatch = description.match(
+      /Provide as a JSON string matching the following schema:\s*({.+})\s*$/,
+    );
+    if (!schemaMatch) return null;
+
+    try {
+      const schema = JSON.parse(schemaMatch[1]);
+      if (schema.enum && Array.isArray(schema.enum) && schema.enum.length > 0) {
+        return schema.enum;
+      }
+    } catch {
+      // Invalid JSON in description, fall through
+    }
+
+    return null;
+  }
+
+  /**
+   * Get the clean description without the embedded JSON schema suffix.
+   */
+  private getCleanDescription(description?: string): string {
+    if (!description) return '';
+    return description.replace(
+      /\n\nProvide as a JSON string matching the following schema:\s*{.+}\s*$/,
+      '',
+    ).trim();
   }
 }
