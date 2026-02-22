@@ -48,6 +48,7 @@ import type { ModelProvider } from '../model-provider.js';
 import type { ToolCLI } from './tool-cli.js';
 import type { PromptCLI } from './prompt-cli.js';
 import type { AttachmentCLI } from './attachment-cli.js';
+import { isReasoningModel, getThinkingLevelsForProvider } from '../utils/model-capabilities.js';
 
 /**
  * Format milliseconds as human-readable duration (e.g. "4m 5s", "1h 23m 45s")
@@ -345,10 +346,12 @@ export class AblationCLI {
                 discoveredModels.length,
               );
               for (const idx of discoverIndices) {
-                models.push({
+                const m: AblationModel = {
                   provider: provider.name,
                   model: discoveredModels[idx - 1].id,
-                });
+                };
+                models.push(m);
+                await this.promptForThinking(m);
               }
             }
           } else if (modelIdx === provider.models.length + 1) {
@@ -357,13 +360,17 @@ export class AblationCLI {
               await rl.question('  Enter custom model name: ')
             ).trim();
             if (customModel) {
-              models.push({ provider: provider.name, model: customModel });
+              const m: AblationModel = { provider: provider.name, model: customModel };
+              models.push(m);
+              await this.promptForThinking(m);
             }
           } else {
-            models.push({
+            const m: AblationModel = {
               provider: provider.name,
               model: provider.models[modelIdx - 1],
-            });
+            };
+            models.push(m);
+            await this.promptForThinking(m);
           }
         }
       }
@@ -941,7 +948,8 @@ export class AblationCLI {
         type: 'info',
       });
       for (const model of ablation.models) {
-        this.logger.log(`    • ${model.provider}/${model.model}\n`, {
+        const thinkingInfo = model.thinking ? ` [thinking: ${model.thinking}]` : '';
+        this.logger.log(`    • ${model.provider}/${model.model}${thinkingInfo}\n`, {
           type: 'info',
         });
       }
@@ -1146,7 +1154,8 @@ export class AblationCLI {
       this.logger.log('    8. Edit MCP config path\n', { type: 'info' });
       this.logger.log('    9. Edit hooks\n', { type: 'info' });
       this.logger.log('   10. Edit arguments\n', { type: 'info' });
-      this.logger.log('   11. Done\n', { type: 'info' });
+      this.logger.log('   11. Edit model thinking\n', { type: 'info' });
+      this.logger.log('   12. Done\n', { type: 'info' });
 
       const choice = (await rl.question('\n  Select option: ')).trim();
 
@@ -1181,7 +1190,10 @@ export class AblationCLI {
         case '10': // Edit arguments
           await this.handleEditArguments(ablation.name);
           break;
-        case '11': // Done
+        case '11': // Edit model thinking
+          await this.handleEditModelThinking(ablation.name);
+          break;
+        case '12': // Done
         case 'q':
           const updated = this.ablationManager.load(ablation.name);
           if (updated) {
@@ -1851,9 +1863,11 @@ export class AblationCLI {
       }
     }
 
-    // Save original provider/model and chat state to restore after all ablations
+    // Save original provider/model, thinking, and chat state to restore after all ablations
     const originalProviderName = this.client.getProviderName();
     const originalModel = this.client.getModel();
+    const originalThinkingEnabled = this.preferencesManager.getThinkingEnabled();
+    const originalThinkingLevel = this.preferencesManager.getThinkingLevel();
     const savedState = this.client.saveState();
     const hasConversation = savedState.messages.length > 0;
     if (hasConversation) {
@@ -1930,6 +1944,10 @@ export class AblationCLI {
       this.preferencesManager.setHILEnabled(originalHILState);
       this.logger.log('  ✓ Restored human-in-the-loop to original state\n', { type: 'success' });
     }
+
+    // Restore thinking state
+    this.preferencesManager.setThinkingEnabled(originalThinkingEnabled);
+    this.preferencesManager.setThinkingLevel(originalThinkingLevel);
   }
 
   /**
@@ -2259,6 +2277,15 @@ export class AblationCLI {
         if (!ablation.dryRun) {
           const provider = this.createProviderInstance(model.provider);
           await this.client.switchProviderAndModel(provider, model.model);
+
+          // Apply per-model thinking config (off by default unless specified)
+          if (model.thinking) {
+            this.preferencesManager.setThinkingEnabled(true);
+            this.preferencesManager.setThinkingLevel(model.thinking);
+          } else {
+            this.preferencesManager.setThinkingEnabled(false);
+            this.preferencesManager.setThinkingLevel(undefined);
+          }
         }
 
         let modelAborted = false;
@@ -2277,8 +2304,9 @@ export class AblationCLI {
             `│  RUN ${runNumber}/${totalRuns}: ${modelShortName}${iterationSuffix}\n`,
             { type: 'info' },
           );
+          const thinkingStatus = model.thinking ? ` │ Thinking: ${model.thinking}` : '';
           this.logger.log(
-            `│  Provider: ${model.provider} │ Model: ${model.model}\n`,
+            `│  Provider: ${model.provider} │ Model: ${model.model}${thinkingStatus}\n`,
             { type: 'info' },
           );
           this.logger.log(
@@ -3274,6 +3302,50 @@ export class AblationCLI {
     }
   }
 
+  /**
+   * Prompt user for thinking level for a model, if the model supports reasoning.
+   * Mutates the model in-place to set the thinking field.
+   * Mirrors the /set-thinking on flow from cli-client.ts.
+   */
+  private async promptForThinking(model: AblationModel): Promise<void> {
+    const rl = this.callbacks.getReadline();
+    if (!rl) return;
+
+    if (!isReasoningModel(model.model, model.provider)) {
+      return;
+    }
+
+    const levels = getThinkingLevelsForProvider(model.provider);
+    if (levels.length === 0) return;
+
+    const enableThinking = (
+      await rl.question(`    Enable thinking for ${model.provider}/${model.model}? (y/N): `)
+    ).trim().toLowerCase();
+
+    if (enableThinking !== 'y' && enableThinking !== 'yes') {
+      return;
+    }
+
+    if (levels.length === 1) {
+      model.thinking = levels[0].value;
+      this.logger.log(`    ✓ Thinking: ${levels[0].value}\n`, { type: 'success' });
+    } else {
+      this.logger.log(`    Select thinking level:\n`, { type: 'info' });
+      for (let i = 0; i < levels.length; i++) {
+        this.logger.log(`      ${i + 1}. ${levels[i].label}\n`, { type: 'info' });
+      }
+
+      const answer = (await rl.question('    Enter selection: ')).trim();
+      const selection = parseInt(answer, 10);
+      if (selection >= 1 && selection <= levels.length) {
+        model.thinking = levels[selection - 1].value;
+        this.logger.log(`    ✓ Thinking: ${levels[selection - 1].value}\n`, { type: 'success' });
+      } else {
+        this.logger.log('    Invalid selection. Thinking disabled for this model.\n', { type: 'warning' });
+      }
+    }
+  }
+
   private async handleAddModels(ablationName: string): Promise<void> {
     const rl = this.callbacks.getReadline();
     if (!rl) return;
@@ -3321,13 +3393,17 @@ export class AblationCLI {
           await rl.question('  Enter custom model: ')
         ).trim();
         if (customModel) {
-          modelsToAdd.push({ provider: provider.name, model: customModel });
+          const m: AblationModel = { provider: provider.name, model: customModel };
+          await this.promptForThinking(m);
+          modelsToAdd.push(m);
         }
       } else {
-        modelsToAdd.push({
+        const m: AblationModel = {
           provider: provider.name,
           model: provider.models[idx - 1],
-        });
+        };
+        await this.promptForThinking(m);
+        modelsToAdd.push(m);
       }
     }
 
@@ -3385,6 +3461,71 @@ export class AblationCLI {
     } else if (modelsToRemove.length >= ablation.models.length) {
       this.logger.log('\n✗ Cannot remove all models.\n', { type: 'error' });
     }
+  }
+
+  private async handleEditModelThinking(ablationName: string): Promise<void> {
+    const rl = this.callbacks.getReadline();
+    if (!rl) return;
+
+    const ablation = this.ablationManager.load(ablationName);
+    if (!ablation || ablation.models.length === 0) {
+      this.logger.log('\n  No models to configure.\n', { type: 'error' });
+      return;
+    }
+
+    this.logger.log('\n  Current model thinking configuration:\n', { type: 'info' });
+    for (let i = 0; i < ablation.models.length; i++) {
+      const m = ablation.models[i];
+      const thinkingStatus = m.thinking ? `thinking: ${m.thinking}` : 'thinking: off';
+      const supportsThinking = isReasoningModel(m.model, m.provider);
+      const supportInfo = supportsThinking ? '' : ' (not a reasoning model)';
+      this.logger.log(`    ${i + 1}. ${m.provider}/${m.model} [${thinkingStatus}]${supportInfo}\n`, { type: 'info' });
+    }
+
+    const selection = (await rl.question('\n  Select model to configure (or "q" to cancel): ')).trim();
+    if (selection.toLowerCase() === 'q') return;
+
+    const idx = parseInt(selection) - 1;
+    if (isNaN(idx) || idx < 0 || idx >= ablation.models.length) {
+      this.logger.log('\n  Invalid selection.\n', { type: 'error' });
+      return;
+    }
+
+    const model = ablation.models[idx];
+
+    if (!isReasoningModel(model.model, model.provider)) {
+      this.logger.log(`\n  ${model.model} does not support thinking/reasoning.\n`, { type: 'warning' });
+      return;
+    }
+
+    const levels = getThinkingLevelsForProvider(model.provider);
+    if (levels.length === 0) {
+      this.logger.log('\n  No thinking levels available for this provider.\n', { type: 'warning' });
+      return;
+    }
+
+    this.logger.log(`\n  Select thinking level for ${model.provider}/${model.model}:\n`, { type: 'info' });
+    this.logger.log(`    0. Off (disable thinking)\n`, { type: 'info' });
+    for (let i = 0; i < levels.length; i++) {
+      this.logger.log(`    ${i + 1}. ${levels[i].label}\n`, { type: 'info' });
+    }
+
+    const answer = (await rl.question('\n  Enter selection: ')).trim();
+    const levelIdx = parseInt(answer, 10);
+
+    if (levelIdx === 0) {
+      delete model.thinking;
+      this.logger.log('\n  ✓ Thinking disabled for this model.\n', { type: 'success' });
+    } else if (levelIdx >= 1 && levelIdx <= levels.length) {
+      model.thinking = levels[levelIdx - 1].value;
+      this.logger.log(`\n  ✓ Thinking set to: ${model.thinking}\n`, { type: 'success' });
+    } else {
+      this.logger.log('\n  Invalid selection.\n', { type: 'error' });
+      return;
+    }
+
+    ablation.updated = new Date().toISOString();
+    this.ablationManager.save(ablation);
   }
 
   private async handleEditSettings(ablationName: string): Promise<void> {

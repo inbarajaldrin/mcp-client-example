@@ -18,6 +18,7 @@ const ATTACHMENTS_DIR = join(__dirname, '../..', '.mcp-client-data', 'attachment
 export interface AblationModel {
   provider: string;
   model: string;
+  thinking?: string;  // Provider-specific thinking level. Absent = thinking off.
 }
 
 export interface PostToolHook {

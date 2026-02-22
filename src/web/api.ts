@@ -1244,6 +1244,9 @@ export function createApiRouter(client: MCPClient): Router {
       // Save current state
       const originalProviderName = client.getProviderName();
       const originalModel = client.getModel();
+      const prefs = client.getPreferencesManager();
+      const originalThinkingEnabled = prefs.getThinkingEnabled();
+      const originalThinkingLevel = prefs.getThinkingLevel();
       const savedState = client.saveState();
 
       // Create run directory
@@ -1283,6 +1286,15 @@ export function createApiRouter(client: MCPClient): Router {
             const provider = createProvider(model.provider);
             if (!provider) throw new Error(`Unknown provider: ${model.provider}`);
             await client.switchProviderAndModel(provider, model.model);
+
+            // Apply per-model thinking config (off by default unless specified)
+            if ((model as any).thinking) {
+              prefs.setThinkingEnabled(true);
+              prefs.setThinkingLevel((model as any).thinking);
+            } else {
+              prefs.setThinkingEnabled(false);
+              prefs.setThinkingLevel(undefined);
+            }
           }
 
           let modelAborted = false;
@@ -1423,6 +1435,8 @@ export function createApiRouter(client: MCPClient): Router {
       try {
         const originalProvider = createProvider(originalProviderName);
         await client.restoreState(savedState, originalProvider, originalModel);
+        prefs.setThinkingEnabled(originalThinkingEnabled);
+        prefs.setThinkingLevel(originalThinkingLevel);
       } catch { /* best effort */ }
 
       send({ type: 'done', summary: run });

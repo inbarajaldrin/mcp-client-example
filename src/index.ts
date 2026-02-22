@@ -604,6 +604,15 @@ export class MCPClient {
       delete process.env.MCP_CLIENT_IPC_URL;
     }
 
+    // Unload model from memory if provider supports it (e.g., Ollama)
+    if (this.modelProvider.unloadModel) {
+      try {
+        await this.modelProvider.unloadModel(this.model);
+      } catch {
+        // Best-effort during shutdown
+      }
+    }
+
     // Cleanup ROS2 video recording (in case it wasn't called earlier)
     await this.cleanupVideoRecording();
 
@@ -1384,6 +1393,11 @@ export class MCPClient {
    * This clears the context and reinitializes the token counter
    */
   async switchProviderAndModel(provider: ModelProvider, model: string): Promise<void> {
+    // Unload previous model from memory if provider supports it (e.g., Ollama)
+    if (this.modelProvider.unloadModel) {
+      await this.modelProvider.unloadModel(this.model);
+    }
+
     // Update provider and model
     this.modelProvider = provider;
     this.model = model;

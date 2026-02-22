@@ -135,5 +135,8 @@ export interface ModelProvider {
 
   // Set thinking/reasoning configuration for subsequent API calls
   setThinkingConfig?(config: ThinkingConfig): void;
+
+  // Unload a model from memory (e.g., Ollama keep_alive: 0)
+  unloadModel?(model: string): Promise<void>;
 }
 

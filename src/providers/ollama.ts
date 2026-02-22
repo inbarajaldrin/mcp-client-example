@@ -23,13 +23,13 @@ import type {
 export const PROVIDER_INFO = {
   name: 'ollama',
   label: 'Ollama (Local LLMs)',
-  defaultModel: 'llama3.2:3b',
-  models: ['llama3.2:3b', 'llama3.1:8b', 'mistral:7b'],
+  defaultModel: 'qwen3:8b',
+  models: ['qwen3:8b'],
 };
 
 // Default Ollama host
 const DEFAULT_OLLAMA_HOST = 'http://localhost:11434';
-const DEFAULT_MODEL = 'llama3.2:3b';
+const DEFAULT_MODEL = 'qwen3:8b';
 
 // Default max context window to prevent OOM errors
 // Can be overridden with OLLAMA_MAX_CONTEXT environment variable
@@ -180,6 +180,14 @@ export class OllamaProvider implements ModelProvider {
     this.thinkingConfig = config;
   }
 
+  async unloadModel(model: string): Promise<void> {
+    try {
+      await this.ollamaClient.chat({ model, messages: [], keep_alive: 0 });
+    } catch {
+      // Best-effort: server may already be down or model not loaded
+    }
+  }
+
   getProviderName(): string {
     return 'ollama';
   }
@@ -231,6 +239,42 @@ export class OllamaProvider implements ModelProvider {
     } catch {
       return false;
     }
+  }
+
+  /**
+   * Check if a model supports thinking from the capabilities cache (synchronous).
+   * Returns true if fetchModelInfo has been called and the model has 'thinking'.
+   */
+  private modelHasThinkingCapability(model: string): boolean {
+    return this.modelCapabilitiesCache.get(model)?.includes('thinking') ?? false;
+  }
+
+  /**
+   * Remove thinking from a model's capabilities cache after a fallback.
+   * Prevents retrying think:true on subsequent turns within the same session.
+   */
+  private disableThinkingCapability(model: string): void {
+    const caps = this.modelCapabilitiesCache.get(model);
+    if (caps) {
+      this.modelCapabilitiesCache.set(model, caps.filter(c => c !== 'thinking'));
+    }
+  }
+
+  /**
+   * Determine whether to send think:true for this model.
+   *
+   * Models with the 'thinking' capability (Qwen3, DeepSeek-R1, etc.) think
+   * regardless of the think parameter. The parameter only controls whether
+   * thinking is routed to the structured message.thinking field (think:true)
+   * or leaked as raw <think> tags in message.content (think:false/omitted).
+   *
+   * Suppressing thinking via think:false or /no_think is unreliable
+   * (see https://github.com/ollama/ollama/issues/12917), so we always
+   * route thinking properly for capable models.
+   */
+  private shouldEnableThinkParam(model: string): boolean {
+    if (this.thinkingConfig?.enabled) return true;
+    return this.modelHasThinkingCapability(model);
   }
 
   /**
@@ -426,14 +470,17 @@ export class OllamaProvider implements ModelProvider {
         return {
           role: 'assistant',
           content: msg.content || '',
+          // Preserve thinking in history so the model retains its prior reasoning
+          // and doesn't re-derive from scratch on every turn (see ollama-python#533)
+          ...((msg as any).thinking && { thinking: (msg as any).thinking }),
           tool_calls: msg.tool_calls.map((tc) => ({
             id: tc.id,
             type: 'function',
             function: {
               name: tc.name,
               // Ollama expects arguments as an object, not a string
-              arguments: typeof tc.arguments === 'string' 
-                ? JSON.parse(tc.arguments) 
+              arguments: typeof tc.arguments === 'string'
+                ? JSON.parse(tc.arguments)
                 : tc.arguments,
             },
           })),
@@ -471,6 +518,10 @@ export class OllamaProvider implements ModelProvider {
         role: msg.role,
         content: msg.content || '',
       };
+      // Preserve thinking in history for assistant messages without tool_calls
+      if (msg.role === 'assistant' && (msg as any).thinking) {
+        result.thinking = (msg as any).thinking;
+      }
       // Preserve images field (e.g. from tool result image injection)
       if ((msg as any).images) {
         result.images = (msg as any).images;
@@ -544,13 +595,32 @@ export class OllamaProvider implements ModelProvider {
       num_ctx: contextWindow,
     };
 
-    const stream = await this.ollamaClient.chat({
+    const chatParams: any = {
       model,
       messages: ollamaMessages,
       tools: ollamaTools,
       stream: true,
       options,
-    });
+    };
+    if (this.shouldEnableThinkParam(model)) {
+      chatParams.think = true;
+    }
+
+    let stream;
+    try {
+      stream = await this.ollamaClient.chat(chatParams);
+    } catch (error: any) {
+      // Only retry without think for parameter-related errors (400s), not server crashes
+      const statusCode = error?.status_code || error?.statusCode;
+      const isServerError = statusCode >= 500 || /\b(EOF|ECONNREFUSED|ECONNRESET|ETIMEDOUT)\b/.test(error?.message || '');
+      if (chatParams.think && !isServerError) {
+        delete chatParams.think;
+        this.disableThinkingCapability(model);
+        stream = await this.ollamaClient.chat(chatParams);
+      } else {
+        throw error;
+      }
+    }
 
     let messageStarted = false;
     const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
@@ -720,6 +790,9 @@ export class OllamaProvider implements ModelProvider {
         stream: true,
         options,
       };
+      if (this.shouldEnableThinkParam(model)) {
+        chatParams.think = true;
+      }
 
       // Debug: Log actual request to Ollama
       if (process.env.VERBOSE_LOGGING) {
@@ -728,14 +801,10 @@ export class OllamaProvider implements ModelProvider {
           messageCount: chatParams.messages.length,
           toolCount: ollamaTools?.length || 0,
           options,
+          think: chatParams.think,
         });
         console.log(`[Ollama] First 5 tool names:`, ollamaTools?.slice(0, 5).map(t => t.function.name));
         console.log(`[Ollama] Last 5 tool names:`, ollamaTools?.slice(-5).map(t => t.function.name));
-      }
-
-      // Add thinking mode if enabled via setThinkingConfig
-      if (this.thinkingConfig?.enabled) {
-        chatParams.think = true;
       }
 
       // Debug: log request details
@@ -753,9 +822,29 @@ export class OllamaProvider implements ModelProvider {
       let stream;
       try {
         stream = await this.ollamaClient.chat(chatParams);
-      } catch (error) {
-        console.error(`[Ollama] Error calling chat API:`, error);
-        throw error;
+      } catch (error: any) {
+        // Only retry without think if the error is plausibly caused by the think parameter
+        // (e.g. 400 Bad Request, parameter validation errors). Don't retry on server crashes
+        // (500, EOF, ECONNREFUSED) as those are unrelated to think and retrying would
+        // incorrectly disable thinking for the rest of the session.
+        const statusCode = error?.status_code || error?.statusCode;
+        const isServerError = statusCode >= 500 || /\b(EOF|ECONNREFUSED|ECONNRESET|ETIMEDOUT)\b/.test(error?.message || '');
+        if (chatParams.think && !isServerError) {
+          if (process.env.VERBOSE_LOGGING) {
+            console.error(`[Ollama] Retrying without think parameter after error:`, error);
+          }
+          delete chatParams.think;
+          this.disableThinkingCapability(model);
+          try {
+            stream = await this.ollamaClient.chat(chatParams);
+          } catch (retryError) {
+            console.error(`[Ollama] Error calling chat API:`, retryError);
+            throw retryError;
+          }
+        } else {
+          console.error(`[Ollama] Error calling chat API:`, error);
+          throw error;
+        }
       }
 
       let messageStarted = false;
