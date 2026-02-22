@@ -155,10 +155,15 @@ function looseEqual(a: unknown, b: unknown): boolean {
 /**
  * Match a condition object against a record of key/value pairs.
  * Uses loose equality so YAML numbers/booleans match string equivalents.
+ * A value of "*" acts as a wildcard — the key must exist but any value matches.
  */
 function tryMatch(condition: Record<string, unknown>, obj: Record<string, unknown>): boolean {
   if (typeof obj !== 'object' || obj === null) return false;
   for (const [key, value] of Object.entries(condition)) {
+    if (value === '*') {
+      if (!(key in obj)) return false;
+      continue;
+    }
     if (!looseEqual(obj[key], value)) return false;
   }
   return true;

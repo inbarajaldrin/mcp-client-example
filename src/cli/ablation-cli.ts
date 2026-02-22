@@ -2206,6 +2206,25 @@ export class AblationCLI {
     // Save a frozen copy of the ablation definition for provenance
     this.ablationManager.saveDefinitionSnapshot(runDir, ablation);
 
+    // Save a snapshot of all available tools and their descriptions (constant for the whole ablation)
+    this.ablationManager.saveToolsSnapshot(runDir, this.client.getServersInfo());
+
+    // Save a snapshot of all available prompts (only if any phase uses /add-prompt)
+    const usesPrompts = ablation.phases.some(p =>
+      p.commands.some(c => c.trim().toLowerCase().startsWith('/add-prompt')),
+    );
+    if (usesPrompts) {
+      const allPrompts = this.client.listPrompts().map(p => ({
+        server: p.server,
+        prompt: {
+          name: p.prompt.name,
+          description: p.prompt.description,
+          arguments: p.prompt.arguments,
+        },
+      }));
+      this.ablationManager.savePromptsSnapshot(runDir, allPrompts);
+    }
+
     // Copy attachments to run directory (same for all runs)
     // Pass resolved arguments so dynamically-named attachments are detected
     this.ablationManager.copyAttachmentsToRun(runDir, ablation, resolvedArguments);

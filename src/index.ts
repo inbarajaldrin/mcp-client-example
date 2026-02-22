@@ -229,6 +229,7 @@ export class MCPClient {
         output: process.stdout,
       })
     );
+    this.elicitationHandler.setChatLogger(this.chatHistoryManager);
   }
 
   // Constructor for multiple named servers
@@ -315,6 +316,7 @@ export class MCPClient {
         output: process.stdout,
       })
     );
+    client.elicitationHandler.setChatLogger(client.chatHistoryManager);
     return client;
   }
 

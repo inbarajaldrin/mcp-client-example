@@ -3,6 +3,15 @@ import { Logger } from '../logger.js';
 import { AbstractHandler } from './base-handler.js';
 import type { ElicitRequest, ElicitResult } from '@modelcontextprotocol/sdk/types.js';
 
+/** Minimal interface for elicitation logging — avoids circular import of ChatHistoryManager */
+interface ElicitationChatLogger {
+  addElicitationEvent(
+    action: 'accept' | 'decline' | 'cancel' | 'auto-decline' | 'auto-decline-cancelled',
+    serverMessage?: string,
+    reason?: string,
+  ): void;
+}
+
 // Field schema types from MCP spec
 interface StringEnumField {
   type: 'string';
@@ -72,10 +81,16 @@ export class ElicitationHandler extends AbstractHandler {
   private onElicitationEnd: (() => void) | null = null;
   private pendingAbortController: AbortController | null = null;
   private _autoDecline: boolean = false;
+  private chatLogger?: ElicitationChatLogger;
 
   constructor(logger: Logger, createReadline: () => readline.Interface) {
     super(logger);
     this.createReadline = createReadline;
+  }
+
+  /** Set the chat history logger for recording elicitation events */
+  setChatLogger(chatLogger: ElicitationChatLogger): void {
+    this.chatLogger = chatLogger;
   }
 
   /**
@@ -134,6 +149,8 @@ export class ElicitationHandler extends AbstractHandler {
     // Auto-decline when a whenInput hook already triggered @complete-phase
     if (this._autoDecline) {
       this.logger.log(`\n[Elicitation auto-declined — phase already complete]\n`, { type: 'info' });
+      const msg = (request.params as any).message;
+      this.chatLogger?.addElicitationEvent('auto-decline', msg, 'phase already complete');
       return { action: 'decline' };
     }
 
@@ -142,6 +159,7 @@ export class ElicitationHandler extends AbstractHandler {
     // Check if this is a URL elicitation (not supported in this implementation)
     if ('url' in params && params.url) {
       this.logger.log(`\n[Server Request] URL elicitation not supported\n`, { type: 'warning' });
+      this.chatLogger?.addElicitationEvent('decline', undefined, 'URL elicitation not supported');
       return { action: 'decline' };
     }
 
@@ -168,17 +186,20 @@ export class ElicitationHandler extends AbstractHandler {
       // Prompt user for action
       const action = await this.promptAction(rl, ac.signal);
       if (action !== 'accept') {
+        this.chatLogger?.addElicitationEvent(action, message);
         return { action };
       }
 
       // Collect form data based on schema
       const content = await this.collectFormData(rl, requestedSchema, ac.signal);
 
+      this.chatLogger?.addElicitationEvent('accept', message);
       return { action: 'accept', content };
     } catch (error: any) {
       // AbortError means the elicitation was cancelled externally (e.g., tool timeout)
       if (error.name === 'AbortError' || error.code === 'ABORT_ERR') {
         this.logger.log(`  [Elicitation auto-declined (cancelled)]\n`, { type: 'warning' });
+        this.chatLogger?.addElicitationEvent('auto-decline-cancelled', message, 'tool timeout or force stop');
         return { action: 'decline' };
       }
       throw error;

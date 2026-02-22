@@ -122,8 +122,8 @@
       "properties": {
         "after": { "type": "string", "description": "Tool name to match after execution" },
         "before": { "type": "string", "description": "Tool name to match before execution" },
-        "whenInput": { "type": "object", "additionalProperties": true, "description": "Condition match on tool input arguments only" },
-        "whenOutput": { "type": "object", "additionalProperties": true, "description": "Condition match on tool output JSON only" },
+        "whenInput": { "type": "object", "additionalProperties": true, "description": "Condition match on tool input arguments only. Use \"*\" as a wildcard value to match any value (key must be present)." },
+        "whenOutput": { "type": "object", "additionalProperties": true, "description": "Condition match on tool output JSON only. Use \"*\" as a wildcard value to match any value (key must be present)." },
         "run": { "type": "string", "description": "Command to execute" }
       }
     }

@@ -1573,9 +1573,11 @@ export class MCPClientCLI {
           await new Promise(resolve => setTimeout(resolve, 100));
         }
         
-        // Log assistant response to history (even if aborted)
-        {
-          // Extract assistant response from messages array
+        // Log assistant response to history when aborted.
+        // Normal (non-abort) responses are already logged by the provider-specific
+        // handler inside processQuery (Anthropic: complete handler, others: message_stop).
+        // Only the abort path skips that logging, so we catch it here.
+        if (this.keyboardMonitor.abortRequested) {
           const messages = (this.client as any).messages;
           const assistantMessages = messages.filter((msg: any) => msg.role === 'assistant');
           if (assistantMessages.length > 0) {

@@ -501,6 +501,40 @@ export class AblationManager {
   }
 
   /**
+   * Save a snapshot of all available tools (grouped by server) into the run directory.
+   * This is constant for the whole ablation since tools come from connected MCP servers.
+   */
+  saveToolsSnapshot(runDir: string, serversInfo: Array<{ name: string; tools: Array<{ name: string; description: string }> }>): void {
+    try {
+      const snapshotPath = join(runDir, 'tools.yaml');
+      const yamlContent = yaml.stringify({ servers: serversInfo });
+      writeFileSync(snapshotPath, yamlContent, 'utf-8');
+    } catch (error) {
+      this.logger.log(`Failed to save tools snapshot: ${error}\n`, { type: 'error' });
+    }
+  }
+
+  /**
+   * Save a snapshot of all available prompts (grouped by server) into the run directory.
+   * This is constant for the whole ablation since prompts come from connected MCP servers.
+   */
+  savePromptsSnapshot(runDir: string, prompts: Array<{ server: string; prompt: { name: string; description?: string; arguments?: Array<{ name: string; description?: string; required?: boolean }> } }>): void {
+    try {
+      const snapshotPath = join(runDir, 'prompts.yaml');
+      // Group prompts by server
+      const grouped: Record<string, Array<{ name: string; description?: string; arguments?: Array<{ name: string; description?: string; required?: boolean }> }>> = {};
+      for (const entry of prompts) {
+        if (!grouped[entry.server]) grouped[entry.server] = [];
+        grouped[entry.server].push(entry.prompt);
+      }
+      const yamlContent = yaml.stringify({ servers: grouped });
+      writeFileSync(snapshotPath, yamlContent, 'utf-8');
+    } catch (error) {
+      this.logger.log(`Failed to save prompts snapshot: ${error}\n`, { type: 'error' });
+    }
+  }
+
+  /**
    * Load run results
    */
   loadRunResults(runDir: string): AblationRun | null {

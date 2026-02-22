@@ -174,6 +174,20 @@
               }
             }
           }
+        },
+        "elicitationEvent": {
+          "type": "object",
+          "description": "MCP elicitation event data. Present on client role messages that record elicitation outcomes. Captures both user-driven responses (accept/decline/cancel) and automatic responses (auto-decline when phase is already complete, auto-decline-cancelled when tool times out).",
+          "required": ["action"],
+          "properties": {
+            "action": {
+              "type": "string",
+              "enum": ["accept", "decline", "cancel", "auto-decline", "auto-decline-cancelled"],
+              "description": "Outcome of the elicitation. accept/decline/cancel are user-driven. auto-decline fires when a whenInput hook has already triggered @complete-phase. auto-decline-cancelled fires when the elicitation is aborted due to tool timeout or force stop."
+            },
+            "serverMessage": { "type": "string", "description": "The message from the MCP server requesting elicitation" },
+            "reason": { "type": "string", "description": "Why the elicitation was auto-declined (e.g. 'phase already complete', 'URL elicitation not supported')" }
+          }
         }
       }
     },

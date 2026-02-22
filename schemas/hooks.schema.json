@@ -40,12 +40,12 @@
         },
         "whenInput": {
           "type": "object",
-          "description": "Conditional match against tool input arguments. Hook only fires if all key-value pairs match the input args.",
+          "description": "Conditional match against tool input arguments. Hook only fires if all key-value pairs match the input args. Use \"*\" as a wildcard value to match any value (key must be present).",
           "additionalProperties": true
         },
         "whenOutput": {
           "type": "object",
-          "description": "Conditional match against tool output JSON. Hook only fires if all key-value pairs match the parsed output.",
+          "description": "Conditional match against tool output JSON. Hook only fires if all key-value pairs match the parsed output. Use \"*\" as a wildcard value to match any value (key must be present).",
           "additionalProperties": true
         },
         "run": {

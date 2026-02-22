@@ -243,21 +243,26 @@ export function createApiRouter(client: MCPClient): Router {
       }
     } finally {
       await queryPromise;
-      // Record assistant response to chat history
-      try {
-        const messages = client.getMessages();
-        const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
-        if (lastAssistant?.content) {
-          histMgr.addAssistantMessage(
-            typeof lastAssistant.content === 'string'
-              ? lastAssistant.content
-              : JSON.stringify(lastAssistant.content),
-            lastAssistant.content_blocks,
-            lastAssistant.thinking,
-          );
+      // Record assistant response to chat history when cancelled.
+      // Normal (non-cancelled) responses are already logged by the provider-specific
+      // handler inside processQuery (Anthropic: complete handler, others: message_stop).
+      // Only the cancel path skips that logging, so we catch it here.
+      if (cancelRequested) {
+        try {
+          const messages = client.getMessages();
+          const lastAssistant = [...messages].reverse().find(m => m.role === 'assistant');
+          if (lastAssistant?.content) {
+            histMgr.addAssistantMessage(
+              typeof lastAssistant.content === 'string'
+                ? lastAssistant.content
+                : JSON.stringify(lastAssistant.content),
+              lastAssistant.content_blocks,
+              lastAssistant.thinking,
+            );
+          }
+        } catch {
+          // Ignore history recording errors
         }
-      } catch {
-        // Ignore history recording errors
       }
       // Clean up IPC listeners
       if (ipcServer) {

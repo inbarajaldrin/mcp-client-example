@@ -101,6 +101,11 @@ export interface ChatSession {
       phaseName: string;
       trigger?: { after?: string; whenOutput?: Record<string, unknown> };
     };
+    elicitationEvent?: {
+      action: 'accept' | 'decline' | 'cancel' | 'auto-decline' | 'auto-decline-cancelled';
+      serverMessage?: string;
+      reason?: string;  // e.g. "phase already complete", "tool timeout", "url not supported"
+    };
   }>;
   tokenUsagePerCallback?: Array<{
     timestamp: string;
@@ -435,6 +440,37 @@ export class ChatHistoryManager {
       message.phaseEvent.trigger = trigger;
     }
     this.currentSession.messages.push(message);
+    this.currentSession.metadata.messageCount++;
+  }
+
+  /**
+   * Add an elicitation event to current session.
+   * Records accept, decline, cancel, auto-decline, and auto-decline-cancelled outcomes.
+   */
+  addElicitationEvent(
+    action: 'accept' | 'decline' | 'cancel' | 'auto-decline' | 'auto-decline-cancelled',
+    serverMessage?: string,
+    reason?: string,
+  ): void {
+    if (!this.currentSession) return;
+
+    const actionLabels: Record<string, string> = {
+      'accept': 'accepted',
+      'decline': 'declined',
+      'cancel': 'cancelled',
+      'auto-decline': 'auto-declined',
+      'auto-decline-cancelled': 'auto-declined (cancelled)',
+    };
+
+    const msg: any = {
+      timestamp: new Date().toISOString(),
+      role: 'client',
+      content: `Elicitation ${actionLabels[action]}${reason ? `: ${reason}` : ''}`,
+      elicitationEvent: { action },
+    };
+    if (serverMessage) msg.elicitationEvent.serverMessage = serverMessage;
+    if (reason) msg.elicitationEvent.reason = reason;
+    this.currentSession.messages.push(msg);
     this.currentSession.metadata.messageCount++;
   }
 
@@ -808,6 +844,10 @@ export class ChatHistoryManager {
     if (phaseEventCount > 0) {
       md += `**Phase Events:** ${phaseEventCount}\n`;
     }
+    const elicitationCount = session.messages.filter(m => m.elicitationEvent).length;
+    if (elicitationCount > 0) {
+      md += `**Elicitations:** ${elicitationCount}\n`;
+    }
 
     // Display thinking configuration if enabled
     if (session.thinkingConfig?.enabled) {
@@ -892,6 +932,17 @@ export class ChatHistoryManager {
           }
           if (pe.trigger?.whenOutput) {
             md += `**When Output:** \`${JSON.stringify(pe.trigger.whenOutput)}\`\n`;
+          }
+          md += '\n';
+        } else if (msg.elicitationEvent) {
+          const ee = msg.elicitationEvent;
+          const icon = ee.action === 'accept' ? '✓' : '⊘';
+          md += `### ${icon} Elicitation ${ee.action} (${time})\n\n`;
+          if (ee.serverMessage) {
+            md += `**Server message:** ${ee.serverMessage}\n`;
+          }
+          if (ee.reason) {
+            md += `**Reason:** ${ee.reason}\n`;
           }
           md += '\n';
         } else {
