@@ -102,6 +102,18 @@ export interface ModelInfo {
 
 // Abstract ModelProvider interface
 // Supports LLMs, VLMs, and other AI model types
+// TODO: Add system prompt support to the interface and all provider implementations.
+//   Currently only Anthropic has a `system` param (in createMessageStreamWithToolUse) but it's
+//   never called with a value. All providers' APIs support system prompts:
+//     - Anthropic: `system` param (top-level, separate from messages)
+//     - OpenAI/xAI: `system` role message (prepended to messages array)
+//     - Google Gemini: `systemInstruction` param (top-level)
+//     - Ollama: `system` role message (prepended to messages array)
+//   Research shows system prompts improve rule-following for OpenAI/xAI/Google/Ollama,
+//   but Claude actually prioritizes user messages over system prompts.
+//   For ablation phases with clearContextBetweenPhases=false, system prompt should be
+//   replaced (not stacked) on each phase. Consider adding a `systemPrompt` field to the
+//   ablation definition schema and threading it through processQuery -> provider calls.
 export interface ModelProvider {
   // Create a streaming message completion
   createMessageStream(
