@@ -1425,7 +1425,7 @@ export class AblationCLI {
 
               for (const msg of promptResult.messages) {
                 if (msg.content.type === 'text') {
-                  const cancellationCheck = () => hookMgr.isPhaseCompleteRequested() || hookMgr.hasPendingInjection() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
+                  const cancellationCheck = () => hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || hookMgr.hasPendingInjection() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
 
                   // Resume loop: after pause+resume, re-invoke processQuery so the agent can continue
                   let isFirstAttempt = true;
@@ -1453,7 +1453,7 @@ export class AblationCLI {
                     // Loop stays active until explicit resume (Enter) or abort (Ctrl+C)
                     // Skip if phase is already complete — @complete-phase takes priority over interrupt
                     if (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()
-                        && !hookMgr.isPhaseCompleteRequested()) {
+                        && !hookMgr.isPhaseCompleteRequested() && !hookMgr.isAbortRunRequested()) {
                       this.callbacks.resetInterrupt();
                       this.callbacks.stopKeyboardMonitor();
 
@@ -1462,12 +1462,12 @@ export class AblationCLI {
 
                         let paused = true;
                         while (paused && !this.callbacks.isAbortRequested()
-                            && !hookMgr.isPhaseCompleteRequested()) {
+                            && !hookMgr.isPhaseCompleteRequested() && !hookMgr.isAbortRunRequested()) {
                           // Re-fetch readline each iteration — stopKeyboardMonitor() recreates it
                           const rl = this.callbacks.getReadline()!;
                           const userInput = (await rl.question('  You: ')).trim();
 
-                          const stopCond = () => hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
+                          const stopCond = () => hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
 
                           // Re-enable keyboard monitor during processQuery so Ctrl+A works,
                           // then stop it again so readline can prompt the next input.
@@ -1488,14 +1488,20 @@ export class AblationCLI {
                     }
                   } while (continueAfterPause
                     && !hookMgr.isPhaseCompleteRequested()
+                    && !hookMgr.isAbortRunRequested()
                     && !this.callbacks.isAbortRequested());
 
                   // Stop processing further messages if phase complete or aborted
-                  if (hookMgr.isPhaseCompleteRequested() || this.callbacks.isAbortRequested()) break;
+                  if (hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || this.callbacks.isAbortRequested()) break;
                 }
               }
             } finally {
               if (ablHooksLoaded) hookMgr.clearAblationHooks();
+            }
+
+            if (hookMgr.isAbortRunRequested()) {
+              hookMgr.resetAbortRun();
+              return { abortRun: true };
             }
 
             if (hookMgr.isPhaseCompleteRequested()) {
