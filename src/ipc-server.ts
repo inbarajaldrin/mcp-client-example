@@ -139,35 +139,37 @@ export class OrchestratorIPCServer extends EventEmitter {
       }
     });
 
-    // Tool discovery endpoint - returns all available tools from all servers
+    // Tool discovery endpoint - returns all available tools from all servers.
+    // Reads directly from server connections to bypass orchestrator-mode filtering
+    // (this.tools only contains orchestrator tools when orchestrator mode is on,
+    // but the orchestrator itself needs to see ALL tools to generate the unified API).
     this.app.get('/list_tools', async (req: Request, res: Response) => {
       try {
-        // Get tools from client's tool manager
-        const tools = (this.client as any).tools || [];
-
-        // Group by server
+        const servers: Map<string, any> = (this.client as any).servers || new Map();
         const toolsByServer: Record<string, any[]> = {};
-        for (const tool of tools) {
-          // Extract server name from prefixed tool name (format: "server__tool")
-          const match = tool.name.match(/^(.+?)__(.+)$/);
-          if (match) {
-            const [, serverName, toolName] = match;
-            if (!toolsByServer[serverName]) {
-              toolsByServer[serverName] = [];
-            }
-            toolsByServer[serverName].push({
+        let totalTools = 0;
+
+        for (const [serverName, connection] of servers.entries()) {
+          const serverTools = (connection as any).tools || [];
+          if (serverTools.length === 0) continue;
+
+          toolsByServer[serverName] = serverTools.map((tool: any) => {
+            // Strip the server prefix from tool name (e.g. "ros-mcp-server__move_home" -> "move_home")
+            const toolName = tool.name.replace(`${serverName}__`, '');
+            return {
               name: toolName,
               description: tool.description,
               input_schema: tool.input_schema,
-            });
-          }
+            };
+          });
+          totalTools += serverTools.length;
         }
 
         res.json({
           success: true,
           servers: toolsByServer,
           total_servers: Object.keys(toolsByServer).length,
-          total_tools: tools.length,
+          total_tools: totalTools,
         });
       } catch (error) {
         res.status(500).json({
