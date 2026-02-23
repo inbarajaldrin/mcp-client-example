@@ -1538,7 +1538,7 @@ export class AblationCLI {
                       const rl = this.callbacks.getReadline()!;
                       const userInput = (await rl.question('  You: ')).trim();
 
-                      const stopCond = () => hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
+                      const stopCond = () => hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || hookMgr.hasPendingInjection() || hookMgr.hasPendingDirectives() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
 
                       // Re-enable keyboard monitor during processQuery so Ctrl+A works,
                       // then stop it again so readline can prompt the next input.
@@ -1711,7 +1711,7 @@ export class AblationCLI {
                 break;
               }
 
-              const stopCond = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
+              const stopCond = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || hookManager.hasPendingInjection() || hookManager.hasPendingDirectives() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
               const result = await this.handlePauseInput(userInput, stopCond);
               // Reset interrupt flag so the next iteration's processQuery doesn't exit immediately
               this.callbacks.resetInterrupt();
@@ -3068,14 +3068,15 @@ export class AblationCLI {
       // Resume client-side hooks
       hookManager.resume();
 
+      // Stop any active video recordings while still in raw mode (prevents SIGINT
+      // propagation to recording processes during async cleanup)
+      await this.client.cleanupVideoRecording();
+
       // Stop keyboard monitor - always runs even if aborted/errored
       this.callbacks.stopKeyboardMonitor();
 
       // Disable abort mode - Ctrl+C will exit normally again
       this.callbacks.setAbortMode(false);
-
-      // Stop any active video recordings (prevents orphaned recording processes on abort)
-      await this.client.cleanupVideoRecording();
     }
 
     // Finalize run

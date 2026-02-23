@@ -389,101 +389,60 @@ export class MCPClientCLI {
       return false;
     }
 
-    // Stop keyboard monitoring to allow readline to work
-    const wasMonitoring = this.keyboardMonitor.isMonitoring;
-    if (wasMonitoring) {
-      this.keyboardMonitor.stop();
-    }
-
     // Clear any pending input to avoid it interfering with the prompt
     this.keyboardMonitor.clearPendingInput();
 
-    // Create a temporary readline if needed
-    let tempRl: readline.Interface | null = null;
-    let rlToUse = this.rl;
+    // Extract server name from tool name (format: "server-name__tool-name")
+    const serverName = toolName.includes('__') ? toolName.split('__')[0] : 'the server';
+    console.log(`\nTool "${toolName}" has been running for ${elapsedSeconds} seconds.`);
+    console.log(`⚠️  Force stopping will kill and restart "${serverName}" server.`);
+    console.log('Do you want to force stop this tool call? (y/n, Enter to skip)');
 
-    if (!rlToUse) {
-      tempRl = readline.createInterface({
-        input: process.stdin,
-        output: process.stdout,
-      });
-      rlToUse = tempRl;
-    }
+    // Use collectInput to stay in raw mode — prevents SIGINT propagation to child processes
+    const response = await new Promise<string | null>((resolve) => {
+      let resolved = false;
 
-    try {
-      // Extract server name from tool name (format: "server-name__tool-name")
-      const serverName = toolName.includes('__') ? toolName.split('__')[0] : 'the server';
-      console.log(`\nTool "${toolName}" has been running for ${elapsedSeconds} seconds.`);
-      console.log(`⚠️  Force stopping will kill and restart "${serverName}" server.`);
-      console.log('Do you want to force stop this tool call? (y/n, Enter to skip)');
-
-      // Race between user input and tool completion (abort signal)
-      const response = await new Promise<string>((resolve) => {
-        let resolved = false;
-
-        // Listen for abort signal (tool completed)
-        const onAbort = () => {
-          if (!resolved) {
-            resolved = true;
-            // Clear the prompt line and show message
-            process.stdout.write('\r\x1b[K'); // Clear current line
-            console.log('(Tool completed, prompt dismissed)');
-            resolve(''); // Treat as "no"
-          }
-        };
-
-        if (abortSignal) {
-          abortSignal.addEventListener('abort', onAbort, { once: true });
+      // Listen for abort signal (tool completed)
+      const onAbort = () => {
+        if (!resolved) {
+          resolved = true;
+          // Clear the prompt line and show message
+          process.stdout.write('\r\x1b[K'); // Clear current line
+          console.log('(Tool completed, prompt dismissed)');
+          resolve(''); // Treat as "no"
         }
+      };
 
-        // Wait for user input - handle Ctrl+C gracefully
-        rlToUse!.question('> ').then((answer) => {
-          if (!resolved) {
-            resolved = true;
-            if (abortSignal) {
-              abortSignal.removeEventListener('abort', onAbort);
-            }
-            resolve(answer);
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      this.keyboardMonitor.collectInput('> ').then((answer) => {
+        if (!resolved) {
+          resolved = true;
+          if (abortSignal) {
+            abortSignal.removeEventListener('abort', onAbort);
           }
-        }).catch(() => {
-          // Handle Ctrl+C (AbortError) during readline prompt
-          if (!resolved) {
-            resolved = true;
-            if (abortSignal) {
-              abortSignal.removeEventListener('abort', onAbort);
-            }
-            // Return empty to signal no action (cleanup will handle shutdown)
-            resolve('');
-          }
-        });
+          resolve(answer);
+        }
       });
+    });
 
-      const answer = response.trim().toLowerCase();
+    // null means Ctrl+C was pressed — treat as dismiss (no force stop)
+    const answer = (response ?? '').trim().toLowerCase();
 
-      // Empty input or anything other than y/yes means continue waiting
-      const shouldStop = answer === 'y' || answer === 'yes';
+    // Empty input or anything other than y/yes means continue waiting
+    const shouldStop = answer === 'y' || answer === 'yes';
 
-      if (shouldStop) {
-        this.logger.log(`\nForce stopping tool call and restarting "${serverName}" server...\n`, { type: 'warning' });
-      } else if (answer === '') {
-        // User pressed Enter without input or tool completed - return control silently
-        // (message already shown if tool completed)
-      } else {
-        this.logger.log('\nContinuing to wait for tool result...\n', { type: 'info' });
-      }
-
-      return shouldStop;
-    } finally {
-      // Clean up temporary readline if we created one
-      if (tempRl) {
-        tempRl.close();
-      }
-
-      // Restart keyboard monitoring if it was active
-      if (wasMonitoring) {
-        this.keyboardMonitor.start();
-      }
+    if (shouldStop) {
+      this.logger.log(`\nForce stopping tool call and restarting "${serverName}" server...\n`, { type: 'warning' });
+    } else if (answer === '') {
+      // User pressed Enter without input, Ctrl+C, or tool completed - return control silently
+    } else {
+      this.logger.log('\nContinuing to wait for tool result...\n', { type: 'info' });
     }
+
+    return shouldStop;
   }
 
   private async requestHILApproval(
