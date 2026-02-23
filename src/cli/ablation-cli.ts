@@ -521,11 +521,30 @@ export class AblationCLI {
           // Combine the pending command with this input as the argument
           let fullCommand = `${pendingCommand} ${input}`;
 
-          // Check if this is /add-prompt and the selected prompt has arguments
+          // Check if this is /add-prompt - resolve index to server__promptName for consistent matching
           if (pendingCommand.toLowerCase() === '/add-prompt') {
-            const promptArgs = await this.collectPromptArgumentsForAblation(input);
-            if (promptArgs) {
-              fullCommand = `${fullCommand} ${JSON.stringify(promptArgs)}`;
+            const promptIndex = parseInt(input) - 1;
+            const allPrompts = this.client.listPrompts();
+            const promptMgr = this.client.getPromptManager();
+            const enabledPrompts = promptMgr.filterPrompts(allPrompts);
+
+            if (promptIndex >= 0 && promptIndex < enabledPrompts.length) {
+              const promptInfo = enabledPrompts[promptIndex];
+              const promptKey = `${promptInfo.server}__${promptInfo.prompt.name}`;
+              fullCommand = `/add-prompt ${promptKey}`;
+
+              // Collect arguments if the prompt has any
+              const promptArgs = await this.collectPromptArgumentsForAblation(input);
+              if (promptArgs) {
+                fullCommand = `${fullCommand} ${JSON.stringify(promptArgs)}`;
+              }
+            } else {
+              this.logger.log(
+                `    ✗ Invalid prompt index: ${input}\n`,
+                { type: 'error' },
+              );
+              pendingCommand = null;
+              continue;
             }
           }
 
@@ -1376,16 +1395,56 @@ export class AblationCLI {
 
       switch (cmd) {
         case '/add-prompt': {
-          // /add-prompt <index> [{"arg":"value"}]
+          // /add-prompt <server__promptName> [{"arg":"value"}]
           if (args.length === 0) {
-            throw new Error('Usage: /add-prompt <index>');
+            throw new Error('Usage: /add-prompt <server__promptName>');
           }
-          const promptIndex = parseInt(args[0]) - 1;
           const prompts = this.client.listPrompts();
-          if (promptIndex < 0 || promptIndex >= prompts.length) {
-            throw new Error(`Invalid prompt index: ${args[0]}`);
+          const promptMgr = this.client.getPromptManager();
+          const enabledPrompts = promptMgr.filterPrompts(prompts);
+          let promptInfo;
+
+          // Look up by server__promptName
+          const nameArg = args[0];
+          promptInfo = prompts.find(p => `${p.server}__${p.prompt.name}` === nameArg);
+
+          // Stale reference (numeric index or name not found) — ask user to pick
+          if (!promptInfo) {
+            const rl = this.callbacks.getReadline();
+            if (!rl || enabledPrompts.length === 0) {
+              throw new Error(`Prompt not found: ${nameArg} (no prompts available or no readline)`);
+            }
+
+            this.logger.log(`\n  ⚠ Stale prompt reference: "${nameArg}" — select a replacement:\n`, { type: 'warning' });
+            await this.showPromptListForPreview();
+
+            const selection = (await rl.question('  Select prompt number: ')).trim();
+            const selectedIdx = parseInt(selection) - 1;
+
+            if (isNaN(selectedIdx) || selectedIdx < 0 || selectedIdx >= enabledPrompts.length) {
+              throw new Error(`Invalid prompt selection: ${selection}`);
+            }
+
+            promptInfo = enabledPrompts[selectedIdx];
+            const newPromptKey = `${promptInfo.server}__${promptInfo.prompt.name}`;
+
+            // Update the ablation YAML to replace the stale command
+            if (ablation && phaseName) {
+              const phase = ablation.phases.find(p => p.name === phaseName);
+              if (phase) {
+                const cmdIdx = phase.commands.indexOf(trimmedCommand);
+                if (cmdIdx !== -1) {
+                  // Preserve any JSON args from the original command
+                  const jsonArgs = args.slice(1).join(' ');
+                  phase.commands[cmdIdx] = jsonArgs
+                    ? `/add-prompt ${newPromptKey} ${jsonArgs}`
+                    : `/add-prompt ${newPromptKey}`;
+                  this.ablationManager.save(ablation);
+                  this.logger.log(`  ✓ Updated ablation YAML: ${nameArg} → ${newPromptKey}\n`, { type: 'success' });
+                }
+              }
+            }
           }
-          const promptInfo = prompts[promptIndex];
 
           // Check for JSON arguments (remaining args joined)
           let promptArgs: Record<string, string> | undefined;
@@ -1852,6 +1911,141 @@ export class AblationCLI {
           for (const [name, value] of Object.entries(resolved)) {
             this.logger.log(`    {{${name}}} = ${value}\n`, { type: 'info' });
           }
+        }
+      }
+    }
+
+    // Pre-flight: resolve any stale /add-prompt references before starting
+    const allPrompts = this.client.listPrompts();
+    const promptMgr = this.client.getPromptManager();
+    const enabledPrompts = promptMgr.filterPrompts(allPrompts);
+
+    for (const ablation of selectedAblations) {
+      for (const phase of ablation.phases) {
+        for (let cmdIdx = 0; cmdIdx < phase.commands.length; cmdIdx++) {
+          const cmd = phase.commands[cmdIdx].trim();
+          if (!cmd.toLowerCase().startsWith('/add-prompt ')) continue;
+
+          const parts = cmd.split(/\s+/);
+          const promptRef = parts[1];
+          if (!promptRef) continue;
+
+          // Check if the reference resolves to a currently available prompt
+          const found = allPrompts.find(p => `${p.server}__${p.prompt.name}` === promptRef);
+          if (found) continue;
+
+          // Stale reference — ask user to pick a replacement
+          if (enabledPrompts.length === 0) {
+            this.logger.log(`\n  ⚠ Stale prompt "${promptRef}" in phase "${phase.name}" — no prompts available to resolve\n`, { type: 'error' });
+            return;
+          }
+
+          this.logger.log(`\n  ⚠ Stale prompt reference "${promptRef}" in phase "${phase.name}" — select a replacement:\n`, { type: 'warning' });
+          await this.showPromptListForPreview();
+
+          const selection = (await rl.question('  Select prompt number: ')).trim();
+          const selectedIdx = parseInt(selection) - 1;
+
+          if (isNaN(selectedIdx) || selectedIdx < 0 || selectedIdx >= enabledPrompts.length) {
+            this.logger.log(`\n  ✗ Invalid selection. Aborting.\n`, { type: 'error' });
+            return;
+          }
+
+          const selected = enabledPrompts[selectedIdx];
+          const newKey = `${selected.server}__${selected.prompt.name}`;
+
+          // Collect arguments if the selected prompt requires them
+          let collectedArgs: string | undefined;
+          if (selected.prompt.arguments && selected.prompt.arguments.length > 0) {
+            this.logger.log(
+              `    📝 Prompt "${selected.prompt.name}" requires ${selected.prompt.arguments.length} argument(s):\n`,
+              { type: 'info' },
+            );
+
+            const promptArgValues: Record<string, string> = {};
+            for (const arg of selected.prompt.arguments) {
+              const required = arg.required !== false;
+              const optionalText = required ? '' : ' (optional, Enter to skip)';
+
+              this.logger.log(
+                `      ${arg.name}${arg.description ? ` - ${arg.description}` : ''}${optionalText}:\n`,
+                { type: 'info' },
+              );
+
+              const value = (await rl.question('      > ')).trim();
+
+              if (required && !value) {
+                this.logger.log(
+                  `      ⚠ Required argument "${arg.name}" is empty\n`,
+                  { type: 'warning' },
+                );
+              }
+
+              if (value) {
+                promptArgValues[arg.name] = value;
+              }
+            }
+
+            if (Object.keys(promptArgValues).length > 0) {
+              collectedArgs = JSON.stringify(promptArgValues);
+            }
+          }
+
+          phase.commands[cmdIdx] = collectedArgs
+            ? `/add-prompt ${newKey} ${collectedArgs}`
+            : `/add-prompt ${newKey}`;
+
+          this.ablationManager.save(ablation);
+          this.logger.log(`  ✓ Updated: ${promptRef} → ${newKey}\n`, { type: 'success' });
+        }
+      }
+    }
+
+    // Pre-flight: resolve any stale /attachment-insert and /add-attachment references
+    const availableAttachments = this.attachmentManager.listAttachments();
+
+    for (const ablation of selectedAblations) {
+      for (const phase of ablation.phases) {
+        for (let cmdIdx = 0; cmdIdx < phase.commands.length; cmdIdx++) {
+          const cmd = phase.commands[cmdIdx].trim();
+          const lowerCmd = cmd.toLowerCase();
+          if (!lowerCmd.startsWith('/attachment-insert ') && !lowerCmd.startsWith('/add-attachment ')) continue;
+
+          const parts = cmd.split(/\s+/);
+          const cmdName = parts[0];
+          const attachRef = parts.slice(1).join(' '); // filename may have spaces
+          if (!attachRef) continue;
+
+          // Check if the reference resolves to a currently available attachment
+          const found = availableAttachments.find(a => a.fileName === attachRef);
+          if (found) continue;
+
+          // Also skip if it's a numeric index that's in range (legacy but valid)
+          const numIdx = parseInt(attachRef);
+          if (!isNaN(numIdx) && String(numIdx) === attachRef && numIdx >= 1 && numIdx <= availableAttachments.length) continue;
+
+          // Stale reference — ask user to pick a replacement
+          if (availableAttachments.length === 0) {
+            this.logger.log(`\n  ⚠ Stale attachment "${attachRef}" in phase "${phase.name}" — no attachments available to resolve\n`, { type: 'error' });
+            return;
+          }
+
+          this.logger.log(`\n  ⚠ Stale attachment reference "${attachRef}" in phase "${phase.name}" — select a replacement:\n`, { type: 'warning' });
+          await this.showAttachmentListForPreview();
+
+          const selection = (await rl.question('  Select attachment number: ')).trim();
+          const selectedIdx = parseInt(selection) - 1;
+
+          if (isNaN(selectedIdx) || selectedIdx < 0 || selectedIdx >= availableAttachments.length) {
+            this.logger.log(`\n  ✗ Invalid selection. Aborting.\n`, { type: 'error' });
+            return;
+          }
+
+          const selectedAtt = availableAttachments[selectedIdx];
+          phase.commands[cmdIdx] = `${cmdName} ${selectedAtt.fileName}`;
+
+          this.ablationManager.save(ablation);
+          this.logger.log(`  ✓ Updated: ${attachRef} → ${selectedAtt.fileName}\n`, { type: 'success' });
         }
       }
     }

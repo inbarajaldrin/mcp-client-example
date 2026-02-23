@@ -96,6 +96,21 @@ export class PromptManager {
     }
   }
 
+  /**
+   * Remove entries from prompt states that no longer exist on any connected server.
+   * @param knownPromptKeys Set of all prompt keys (server__promptName) currently available
+   */
+  pruneStalePrompts(knownPromptKeys: Set<string>): void {
+    const staleKeys = Object.keys(this.promptStates).filter(key => !knownPromptKeys.has(key));
+    if (staleKeys.length === 0) return;
+
+    for (const key of staleKeys) {
+      delete this.promptStates[key];
+    }
+    this.saveState();
+    this.logger.log(`Pruned ${staleKeys.length} stale prompt(s) from prompt-states.yaml\n`, { type: 'info' });
+  }
+
   filterPrompts(prompts: PromptWithServer[]): PromptWithServer[] {
     return prompts.filter(({ server, prompt }) =>
       this.isPromptEnabled(server, prompt.name),

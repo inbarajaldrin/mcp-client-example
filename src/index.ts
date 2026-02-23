@@ -1106,6 +1106,10 @@ export class MCPClient {
       this.promptManager.updateStateForNewPrompts(allPrompts);
     }
 
+    // Prune stale prompts that no longer exist on any connected server
+    const allKnownPromptKeys = new Set(allPrompts.map(p => `${p.server}__${p.prompt.name}`));
+    this.promptManager.pruneStalePrompts(allKnownPromptKeys);
+
     if (totalPrompts > 0) {
       this.logger.log(
         `Loaded ${totalPrompts} prompt(s) across ${serversWithPrompts.size} server(s)\n`,
