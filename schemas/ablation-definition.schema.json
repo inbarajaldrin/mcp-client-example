@@ -70,7 +70,7 @@
         "commands": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Ordered commands: @tool-exec:server__tool(args), @tool:server__tool(args), @wait:N, @complete-phase, @abort, /attachment-insert {file}, or plain text (user prompt to LLM)"
+          "description": "Ordered commands: @tool-exec:server__tool(args), @tool:server__tool(args), @insert-prompt:server__promptName, @insert-attachment:filename, @clear-attachments, @wait:N, @complete-phase, @abort, or plain text (user prompt to LLM)"
         },
         "hooks": {
           "type": "array",

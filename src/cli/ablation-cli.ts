@@ -38,9 +38,10 @@ interface ToolWithSchema {
 
 // ==================== Tool Call Parsing (shared utilities) ====================
 
-import { parseDirectToolCall, matchesWhenInputCondition, matchesWhenOutputCondition } from '../utils/hook-utils.js';
+import { parseDirectToolCall, parsePythonArgs, matchesWhenInputCondition, matchesWhenOutputCondition } from '../utils/hook-utils.js';
 import type { ParsedToolCall } from '../utils/hook-utils.js';
 import { AttachmentManager, type AttachmentInfo } from '../managers/attachment-manager.js';
+import type { HookManager } from '../managers/hook-manager.js';
 import { PreferencesManager } from '../managers/preferences-manager.js';
 import { createProvider, PROVIDERS } from '../bin.js';
 import type { ModelInfo, ModelProvider as IModelProvider } from '../model-provider.js';
@@ -521,8 +522,8 @@ export class AblationCLI {
           // Combine the pending command with this input as the argument
           let fullCommand = `${pendingCommand} ${input}`;
 
-          // Check if this is /add-prompt - resolve index to server__promptName for consistent matching
-          if (pendingCommand.toLowerCase() === '/add-prompt') {
+          // Check if this is @insert-prompt: - resolve index to server__promptName for consistent matching
+          if (pendingCommand.toLowerCase().startsWith('@insert-prompt')) {
             const promptIndex = parseInt(input) - 1;
             const allPrompts = this.client.listPrompts();
             const promptMgr = this.client.getPromptManager();
@@ -531,12 +532,12 @@ export class AblationCLI {
             if (promptIndex >= 0 && promptIndex < enabledPrompts.length) {
               const promptInfo = enabledPrompts[promptIndex];
               const promptKey = `${promptInfo.server}__${promptInfo.prompt.name}`;
-              fullCommand = `/add-prompt ${promptKey}`;
+              fullCommand = `@insert-prompt:${promptKey}`;
 
               // Collect arguments if the prompt has any
               const promptArgs = await this.collectPromptArgumentsForAblation(input);
               if (promptArgs) {
-                fullCommand = `${fullCommand} ${JSON.stringify(promptArgs)}`;
+                fullCommand = `@insert-prompt:${promptKey} ${JSON.stringify(promptArgs)}`;
               }
             } else {
               this.logger.log(
@@ -548,8 +549,8 @@ export class AblationCLI {
             }
           }
 
-          // Check if this is /attachment-insert - resolve index to filename for consistent matching
-          if (pendingCommand.toLowerCase() === '/attachment-insert') {
+          // Check if this is @insert-attachment: - resolve index to filename for consistent matching
+          if (pendingCommand.toLowerCase().startsWith('@insert-attachment')) {
             const attachmentIndex = parseInt(input) - 1;
             const attachments = this.attachmentManager.listAttachments();
             if (
@@ -557,7 +558,7 @@ export class AblationCLI {
               attachmentIndex < attachments.length
             ) {
               const attachment = attachments[attachmentIndex];
-              fullCommand = `/attachment-insert ${attachment.fileName}`;
+              fullCommand = `@insert-attachment:${attachment.fileName}`;
             } else {
               this.logger.log(
                 `    ✗ Invalid attachment index: ${input}\n`,
@@ -1386,271 +1387,267 @@ export class AblationCLI {
       }
     }
 
-    // Handle slash commands
-    if (trimmedCommand.startsWith('/')) {
-      // Parse the command
-      const parts = trimmedCommand.split(/\s+/);
-      const cmd = parts[0].toLowerCase();
-      const args = parts.slice(1);
+    // Handle @insert-prompt:<server__promptName> — fetch prompt and run agent session
+    if (trimmedCommand.startsWith('@insert-prompt:')) {
+      const suffix = trimmedCommand.slice('@insert-prompt:'.length).trim();
+      if (!suffix) {
+        throw new Error('Usage: @insert-prompt:server__promptName or @insert-prompt:server__promptName(arg=val)');
+      }
 
-      switch (cmd) {
-        case '/add-prompt': {
-          // /add-prompt <server__promptName> [{"arg":"value"}]
-          if (args.length === 0) {
-            throw new Error('Usage: /add-prompt <server__promptName>');
+      // Parse prompt name and optional arguments
+      // Supports: name, name(arg='val'), name {"arg":"val"}
+      let nameArg: string;
+      let promptArgs: Record<string, string> | undefined;
+
+      const pythonMatch = suffix.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*\((.*)\)\s*$/);
+      const jsonMatch = suffix.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s+(\{.*\})\s*$/);
+      const simpleMatch = suffix.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*$/);
+
+      if (pythonMatch) {
+        nameArg = pythonMatch[1];
+        const argsStr = pythonMatch[2].trim();
+        if (argsStr) {
+          promptArgs = parsePythonArgs(argsStr) as Record<string, string>;
+        }
+      } else if (jsonMatch) {
+        nameArg = jsonMatch[1];
+        try {
+          promptArgs = JSON.parse(jsonMatch[2]);
+        } catch {
+          throw new Error(`Invalid JSON arguments in @insert-prompt: ${jsonMatch[2]}`);
+        }
+      } else if (simpleMatch) {
+        nameArg = simpleMatch[1];
+      } else {
+        // Fallback: treat entire suffix as prompt name (may fail lookup, handled below)
+        nameArg = suffix.split(/[\s(]/)[0];
+      }
+
+      if (dryRun) {
+        this.logger.log(`    ⚠ Skipping @insert-prompt in dry run (no model): ${nameArg}\n`, { type: 'warning' });
+        return {};
+      }
+
+      const prompts = this.client.listPrompts();
+      const promptMgr = this.client.getPromptManager();
+      const enabledPrompts = promptMgr.filterPrompts(prompts);
+      let promptInfo = prompts.find(p => `${p.server}__${p.prompt.name}` === nameArg);
+
+      // Stale reference — ask user to pick replacement
+      if (!promptInfo) {
+        const rl = this.callbacks.getReadline();
+        if (!rl || enabledPrompts.length === 0) {
+          throw new Error(`Prompt not found: ${nameArg} (no prompts available or no readline)`);
+        }
+
+        this.logger.log(`\n  ⚠ Stale prompt reference: "${nameArg}" — select a replacement:\n`, { type: 'warning' });
+        await this.showPromptListForPreview();
+
+        const selection = (await rl.question('  Select prompt number: ')).trim();
+        const selectedIdx = parseInt(selection) - 1;
+
+        if (isNaN(selectedIdx) || selectedIdx < 0 || selectedIdx >= enabledPrompts.length) {
+          throw new Error(`Invalid prompt selection: ${selection}`);
+        }
+
+        promptInfo = enabledPrompts[selectedIdx];
+        const newPromptKey = `${promptInfo.server}__${promptInfo.prompt.name}`;
+
+        // Update the ablation YAML to replace the stale command
+        if (ablation && phaseName) {
+          const phase = ablation.phases.find(p => p.name === phaseName);
+          if (phase) {
+            const cmdIdx = phase.commands.indexOf(trimmedCommand);
+            if (cmdIdx !== -1) {
+              phase.commands[cmdIdx] = promptArgs
+                ? `@insert-prompt:${newPromptKey} ${JSON.stringify(promptArgs)}`
+                : `@insert-prompt:${newPromptKey}`;
+              this.ablationManager.save(ablation);
+              this.logger.log(`  ✓ Updated ablation YAML: ${nameArg} → ${newPromptKey}\n`, { type: 'success' });
+            }
           }
-          const prompts = this.client.listPrompts();
-          const promptMgr = this.client.getPromptManager();
-          const enabledPrompts = promptMgr.filterPrompts(prompts);
-          let promptInfo;
+        }
+      }
 
-          // Look up by server__promptName
-          const nameArg = args[0];
-          promptInfo = prompts.find(p => `${p.server}__${p.prompt.name}` === nameArg);
+      const promptResult = await this.client.getPrompt(
+        promptInfo.server,
+        promptInfo.prompt.name,
+        promptArgs,
+      );
+      if (promptResult?.messages) {
+        // For agent-driven ablation phases: load phase hooks so @complete-phase works
+        const hookMgr = this.client.getHookManager();
+        let ablHooksLoaded = false;
+        if (ablation && phaseName) {
+          const phaseHooks = this.ablationManager.getHooksForPhase(ablation, phaseName);
+          if (phaseHooks.length > 0) {
+            hookMgr.loadAblationHooks(phaseHooks);
+            hookMgr.setCurrentPhaseName(phaseName);
+            hookMgr.resetPhaseComplete();
+            hookMgr.resetAbortRun();
+            ablHooksLoaded = true;
+          }
+        }
 
-          // Stale reference (numeric index or name not found) — ask user to pick
-          if (!promptInfo) {
-            const rl = this.callbacks.getReadline();
-            if (!rl || enabledPrompts.length === 0) {
-              throw new Error(`Prompt not found: ${nameArg} (no prompts available or no readline)`);
-            }
+        try {
+          // Include any pending attachments with the first prompt message
+          const promptAttachments = this.callbacks.getPendingAttachments();
+          let attachmentsConsumed = false;
 
-            this.logger.log(`\n  ⚠ Stale prompt reference: "${nameArg}" — select a replacement:\n`, { type: 'warning' });
-            await this.showPromptListForPreview();
+          for (const msg of promptResult.messages) {
+            if (msg.content.type === 'text') {
+              const cancellationCheck = () => hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || hookMgr.hasPendingInjection() || hookMgr.hasPendingDirectives() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
 
-            const selection = (await rl.question('  Select prompt number: ')).trim();
-            const selectedIdx = parseInt(selection) - 1;
+              // Resume loop: after pause+resume, re-invoke processQuery so the agent can continue
+              let isFirstAttempt = true;
+              let continueAfterPause = false;
 
-            if (isNaN(selectedIdx) || selectedIdx < 0 || selectedIdx >= enabledPrompts.length) {
-              throw new Error(`Invalid prompt selection: ${selection}`);
-            }
+              do {
+                const queryText = isFirstAttempt ? msg.content.text : 'Continue from where you left off.';
+                const attachments = (isFirstAttempt && !attachmentsConsumed && promptAttachments.length > 0)
+                  ? promptAttachments : undefined;
 
-            promptInfo = enabledPrompts[selectedIdx];
-            const newPromptKey = `${promptInfo.server}__${promptInfo.prompt.name}`;
+                // Log user prompt to chat history (ablation path doesn't go through cli-client)
+                this.client.getChatHistoryManager().addUserMessage(queryText,
+                  attachments?.map(a => ({ fileName: a.fileName, ext: a.ext, mediaType: a.mediaType })));
 
-            // Update the ablation YAML to replace the stale command
-            if (ablation && phaseName) {
-              const phase = ablation.phases.find(p => p.name === phaseName);
-              if (phase) {
-                const cmdIdx = phase.commands.indexOf(trimmedCommand);
-                if (cmdIdx !== -1) {
-                  // Preserve any JSON args from the original command
-                  const jsonArgs = args.slice(1).join(' ');
-                  phase.commands[cmdIdx] = jsonArgs
-                    ? `/add-prompt ${newPromptKey} ${jsonArgs}`
-                    : `/add-prompt ${newPromptKey}`;
-                  this.ablationManager.save(ablation);
-                  this.logger.log(`  ✓ Updated ablation YAML: ${nameArg} → ${newPromptKey}\n`, { type: 'success' });
+                await this.client.processQuery(queryText, false, attachments, cancellationCheck);
+
+                if (isFirstAttempt && !attachmentsConsumed && promptAttachments.length > 0) {
+                  attachmentsConsumed = true;
+                  this.callbacks.setPendingAttachments([]);
                 }
-              }
-            }
-          }
+                isFirstAttempt = false;
+                continueAfterPause = false;
 
-          // Check for JSON arguments (remaining args joined)
-          let promptArgs: Record<string, string> | undefined;
-          if (args.length > 1) {
-            const jsonStr = args.slice(1).join(' ');
-            try {
-              promptArgs = JSON.parse(jsonStr);
-            } catch {
-              // Not JSON, ignore
-            }
-          }
+                // Handle soft interrupt (Ctrl+A): let user send messages or run commands
+                // Loop stays active until explicit resume (Enter) or abort (Ctrl+C)
+                // Skip if phase is already complete — @complete-phase takes priority over interrupt
+                if (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()
+                    && !hookMgr.isPhaseCompleteRequested() && !hookMgr.isAbortRunRequested()) {
+                  this.callbacks.resetInterrupt();
+                  this.callbacks.stopKeyboardMonitor();
 
-          const promptResult = await this.client.getPrompt(
-            promptInfo.server,
-            promptInfo.prompt.name,
-            promptArgs,
-          );
-          if (promptResult?.messages) {
-            // For agent-driven ablation phases: load phase hooks so @complete-phase works
-            const hookMgr = this.client.getHookManager();
-            let ablHooksLoaded = false;
-            if (ablation && phaseName) {
-              const phaseHooks = this.ablationManager.getHooksForPhase(ablation, phaseName);
-              if (phaseHooks.length > 0) {
-                hookMgr.loadAblationHooks(phaseHooks);
-                hookMgr.setCurrentPhaseName(phaseName);
-                hookMgr.resetPhaseComplete();
-                hookMgr.resetAbortRun();
-                ablHooksLoaded = true;
-              }
-            }
+                  if (this.callbacks.getReadline()) {
+                    this.logger.log('\n  ⏸ Agent paused. Type a message, /command, or press Enter to resume. (/help for commands)\n', { type: 'warning' });
 
-            try {
-              // Include any pending attachments with the first prompt message
-              const promptAttachments = this.callbacks.getPendingAttachments();
-              let attachmentsConsumed = false;
-
-              for (const msg of promptResult.messages) {
-                if (msg.content.type === 'text') {
-                  const cancellationCheck = () => hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || hookMgr.hasPendingInjection() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
-
-                  // Resume loop: after pause+resume, re-invoke processQuery so the agent can continue
-                  let isFirstAttempt = true;
-                  let continueAfterPause = false;
-
-                  do {
-                    const queryText = isFirstAttempt ? msg.content.text : 'Continue from where you left off.';
-                    const attachments = (isFirstAttempt && !attachmentsConsumed && promptAttachments.length > 0)
-                      ? promptAttachments : undefined;
-
-                    // Log user prompt to chat history (ablation path doesn't go through cli-client)
-                    this.client.getChatHistoryManager().addUserMessage(queryText,
-                      attachments?.map(a => ({ fileName: a.fileName, ext: a.ext, mediaType: a.mediaType })));
-
-                    await this.client.processQuery(queryText, false, attachments, cancellationCheck);
-
-                    if (isFirstAttempt && !attachmentsConsumed && promptAttachments.length > 0) {
-                      attachmentsConsumed = true;
-                      this.callbacks.setPendingAttachments([]);
-                    }
-                    isFirstAttempt = false;
-                    continueAfterPause = false;
-
-                    // Handle soft interrupt (Ctrl+A): let user send messages or run commands
-                    // Loop stays active until explicit resume (Enter) or abort (Ctrl+C)
-                    // Skip if phase is already complete — @complete-phase takes priority over interrupt
-                    if (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()
+                    let paused = true;
+                    while (paused && !this.callbacks.isAbortRequested()
                         && !hookMgr.isPhaseCompleteRequested() && !hookMgr.isAbortRunRequested()) {
+                      // Re-fetch readline each iteration — stopKeyboardMonitor() recreates it
+                      const rl = this.callbacks.getReadline()!;
+                      const userInput = (await rl.question('  You: ')).trim();
+
+                      const stopCond = () => hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
+
+                      // Re-enable keyboard monitor during processQuery so Ctrl+A works,
+                      // then stop it again so readline can prompt the next input.
+                      this.callbacks.startKeyboardMonitor();
+                      const result = await this.handlePauseInput(userInput, stopCond);
                       this.callbacks.resetInterrupt();
                       this.callbacks.stopKeyboardMonitor();
 
-                      if (this.callbacks.getReadline()) {
-                        this.logger.log('\n  ⏸ Agent paused. Type a message, /command, or press Enter to resume. (/help for commands)\n', { type: 'warning' });
-
-                        let paused = true;
-                        while (paused && !this.callbacks.isAbortRequested()
-                            && !hookMgr.isPhaseCompleteRequested() && !hookMgr.isAbortRunRequested()) {
-                          // Re-fetch readline each iteration — stopKeyboardMonitor() recreates it
-                          const rl = this.callbacks.getReadline()!;
-                          const userInput = (await rl.question('  You: ')).trim();
-
-                          const stopCond = () => hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
-
-                          // Re-enable keyboard monitor during processQuery so Ctrl+A works,
-                          // then stop it again so readline can prompt the next input.
-                          this.callbacks.startKeyboardMonitor();
-                          const result = await this.handlePauseInput(userInput, stopCond);
-                          this.callbacks.resetInterrupt();
-                          this.callbacks.stopKeyboardMonitor();
-
-                          if (result === 'resume') {
-                            continueAfterPause = true;
-                            paused = false;
-                          }
-                          // 'handled' → stay in pause loop, prompt again
-                        }
+                      if (result === 'resume') {
+                        continueAfterPause = true;
+                        paused = false;
                       }
-
-                      this.callbacks.startKeyboardMonitor();
+                      // 'handled' → stay in pause loop, prompt again
                     }
-                  } while (continueAfterPause
-                    && !hookMgr.isPhaseCompleteRequested()
-                    && !hookMgr.isAbortRunRequested()
-                    && !this.callbacks.isAbortRequested());
+                  }
 
-                  // Stop processing further messages if phase complete or aborted
-                  if (hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || this.callbacks.isAbortRequested()) break;
+                  this.callbacks.startKeyboardMonitor();
                 }
-              }
-            } finally {
-              if (ablHooksLoaded) hookMgr.clearAblationHooks();
-            }
+              } while (continueAfterPause
+                && !hookMgr.isPhaseCompleteRequested()
+                && !hookMgr.isAbortRunRequested()
+                && !this.callbacks.isAbortRequested());
 
-            if (hookMgr.isAbortRunRequested()) {
-              hookMgr.resetAbortRun();
-              return { abortRun: true };
-            }
-
-            if (hookMgr.isPhaseCompleteRequested()) {
-              hookMgr.resetPhaseComplete();
-              return { phaseComplete: true };
-            }
-
-            // Agent stopped responding during ablation without @complete-phase or @abort
-            // — treat as implicit phase completion so the run continues to the next phase/model
-            if (ablation && phaseName && !this.callbacks.isAbortRequested()) {
-              this.logger.log(`  ℹ Phase "${phaseName}": agent stopped without @complete-phase — treating as complete\n`, { type: 'info' });
-              this.client.getChatHistoryManager().addPhaseEvent('phase-abort', phaseName, { after: 'agent-stopped' });
-              return { phaseComplete: true };
+              // Stop processing further messages if phase complete or aborted
+              if (hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || this.callbacks.isAbortRequested()) break;
             }
           }
-          break;
+        } finally {
+          if (ablHooksLoaded) hookMgr.clearAblationHooks();
         }
-        case '/add-attachment': {
-          // /add-attachment <index|filename>
-          if (args.length === 0) {
-            throw new Error('Usage: /add-attachment <index|filename>');
-          }
-          const attachments = this.attachmentManager.listAttachments();
-          let attachment;
 
-          // Check if arg is a number (index) or filename
-          const argValue = args.join(' '); // Handle filenames with spaces
-          const attachmentIndex = parseInt(args[0]);
-
-          if (!isNaN(attachmentIndex) && String(attachmentIndex) === args[0]) {
-            // It's an index (1-based)
-            const idx = attachmentIndex - 1;
-            if (idx < 0 || idx >= attachments.length) {
-              throw new Error(`Invalid attachment index: ${args[0]}`);
-            }
-            attachment = attachments[idx];
-          } else {
-            // It's a filename - find by name
-            attachment = attachments.find((a) => a.fileName === argValue);
-            if (!attachment) {
-              throw new Error(`Attachment not found: ${argValue}`);
-            }
-          }
-
-          const pendingAttachments = this.callbacks.getPendingAttachments();
-          pendingAttachments.push(attachment);
-          this.callbacks.setPendingAttachments(pendingAttachments);
-          break;
+        if (hookMgr.isAbortRunRequested()) {
+          hookMgr.resetAbortRun();
+          return { abortRun: true };
         }
-        case '/attachment-insert': {
-          // /attachment-insert <index|filename>
-          if (args.length === 0) {
-            throw new Error('Usage: /attachment-insert <index|filename>');
-          }
-          const attachments = this.attachmentManager.listAttachments();
-          let attachment;
 
-          // Check if arg is a number (index) or filename
-          const argValue = args.join(' '); // Handle filenames with spaces
-          const attachmentIndex = parseInt(args[0]);
-
-          if (!isNaN(attachmentIndex) && String(attachmentIndex) === args[0]) {
-            // It's an index (1-based)
-            const idx = attachmentIndex - 1;
-            if (idx < 0 || idx >= attachments.length) {
-              throw new Error(`Invalid attachment index: ${args[0]}`);
-            }
-            attachment = attachments[idx];
-          } else {
-            // It's a filename - find by name
-            attachment = attachments.find((a) => a.fileName === argValue);
-            if (!attachment) {
-              throw new Error(`Attachment not found: ${argValue}`);
-            }
-          }
-
-          const pendingAttachments = this.callbacks.getPendingAttachments();
-          pendingAttachments.push(attachment);
-          this.callbacks.setPendingAttachments(pendingAttachments);
-          break;
+        if (hookMgr.isPhaseCompleteRequested()) {
+          hookMgr.resetPhaseComplete();
+          return { phaseComplete: true };
         }
-        case '/clear-attachments':
-          this.callbacks.setPendingAttachments([]);
-          break;
-        default:
-          // Unknown slash command - log warning but continue
-          this.logger.log(`  Warning: Unknown command "${cmd}", skipping\n`, {
-            type: 'warning',
-          });
+
+        // Consume pending directives from hooks (attachment/prompt injections)
+        const pendingResult = await this.consumePendingHookDirectives(hookMgr, maxIterations, ablation, phaseName);
+        if (pendingResult) return pendingResult;
+
+        // Agent stopped responding during ablation without @complete-phase or @abort
+        // — treat as implicit phase completion so the run continues to the next phase/model
+        if (ablation && phaseName && !this.callbacks.isAbortRequested()) {
+          this.logger.log(`  ℹ Phase "${phaseName}": agent stopped without @complete-phase — treating as complete\n`, { type: 'info' });
+          this.client.getChatHistoryManager().addPhaseEvent('phase-abort', phaseName, { after: 'agent-stopped' });
+          return { phaseComplete: true };
+        }
       }
+      return {};
+    }
+
+    // Handle @insert-attachment:<filename|index> — queue attachment for next query
+    if (trimmedCommand.startsWith('@insert-attachment:')) {
+      const argValue = trimmedCommand.slice('@insert-attachment:'.length).trim();
+      if (!argValue) {
+        throw new Error('Usage: @insert-attachment:filename or @insert-attachment:1');
+      }
+
+      if (dryRun) {
+        this.logger.log(`    ⚠ Skipping @insert-attachment in dry run (no model): ${argValue}\n`, { type: 'warning' });
+        return {};
+      }
+
+      const attachments = this.attachmentManager.listAttachments();
+      let attachment;
+
+      const attachmentIndex = parseInt(argValue);
+      if (!isNaN(attachmentIndex) && String(attachmentIndex) === argValue) {
+        // It's an index (1-based)
+        const idx = attachmentIndex - 1;
+        if (idx < 0 || idx >= attachments.length) {
+          throw new Error(`Invalid attachment index: ${argValue}`);
+        }
+        attachment = attachments[idx];
+      } else {
+        // It's a filename
+        attachment = attachments.find((a) => a.fileName === argValue);
+        if (!attachment) {
+          throw new Error(`Attachment not found: ${argValue}`);
+        }
+      }
+
+      const pendingAttachments = this.callbacks.getPendingAttachments();
+      pendingAttachments.push(attachment);
+      this.callbacks.setPendingAttachments(pendingAttachments);
+      return {};
+    }
+
+    // Handle @clear-attachments — clear pending attachment queue
+    if (trimmedCommand === '@clear-attachments') {
+      this.callbacks.setPendingAttachments([]);
+      return {};
+    }
+
+    // Handle unknown slash commands (warn but continue)
+    if (trimmedCommand.startsWith('/')) {
+      this.logger.log(`  Warning: Unknown command "${trimmedCommand}", skipping\n`, {
+        type: 'warning',
+      });
+    } else if (trimmedCommand.startsWith('@')) {
+      // Unknown @ directive
+      this.logger.log(`  Warning: Unknown directive "${trimmedCommand}", skipping\n`, {
+        type: 'warning',
+      });
     } else {
       // Regular query - send to model
       if (dryRun) {
@@ -1678,7 +1675,7 @@ export class AblationCLI {
         // Resume loop: after pause+resume, re-invoke processQuery so the agent can continue
         let isFirstAttempt = true;
         let continueAfterPause = false;
-        const cancellationCheck = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || hookManager.hasPendingInjection() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
+        const cancellationCheck = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || hookManager.hasPendingInjection() || hookManager.hasPendingDirectives() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
 
         do {
           const query = isFirstAttempt ? trimmedCommand : 'Continue from where you left off.';
@@ -1750,6 +1747,10 @@ export class AblationCLI {
         return { phaseComplete: true };
       }
 
+      // Consume pending directives from hooks (attachment/prompt injections)
+      const pendingResult = await this.consumePendingHookDirectives(hookManager, maxIterations, ablation, phaseName);
+      if (pendingResult) return pendingResult;
+
       // Agent stopped responding during ablation without @complete-phase or @abort
       // — treat as implicit phase completion so the run continues to the next phase/model
       if (ablation && phaseName && !this.callbacks.isAbortRequested()) {
@@ -1760,6 +1761,47 @@ export class AblationCLI {
     }
 
     return {};
+  }
+
+  /**
+   * Consume pending @ directives that hooks stored on the HookManager during processQuery().
+   * Handles @insert-attachment:, @clear-attachments, and @insert-prompt: in that order.
+   * Returns an AblationCommandResult if phase-complete/abort was triggered, or null to continue.
+   */
+  private async consumePendingHookDirectives(
+    hookMgr: HookManager,
+    maxIterations: number,
+    ablation?: AblationDefinition,
+    phaseName?: string,
+  ): Promise<AblationCommandResult | null> {
+    if (!hookMgr.hasPendingDirectives()) return null;
+
+    // Process @clear-attachments first
+    if (hookMgr.isPendingClearAttachments()) {
+      this.callbacks.setPendingAttachments([]);
+      hookMgr.resetPendingClearAttachments();
+      this.logger.log(`    Hook: cleared pending attachments\n`, { type: 'info' });
+    }
+
+    // Process @insert-attachment: directives
+    const pendingAttachments = hookMgr.getPendingAttachmentInsertions();
+    if (pendingAttachments.length > 0) {
+      hookMgr.resetPendingAttachmentInsertions();
+      for (const cmd of pendingAttachments) {
+        this.logger.log(`    Hook: executing ${cmd}\n`, { type: 'info' });
+        await this.executeAblationCommand(cmd, maxIterations, false, ablation, phaseName);
+      }
+    }
+
+    // Process @insert-prompt: directive (spawns a new agent session)
+    const pendingPrompt = hookMgr.getPendingPromptInsertion();
+    if (pendingPrompt) {
+      hookMgr.resetPendingPromptInsertion();
+      this.logger.log(`    Hook: executing ${pendingPrompt}\n`, { type: 'info' });
+      return await this.executeAblationCommand(pendingPrompt, maxIterations, false, ablation, phaseName);
+    }
+
+    return null;
   }
 
   /**
@@ -1915,7 +1957,7 @@ export class AblationCLI {
       }
     }
 
-    // Pre-flight: resolve any stale /add-prompt references before starting
+    // Pre-flight: resolve any stale @insert-prompt: references before starting
     const allPrompts = this.client.listPrompts();
     const promptMgr = this.client.getPromptManager();
     const enabledPrompts = promptMgr.filterPrompts(allPrompts);
@@ -1924,10 +1966,11 @@ export class AblationCLI {
       for (const phase of ablation.phases) {
         for (let cmdIdx = 0; cmdIdx < phase.commands.length; cmdIdx++) {
           const cmd = phase.commands[cmdIdx].trim();
-          if (!cmd.toLowerCase().startsWith('/add-prompt ')) continue;
+          if (!cmd.startsWith('@insert-prompt:')) continue;
 
-          const parts = cmd.split(/\s+/);
-          const promptRef = parts[1];
+          // Extract prompt name (strip optional args)
+          const suffix = cmd.slice('@insert-prompt:'.length).trim();
+          const promptRef = suffix.split(/[\s(]/)[0];
           if (!promptRef) continue;
 
           // Check if the reference resolves to a currently available prompt
@@ -1958,7 +2001,7 @@ export class AblationCLI {
           let collectedArgs: string | undefined;
           if (selected.prompt.arguments && selected.prompt.arguments.length > 0) {
             this.logger.log(
-              `    📝 Prompt "${selected.prompt.name}" requires ${selected.prompt.arguments.length} argument(s):\n`,
+              `    Prompt "${selected.prompt.name}" requires ${selected.prompt.arguments.length} argument(s):\n`,
               { type: 'info' },
             );
 
@@ -1992,8 +2035,8 @@ export class AblationCLI {
           }
 
           phase.commands[cmdIdx] = collectedArgs
-            ? `/add-prompt ${newKey} ${collectedArgs}`
-            : `/add-prompt ${newKey}`;
+            ? `@insert-prompt:${newKey} ${collectedArgs}`
+            : `@insert-prompt:${newKey}`;
 
           this.ablationManager.save(ablation);
           this.logger.log(`  ✓ Updated: ${promptRef} → ${newKey}\n`, { type: 'success' });
@@ -2001,26 +2044,23 @@ export class AblationCLI {
       }
     }
 
-    // Pre-flight: resolve any stale /attachment-insert and /add-attachment references
+    // Pre-flight: resolve any stale @insert-attachment: references
     const availableAttachments = this.attachmentManager.listAttachments();
 
     for (const ablation of selectedAblations) {
       for (const phase of ablation.phases) {
         for (let cmdIdx = 0; cmdIdx < phase.commands.length; cmdIdx++) {
           const cmd = phase.commands[cmdIdx].trim();
-          const lowerCmd = cmd.toLowerCase();
-          if (!lowerCmd.startsWith('/attachment-insert ') && !lowerCmd.startsWith('/add-attachment ')) continue;
+          if (!cmd.startsWith('@insert-attachment:')) continue;
 
-          const parts = cmd.split(/\s+/);
-          const cmdName = parts[0];
-          const attachRef = parts.slice(1).join(' '); // filename may have spaces
+          const attachRef = cmd.slice('@insert-attachment:'.length).trim();
           if (!attachRef) continue;
 
           // Check if the reference resolves to a currently available attachment
           const found = availableAttachments.find(a => a.fileName === attachRef);
           if (found) continue;
 
-          // Also skip if it's a numeric index that's in range (legacy but valid)
+          // Also skip if it's a numeric index that's in range
           const numIdx = parseInt(attachRef);
           if (!isNaN(numIdx) && String(numIdx) === attachRef && numIdx >= 1 && numIdx <= availableAttachments.length) continue;
 
@@ -2042,7 +2082,7 @@ export class AblationCLI {
           }
 
           const selectedAtt = availableAttachments[selectedIdx];
-          phase.commands[cmdIdx] = `${cmdName} ${selectedAtt.fileName}`;
+          phase.commands[cmdIdx] = `@insert-attachment:${selectedAtt.fileName}`;
 
           this.ablationManager.save(ablation);
           this.logger.log(`  ✓ Updated: ${attachRef} → ${selectedAtt.fileName}\n`, { type: 'success' });
@@ -2409,9 +2449,9 @@ export class AblationCLI {
     // Save a snapshot of all available tools and their descriptions (constant for the whole ablation)
     this.ablationManager.saveToolsSnapshot(runDir, this.client.getServersInfo());
 
-    // Save a snapshot of all available prompts (only if any phase uses /add-prompt)
+    // Save a snapshot of all available prompts (only if any phase uses @insert-prompt:)
     const usesPrompts = ablation.phases.some(p =>
-      p.commands.some(c => c.trim().toLowerCase().startsWith('/add-prompt')),
+      p.commands.some(c => c.trim().startsWith('@insert-prompt:')),
     );
     if (usesPrompts) {
       const allPrompts = this.client.listPrompts().map(p => ({
@@ -2656,21 +2696,17 @@ export class AblationCLI {
             }
 
             // Pre-stage attachment commands before executing sending commands.
-            // This ensures /attachment-insert and /add-attachment are processed
-            // before /add-prompt or raw queries, regardless of YAML ordering.
-            const stagingCommands = new Set(['/attachment-insert', '/add-attachment', '/clear-attachments']);
+            // This ensures @insert-attachment: and @clear-attachments are processed
+            // before @insert-prompt: or raw queries, regardless of YAML ordering.
+            const isStagingCommand = (cmd: string) => {
+              const t = cmd.trim().toLowerCase();
+              return t.startsWith('@insert-attachment:') || t === '@clear-attachments';
+            };
             const stagedIndices = new Set<number>();
-            // Count total staging commands first for numbering
-            const totalStaging = phaseCommands.filter((cmd) => {
-              const t = cmd.trim();
-              const s = t.startsWith('/') ? t.split(/\s+/)[0].toLowerCase() : null;
-              return s && stagingCommands.has(s);
-            }).length;
+            const totalStaging = phaseCommands.filter(cmd => isStagingCommand(cmd)).length;
             let stageIdx = 0;
             for (let i = 0; i < phaseCommands.length; i++) {
-              const trimmed = phaseCommands[i].trim();
-              const slashCmd = trimmed.startsWith('/') ? trimmed.split(/\s+/)[0].toLowerCase() : null;
-              if (slashCmd && stagingCommands.has(slashCmd)) {
+              if (isStagingCommand(phaseCommands[i])) {
                 stageIdx++;
                 this.logger.log(
                   `  [pre-stage ${stageIdx}/${totalStaging}] Executing: ${phaseCommands[i]}\n`,
@@ -4364,27 +4400,25 @@ export class AblationCLI {
 
   /**
    * Check if a command needs an argument that should be provided in the next input
-   * Returns true for commands like /add-prompt, /add-attachment that need a selection
+   * Returns true for directives like @insert-prompt:, @insert-attachment: that need an argument
    */
   private commandNeedsArgument(command: string): boolean {
-    const lowerCommand = command.toLowerCase().trim();
+    const trimmed = command.trim();
 
-    // Commands that need an index/argument
-    const commandsNeedingArgs = [
-      '/add-prompt',
-      '/add-attachment',
-      '/attachment-insert',
+    // @ directives need content after the colon
+    const directivesNeedingArgs = [
+      '@insert-prompt:',
+      '@insert-attachment:',
     ];
 
-    // Check if the command is one that needs an argument AND doesn't already have one
-    for (const cmd of commandsNeedingArgs) {
-      if (lowerCommand === cmd) {
-        // Command without argument
+    for (const prefix of directivesNeedingArgs) {
+      if (trimmed.toLowerCase() === prefix.slice(0, -1)) {
+        // Bare directive without colon-suffix (e.g., "@insert-prompt")
         return true;
       }
-      if (lowerCommand.startsWith(cmd + ' ')) {
-        // Command already has an argument
-        return false;
+      if (trimmed.toLowerCase().startsWith(prefix) && trimmed.slice(prefix.length).trim() === '') {
+        // Directive with colon but nothing after (e.g., "@insert-prompt:")
+        return true;
       }
     }
 
@@ -4396,12 +4430,14 @@ export class AblationCLI {
    * Shows the command output so user can see what inputs are expected
    */
   private async executeAblationPreviewCommand(command: string): Promise<void> {
-    const lowerCommand = command.toLowerCase();
+    const lowerCommand = command.toLowerCase().trim();
 
     try {
-      // Handle read-only/display commands that help user understand what to input
-      if (lowerCommand === '/add-prompt') {
+      // Handle @ directive previews
+      if (lowerCommand === '@insert-prompt' || lowerCommand === '@insert-prompt:') {
         await this.showPromptListForPreview();
+      } else if (lowerCommand === '@insert-attachment' || lowerCommand === '@insert-attachment:') {
+        await this.showAttachmentListForPreview();
       } else if (
         lowerCommand === '/prompts' ||
         lowerCommand === '/prompts-list'
@@ -4409,8 +4445,6 @@ export class AblationCLI {
         await this.callbacks.getPromptCLI().displayPromptsList();
       } else if (lowerCommand === '/attachment-list') {
         await this.callbacks.getAttachmentCLI().handleAttachmentListCommand();
-      } else if (lowerCommand === '/attachment-insert') {
-        await this.showAttachmentListForPreview();
       } else if (
         lowerCommand === '/tools' ||
         lowerCommand === '/tools-list'

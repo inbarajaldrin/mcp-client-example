@@ -710,7 +710,7 @@ export class AblationManager {
 
   /**
    * Copy referenced attachments to the run directory
-   * Only copies attachments that are used in /attachment-insert commands in the ablation
+   * Only copies attachments that are used in @insert-attachment: commands in the ablation
    */
   copyAttachmentsToRun(runDir: string, ablation: AblationDefinition, resolvedArguments?: Record<string, string>): number {
     const runAttachmentsDir = join(runDir, 'attachments');
@@ -720,16 +720,20 @@ export class AblationManager {
         return 0; // No attachments folder
       }
 
-      // Parse commands to find /attachment-insert references (by filename)
+      // Parse commands (and onStart/onEnd) to find @insert-attachment: references
       // Substitute placeholders first so dynamic attachment names are resolved
       const referencedFiles = new Set<string>();
       for (const phase of ablation.phases) {
+        const allCommands = [
+          ...phase.commands,
+          ...(phase.onStart || []),
+          ...(phase.onEnd || []),
+        ];
         const commands = resolvedArguments
-          ? this.substituteArguments(phase.commands, resolvedArguments)
-          : phase.commands;
+          ? this.substituteArguments(allCommands, resolvedArguments)
+          : allCommands;
         for (const command of commands) {
-          // Match /attachment-insert followed by filename
-          const match = command.match(/^\/attachment-insert\s+(.+)$/i);
+          const match = command.match(/^@insert-attachment:(.+)$/i);
           if (match) {
             const fileName = match[1].trim();
             referencedFiles.add(fileName);

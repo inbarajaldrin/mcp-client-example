@@ -126,7 +126,10 @@
       { "pattern": "@complete-phase", "description": "Signal that the current phase is complete" },
       { "pattern": "@complete-phase:name", "description": "Signal phase complete only if current phase matches name" },
       { "pattern": "@abort", "description": "Abort the current ablation run" },
-      { "pattern": "/attachment-insert {filename}", "description": "Insert file as attachment into conversation" },
+      { "pattern": "@insert-prompt:server__promptName", "description": "Fetch prompt from MCP server and run agent session" },
+      { "pattern": "@insert-prompt:server__promptName(arg='val')", "description": "Fetch prompt with arguments" },
+      { "pattern": "@insert-attachment:filename", "description": "Queue file as attachment for next query" },
+      { "pattern": "@clear-attachments", "description": "Clear pending attachment queue" },
       { "pattern": "plain text", "description": "Sent as user message to the LLM" }
     ]
   },

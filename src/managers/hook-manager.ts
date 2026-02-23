@@ -71,6 +71,11 @@ export class HookManager {
   private abortRunRequested: boolean = false;
   private pendingToolInjection: boolean = false;
 
+  // Pending @ directive commands from hooks — consumed by ablation-cli after processQuery returns
+  private pendingPromptInsertion: string | null = null;
+  private pendingAttachmentInsertions: string[] = [];
+  private pendingClearAttachments: boolean = false;
+
   constructor(logger?: Logger) {
     this.logger = logger || new Logger({ mode: 'verbose' });
     this.loadHooks();
@@ -186,9 +191,12 @@ export class HookManager {
     }));
   }
 
-  /** Remove temporary ablation hooks */
+  /** Remove temporary ablation hooks and reset all pending directive state */
   clearAblationHooks(): void {
     this.ablationHooks = [];
+    this.pendingPromptInsertion = null;
+    this.pendingAttachmentInsertions = [];
+    this.pendingClearAttachments = false;
   }
 
   /** Set the current phase name for @complete-phase:name matching */
@@ -226,6 +234,33 @@ export class HookManager {
 
   /** Reset pending injection flag after deferred hooks have fired */
   resetPendingInjection(): void { this.pendingToolInjection = false; }
+
+  // ==================== Pending Directive Signaling ====================
+
+  /** Get pending @insert-prompt: command (full command string) */
+  getPendingPromptInsertion(): string | null { return this.pendingPromptInsertion; }
+
+  /** Reset pending prompt insertion after it's been consumed */
+  resetPendingPromptInsertion(): void { this.pendingPromptInsertion = null; }
+
+  /** Get pending @insert-attachment: references */
+  getPendingAttachmentInsertions(): string[] { return [...this.pendingAttachmentInsertions]; }
+
+  /** Reset pending attachment insertions after they've been consumed */
+  resetPendingAttachmentInsertions(): void { this.pendingAttachmentInsertions = []; }
+
+  /** Check if @clear-attachments was requested */
+  isPendingClearAttachments(): boolean { return this.pendingClearAttachments; }
+
+  /** Reset pending clear attachments flag */
+  resetPendingClearAttachments(): void { this.pendingClearAttachments = false; }
+
+  /** Check if any pending directives need to be consumed */
+  hasPendingDirectives(): boolean {
+    return this.pendingPromptInsertion !== null
+      || this.pendingAttachmentInsertions.length > 0
+      || this.pendingClearAttachments;
+  }
 
   // ==================== Runtime Hook Execution ====================
 
@@ -270,6 +305,28 @@ export class HookManager {
         after: triggerTool,
         whenOutput,
       });
+      return true;
+    }
+
+    // @insert-prompt:<server__promptName> — store for ablation-cli to execute after processQuery returns
+    if (trimmed.startsWith('@insert-prompt:')) {
+      this.logger.log(`[Hook insert-prompt: ${trimmed.slice('@insert-prompt:'.length).split(/[\s(]/)[0]}]\n`, { type: 'info' });
+      this.pendingPromptInsertion = trimmed;
+      return true;
+    }
+
+    // @insert-attachment:<filename|index> — store for ablation-cli to queue
+    if (trimmed.startsWith('@insert-attachment:')) {
+      const ref = trimmed.slice('@insert-attachment:'.length).trim();
+      this.logger.log(`[Hook insert-attachment: ${ref}]\n`, { type: 'info' });
+      this.pendingAttachmentInsertions.push(trimmed);
+      return true;
+    }
+
+    // @clear-attachments — store flag for ablation-cli to clear pending queue
+    if (trimmed === '@clear-attachments') {
+      this.logger.log(`[Hook clear-attachments]\n`, { type: 'info' });
+      this.pendingClearAttachments = true;
       return true;
     }
 
