@@ -116,6 +116,7 @@ export interface ChatSession {
     cacheCreationTokens?: number; // Cache creation input tokens (full price)
     cacheReadTokens?: number; // Cache read tokens (90% discount)
     estimatedCost?: number; // Estimated cost in USD for this callback
+    model?: string; // Model active at the time of this callback (tracks mid-session switches)
     // Ollama-specific metrics (optional, for local LLM providers)
     ollamaMetrics?: {
       totalDuration?: number;      // nanoseconds
@@ -145,6 +146,7 @@ export class ChatHistoryManager {
   private index: Map<string, ChatMetadata> = new Map();
   private toolUseCount: number = 0;
   private providerName: string | undefined;
+  private activeModel: string | undefined;
 
   constructor(logger?: Logger) {
     this.logger = logger || new Logger({ mode: 'verbose' });
@@ -154,6 +156,10 @@ export class ChatHistoryManager {
 
   setProviderName(name: string): void {
     this.providerName = name;
+  }
+
+  setActiveModel(model: string): void {
+    this.activeModel = model;
   }
 
   getCurrentSession(): ChatSession | null {
@@ -240,6 +246,7 @@ export class ChatHistoryManager {
 
     this.sessionStartTime = now;
     this.toolUseCount = 0;
+    this.activeModel = model;
 
     if (!resumeSessionId) {
       this.logger.log(`Started chat session: ${sessionId}\n`, { type: 'info' });
@@ -606,14 +613,17 @@ export class ChatHistoryManager {
       this.currentSession.tokenUsagePerCallback = [];
     }
 
+    // Use activeModel for cost calculation (tracks mid-session model switches)
+    const costModel = this.activeModel || this.currentSession.model;
+
     // Calculate estimated cost for this callback (skip for Ollama - no cost for local LLMs)
     let estimatedCost: number | undefined;
     if (!ollamaMetrics && (regularInputTokens !== undefined || cacheCreationTokens !== undefined || cacheReadTokens !== undefined)) {
       // Calculate total input tokens for long context pricing detection
       const totalInputTokens = (regularInputTokens || 0) + (cacheCreationTokens || 0) + (cacheReadTokens || 0);
-      
+
       estimatedCost = this.calculateCost(
-        this.currentSession.model,
+        costModel,
         regularInputTokens || 0,
         cacheCreationTokens || 0,
         cacheReadTokens || 0,
@@ -649,6 +659,7 @@ export class ChatHistoryManager {
       cacheCreationTokens,
       cacheReadTokens,
       estimatedCost,
+      model: this.activeModel,
       ollamaMetrics,
     });
   }

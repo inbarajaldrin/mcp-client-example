@@ -1369,8 +1369,8 @@ export class MCPClient {
   }
 
   /**
-   * Clear the current chat context and start a new session
-   * This discards the current session without saving and clears all messages
+   * Save the current chat session and start a new one with empty context.
+   * The current session is saved to disk (via endSession) before clearing.
    */
   clearContext(): void {
     // Save the current session if it has messages, otherwise discard
@@ -1416,6 +1416,37 @@ export class MCPClient {
 
     // Clear context for fresh conversation
     this.clearContext();
+
+    this.logger.log(`Switched to ${provider.getProviderName()}/${model}\n`, { type: 'info' });
+  }
+
+  /**
+   * Switch the model provider and model while preserving conversation context.
+   * Unlike switchProviderAndModel(), this does NOT clear messages.
+   * Records the switch as a client event in chat history.
+   */
+  async switchModel(provider: ModelProvider, model: string): Promise<void> {
+    // Unload previous model from memory if provider supports it (e.g., Ollama)
+    if (this.modelProvider.unloadModel) {
+      await this.modelProvider.unloadModel(this.model);
+    }
+
+    const prevProvider = this.modelProvider.getProviderName();
+    const prevModel = this.model;
+
+    // Update provider and model
+    this.modelProvider = provider;
+    this.model = model;
+    this.chatHistoryManager.setProviderName(provider.getProviderName());
+    this.chatHistoryManager.setActiveModel(model);
+
+    // Reinitialize token counter for new model's context window
+    await this.tokenManager.reinitializeTokenCounter();
+
+    // Record the switch as a client event in the conversation (no context clear)
+    this.chatHistoryManager.addClientMessage(
+      `[Model switched from ${prevProvider}/${prevModel} to ${provider.getProviderName()}/${model}]`
+    );
 
     this.logger.log(`Switched to ${provider.getProviderName()}/${model}\n`, { type: 'info' });
   }

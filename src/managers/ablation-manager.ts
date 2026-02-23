@@ -916,6 +916,72 @@ export class AblationManager {
   }
 
   /**
+   * Restore outputs from a run's phase directory into the local outputs folder.
+   * If the outputs folder is not empty, the caller must handle stashing/overwriting first.
+   */
+  restoreRunOutputs(phaseDir: string): number {
+    try {
+      if (!existsSync(phaseDir)) {
+        this.logger.log(`Phase directory does not exist: ${phaseDir}\n`, { type: 'error' });
+        return 0;
+      }
+
+      mkdirSync(OUTPUTS_DIR, { recursive: true });
+
+      // Copy all output subdirectories (logs, screenshots, videos, resources) but skip chat/log files
+      const skipFiles = new Set(['chat.json', 'chat.md', 'tool-exec-log.json', 'tool-exec-log.md']);
+      const items = readdirSync(phaseDir).filter(item => !skipFiles.has(item));
+
+      if (items.length === 0) {
+        return 0;
+      }
+
+      for (const item of items) {
+        const src = join(phaseDir, item);
+        const dest = join(OUTPUTS_DIR, item);
+        cpSync(src, dest, { recursive: true });
+      }
+
+      return items.length;
+    } catch (error) {
+      this.logger.log(`Failed to restore run outputs: ${error}\n`, { type: 'error' });
+      return 0;
+    }
+  }
+
+  /**
+   * Check if the outputs folder has any content.
+   */
+  isOutputsEmpty(): boolean {
+    if (!existsSync(OUTPUTS_DIR)) return true;
+    const items = readdirSync(OUTPUTS_DIR);
+    if (items.length === 0) return true;
+    // Check if all items are empty directories
+    for (const item of items) {
+      const itemPath = join(OUTPUTS_DIR, item);
+      if (!statSync(itemPath).isDirectory()) return false;
+      if (readdirSync(itemPath).length > 0) return false;
+    }
+    return true;
+  }
+
+  /**
+   * Load a ChatSession from an arbitrary file path (e.g., from an ablation run directory).
+   */
+  loadChatFromFile(filePath: string): any | null {
+    try {
+      if (!existsSync(filePath)) {
+        return null;
+      }
+      const content = readFileSync(filePath, 'utf-8');
+      return JSON.parse(content);
+    } catch (error) {
+      this.logger.log(`Failed to load chat from file: ${error}\n`, { type: 'error' });
+      return null;
+    }
+  }
+
+  /**
    * Get the phase directory for a specific run result (contains outputs, chat, logs)
    */
   getRunOutputsDir(runDir: string, phaseName: string, model: AblationModel, runIteration?: number): string {

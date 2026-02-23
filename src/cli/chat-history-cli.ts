@@ -3,7 +3,7 @@
  */
 
 import readline from 'readline/promises';
-import { ChatHistoryManager } from '../managers/chat-history-manager.js';
+import { ChatHistoryManager, type ChatSession } from '../managers/chat-history-manager.js';
 import { Logger } from '../logger.js';
 
 /**
@@ -518,273 +518,282 @@ export class ChatHistoryCLI {
         return;
       }
 
-      // Load messages into current conversation context
-      const messages = this.callbacks.getMessages();
-      const newMessages: any[] = [];
-      let restoredCount = 0;
-
-      // Build a map of tool_use_id -> assistant message index for proper ordering
-      // This handles cases where tool messages appear before their assistant message in saved order
-      // Check both content_blocks (canonical/Anthropic) and tool_calls (OpenAI/Gemini/Ollama) formats
-      const toolUseIdToAssistantIndex = new Map<string, number>();
-      for (let i = 0; i < fullChat.messages.length; i++) {
-        const msg = fullChat.messages[i];
-        if (msg.role === 'assistant') {
-          // Check content_blocks for tool_use entries (canonical/Anthropic format)
-          if (msg.content_blocks) {
-            for (const block of msg.content_blocks) {
-              if ((block.type === 'tool_use' || block.type === 'function_call') && block.id) {
-                toolUseIdToAssistantIndex.set(block.id, i);
-              }
-            }
-          }
-          // Also check tool_calls (OpenAI/Gemini/Ollama format, may exist in older saved chats)
-          if ((msg as any).tool_calls) {
-            for (const tc of (msg as any).tool_calls) {
-              if (tc.id) {
-                toolUseIdToAssistantIndex.set(tc.id, i);
-              }
-            }
-          }
-        }
-      }
-
-      // Collect tool results by their matching assistant message index
-      const toolResultsByAssistantIndex = new Map<number, Array<{ tool_use_id: string; tool_name: string; content: string }>>();
-
-      for (const msg of fullChat.messages) {
-        if (msg.role === 'tool' && msg.tool_use_id && msg.toolName && msg.toolOutput !== undefined) {
-          const assistantIndex = toolUseIdToAssistantIndex.get(msg.tool_use_id);
-          if (assistantIndex !== undefined) {
-            if (!toolResultsByAssistantIndex.has(assistantIndex)) {
-              toolResultsByAssistantIndex.set(assistantIndex, []);
-            }
-            toolResultsByAssistantIndex.get(assistantIndex)!.push({
-              tool_use_id: msg.tool_use_id,
-              tool_name: msg.toolName,
-              content: msg.toolOutput,
-            });
-          }
-          // Skip orphaned tool results - they don't have matching tool_use blocks
-
-          // Save to history manager regardless
-          this.historyManager.addToolExecution(
-            msg.toolName,
-            msg.toolInput || {},
-            msg.toolOutput,
-            msg.orchestratorMode || false,
-            msg.isIPCCall || false,
-            msg.toolInputTime,
-            msg.tool_use_id,
-          );
-          restoredCount++;
-        }
-      }
-
-      // Build set of matched tool_use_ids (those with content_blocks in an assistant message)
-      const matchedToolUseIds = new Set<string>(toolUseIdToAssistantIndex.keys());
-
-      // Now restore messages in proper order
-      // Collect consecutive orphaned tool results to batch them into a single context message
-      let pendingOrphanedToolResults: Array<{ toolName: string; toolInput: any; toolOutput: string }> = [];
-
-      const flushOrphanedToolResults = () => {
-        if (pendingOrphanedToolResults.length === 0) return;
-
-        // Format orphaned tool results as a text-based context message
-        // so the model can see the tool execution history even without content_blocks
-        const lines: string[] = ['[Restored Tool Execution Context]'];
-        for (const tr of pendingOrphanedToolResults) {
-          lines.push(`\nTool: ${tr.toolName}`);
-          if (tr.toolInput && Object.keys(tr.toolInput).length > 0) {
-            lines.push(`Input: ${JSON.stringify(tr.toolInput)}`);
-          }
-          lines.push(`Output: ${tr.toolOutput}`);
-        }
-
-        newMessages.push({
-          role: 'user',
-          content: lines.join('\n'),
-        });
-
-        pendingOrphanedToolResults = [];
-      };
-
-      for (let i = 0; i < fullChat.messages.length; i++) {
-        const msg = fullChat.messages[i];
-
-        if (msg.role === 'user') {
-          // Flush any pending orphaned tool results before a user message
-          flushOrphanedToolResults();
-
-          const messageObj: any = {
-            role: msg.role,
-            content: msg.content,
-          };
-
-          // Restore attachment content blocks if this message had attachments
-          if (msg.attachments && Array.isArray(msg.attachments) && msg.attachments.length > 0) {
-            const attachmentManager = this.callbacks.getAttachmentManager();
-            if (attachmentManager) {
-              const providerName = this.callbacks.getProviderName();
-              const foundAttachments: Array<{ path: string; fileName: string; ext: string; mediaType: string }> = [];
-              const missingAttachments: string[] = [];
-              const unsupportedAttachments: Array<{ fileName: string; mediaType: string }> = [];
-
-              for (const att of msg.attachments) {
-                const info = attachmentManager.getAttachmentInfo(att.fileName);
-                if (!info) {
-                  missingAttachments.push(att.fileName);
-                } else if (!this.isAttachmentSupportedByProvider(info.mediaType, providerName)) {
-                  unsupportedAttachments.push({ fileName: info.fileName, mediaType: info.mediaType });
-                } else {
-                  foundAttachments.push(info);
-                }
-              }
-
-              // Create content blocks from found attachments
-              if (foundAttachments.length > 0) {
-                try {
-                  const contentBlocks = attachmentManager.createContentBlocks(foundAttachments);
-                  if (contentBlocks.length > 0) {
-                    messageObj.content_blocks = contentBlocks;
-                  }
-                } catch (error) {
-                  this.logger.log(
-                    `  ⚠ Failed to create content blocks for attachments: ${error}\n`,
-                    { type: 'warning' },
-                  );
-                }
-              }
-
-              // Log warnings for missing attachments
-              if (missingAttachments.length > 0) {
-                this.logger.log(
-                  `  ⚠ Missing attachment file(s): ${missingAttachments.join(', ')}\n`,
-                  { type: 'warning' },
-                );
-              }
-
-              // Log warnings for unsupported attachments
-              if (unsupportedAttachments.length > 0) {
-                const details = unsupportedAttachments
-                  .map(a => `${a.fileName} (${a.mediaType})`)
-                  .join(', ');
-                this.logger.log(
-                  `  ⚠ Unsupported by ${providerName}: ${details}\n`,
-                  { type: 'warning' },
-                );
-              }
-            }
-          }
-
-          newMessages.push(messageObj);
-          this.historyManager.addUserMessage(msg.content, msg.attachments);
-          restoredCount++;
-        } else if (msg.role === 'assistant') {
-          // Flush any pending orphaned tool results before an assistant message
-          flushOrphanedToolResults();
-
-          // Restore assistant message with content_blocks if present
-          const messageObj: any = {
-            role: 'assistant',
-            content: msg.content,
-          };
-
-          // Preserve content_blocks with tool_use blocks for proper model context
-          // But handle dangling tool_use blocks (session ended before tool returned)
-          if (msg.content_blocks && msg.content_blocks.length > 0) {
-            const matchingToolResults = toolResultsByAssistantIndex.get(i);
-            const hasMatchingResults = matchingToolResults && matchingToolResults.length > 0;
-
-            if (hasMatchingResults) {
-              // All tool_use blocks have matching results - keep content_blocks as-is
-              messageObj.content_blocks = msg.content_blocks;
-            } else {
-              // Check if any tool_use blocks lack results (dangling)
-              const toolUseBlocks = msg.content_blocks.filter(
-                (b: any) => b.type === 'tool_use' || b.type === 'function_call'
-              );
-              const nonToolBlocks = msg.content_blocks.filter(
-                (b: any) => b.type !== 'tool_use' && b.type !== 'function_call'
-              );
-
-              if (toolUseBlocks.length > 0) {
-                // Strip dangling tool_use blocks - session was interrupted before tool returned
-                // Keep only text blocks to avoid provider API errors
-                if (nonToolBlocks.length > 0) {
-                  messageObj.content_blocks = nonToolBlocks;
-                }
-                // If no non-tool blocks remain, omit content_blocks entirely
-              } else {
-                // No tool_use blocks - preserve content_blocks (e.g., text blocks)
-                messageObj.content_blocks = msg.content_blocks;
-              }
-            }
-          }
-
-          newMessages.push(messageObj);
-          this.historyManager.addAssistantMessage(msg.content, msg.content_blocks, msg.thinking);
-          restoredCount++;
-
-          // Add tool results that belong to this assistant message (AFTER the assistant message)
-          const matchingToolResults = toolResultsByAssistantIndex.get(i);
-          if (matchingToolResults && matchingToolResults.length > 0) {
-            const toolResultsMessage = {
-              role: 'user',
-              content: '',
-              tool_results: matchingToolResults.map(tr => ({
-                type: 'tool_result',
-                tool_use_id: tr.tool_use_id,
-                tool_name: tr.tool_name, // Include tool name for Gemini compatibility
-                content: tr.content,
-              })),
-            };
-            newMessages.push(toolResultsMessage);
-          }
-        } else if (msg.role === 'tool' && msg.tool_use_id && !matchedToolUseIds.has(msg.tool_use_id)) {
-          // Orphaned tool result - no matching content_blocks in any assistant message
-          // (common with orchestrator IPC calls or Gemini sessions)
-          // Collect and batch into a text context message
-          pendingOrphanedToolResults.push({
-            toolName: msg.toolName || 'unknown',
-            toolInput: msg.toolInput || {},
-            toolOutput: msg.toolOutput || '',
-          });
-        }
-        // Matched tool messages are handled via toolResultsByAssistantIndex above
-      }
-
-      // Flush any remaining orphaned tool results at the end
-      flushOrphanedToolResults();
-
-      // Convert messages to provider-specific format before adding to context
-      const providerName = this.callbacks.getProviderName();
-      const convertedMessages = this.convertMessagesForProvider(newMessages, providerName);
-      this.logger.log(
-        `  (Converted ${newMessages.length} messages to ${providerName} format)\n`,
-        { type: 'info' },
-      );
-
-      // Prepend restored messages to current conversation (for the model context)
-      messages.unshift(...convertedMessages);
-
-      // Update token count (approximate)
-      const tokenCounter = this.callbacks.getTokenCounter();
-      if (tokenCounter) {
-        let currentTokenCount = this.callbacks.getCurrentTokenCount();
-        for (const msg of newMessages) {
-          currentTokenCount += tokenCounter.countMessageTokens(msg);
-        }
-        this.callbacks.setCurrentTokenCount(currentTokenCount);
-      }
-
+      const restoredCount = this.restoreFromSession(fullChat);
       this.logger.log(
         `\n✓ Restored ${restoredCount} messages from chat session ${selectedChat.sessionId}\n`,
         { type: 'success' },
       );
       break; // Exit the pagination loop after successful selection
     }
+  }
+
+  /**
+   * Restore a chat session from a ChatSession object into the current conversation context.
+   * Rebuilds messages, handles tool pairing, converts to provider format, and injects into context.
+   * Returns the number of restored messages.
+   */
+  restoreFromSession(fullChat: ChatSession): number {
+    const messages = this.callbacks.getMessages();
+    const newMessages: any[] = [];
+    let restoredCount = 0;
+
+    // Build a map of tool_use_id -> assistant message index for proper ordering
+    // This handles cases where tool messages appear before their assistant message in saved order
+    // Check both content_blocks (canonical/Anthropic) and tool_calls (OpenAI/Gemini/Ollama) formats
+    const toolUseIdToAssistantIndex = new Map<string, number>();
+    for (let i = 0; i < fullChat.messages.length; i++) {
+      const msg = fullChat.messages[i];
+      if (msg.role === 'assistant') {
+        // Check content_blocks for tool_use entries (canonical/Anthropic format)
+        if (msg.content_blocks) {
+          for (const block of msg.content_blocks) {
+            if ((block.type === 'tool_use' || block.type === 'function_call') && block.id) {
+              toolUseIdToAssistantIndex.set(block.id, i);
+            }
+          }
+        }
+        // Also check tool_calls (OpenAI/Gemini/Ollama format, may exist in older saved chats)
+        if ((msg as any).tool_calls) {
+          for (const tc of (msg as any).tool_calls) {
+            if (tc.id) {
+              toolUseIdToAssistantIndex.set(tc.id, i);
+            }
+          }
+        }
+      }
+    }
+
+    // Collect tool results by their matching assistant message index
+    const toolResultsByAssistantIndex = new Map<number, Array<{ tool_use_id: string; tool_name: string; content: string }>>();
+
+    for (const msg of fullChat.messages) {
+      if (msg.role === 'tool' && msg.tool_use_id && msg.toolName && msg.toolOutput !== undefined) {
+        const assistantIndex = toolUseIdToAssistantIndex.get(msg.tool_use_id);
+        if (assistantIndex !== undefined) {
+          if (!toolResultsByAssistantIndex.has(assistantIndex)) {
+            toolResultsByAssistantIndex.set(assistantIndex, []);
+          }
+          toolResultsByAssistantIndex.get(assistantIndex)!.push({
+            tool_use_id: msg.tool_use_id,
+            tool_name: msg.toolName,
+            content: msg.toolOutput,
+          });
+        }
+        // Skip orphaned tool results - they don't have matching tool_use blocks
+
+        // Save to history manager regardless
+        this.historyManager.addToolExecution(
+          msg.toolName,
+          msg.toolInput || {},
+          msg.toolOutput,
+          msg.orchestratorMode || false,
+          msg.isIPCCall || false,
+          msg.toolInputTime,
+          msg.tool_use_id,
+        );
+        restoredCount++;
+      }
+    }
+
+    // Build set of matched tool_use_ids (those with content_blocks in an assistant message)
+    const matchedToolUseIds = new Set<string>(toolUseIdToAssistantIndex.keys());
+
+    // Now restore messages in proper order
+    // Collect consecutive orphaned tool results to batch them into a single context message
+    let pendingOrphanedToolResults: Array<{ toolName: string; toolInput: any; toolOutput: string }> = [];
+
+    const flushOrphanedToolResults = () => {
+      if (pendingOrphanedToolResults.length === 0) return;
+
+      // Format orphaned tool results as a text-based context message
+      // so the model can see the tool execution history even without content_blocks
+      const lines: string[] = ['[Restored Tool Execution Context]'];
+      for (const tr of pendingOrphanedToolResults) {
+        lines.push(`\nTool: ${tr.toolName}`);
+        if (tr.toolInput && Object.keys(tr.toolInput).length > 0) {
+          lines.push(`Input: ${JSON.stringify(tr.toolInput)}`);
+        }
+        lines.push(`Output: ${tr.toolOutput}`);
+      }
+
+      newMessages.push({
+        role: 'user',
+        content: lines.join('\n'),
+      });
+
+      pendingOrphanedToolResults = [];
+    };
+
+    for (let i = 0; i < fullChat.messages.length; i++) {
+      const msg = fullChat.messages[i];
+
+      if (msg.role === 'user') {
+        // Flush any pending orphaned tool results before a user message
+        flushOrphanedToolResults();
+
+        const messageObj: any = {
+          role: msg.role,
+          content: msg.content,
+        };
+
+        // Restore attachment content blocks if this message had attachments
+        if (msg.attachments && Array.isArray(msg.attachments) && msg.attachments.length > 0) {
+          const attachmentManager = this.callbacks.getAttachmentManager();
+          if (attachmentManager) {
+            const providerName = this.callbacks.getProviderName();
+            const foundAttachments: Array<{ path: string; fileName: string; ext: string; mediaType: string }> = [];
+            const missingAttachments: string[] = [];
+            const unsupportedAttachments: Array<{ fileName: string; mediaType: string }> = [];
+
+            for (const att of msg.attachments) {
+              const info = attachmentManager.getAttachmentInfo(att.fileName);
+              if (!info) {
+                missingAttachments.push(att.fileName);
+              } else if (!this.isAttachmentSupportedByProvider(info.mediaType, providerName)) {
+                unsupportedAttachments.push({ fileName: info.fileName, mediaType: info.mediaType });
+              } else {
+                foundAttachments.push(info);
+              }
+            }
+
+            // Create content blocks from found attachments
+            if (foundAttachments.length > 0) {
+              try {
+                const contentBlocks = attachmentManager.createContentBlocks(foundAttachments);
+                if (contentBlocks.length > 0) {
+                  messageObj.content_blocks = contentBlocks;
+                }
+              } catch (error) {
+                this.logger.log(
+                  `  Warning: Failed to create content blocks for attachments: ${error}\n`,
+                  { type: 'warning' },
+                );
+              }
+            }
+
+            // Log warnings for missing attachments
+            if (missingAttachments.length > 0) {
+              this.logger.log(
+                `  Warning: Missing attachment file(s): ${missingAttachments.join(', ')}\n`,
+                { type: 'warning' },
+              );
+            }
+
+            // Log warnings for unsupported attachments
+            if (unsupportedAttachments.length > 0) {
+              const details = unsupportedAttachments
+                .map(a => `${a.fileName} (${a.mediaType})`)
+                .join(', ');
+              this.logger.log(
+                `  Warning: Unsupported by ${providerName}: ${details}\n`,
+                { type: 'warning' },
+              );
+            }
+          }
+        }
+
+        newMessages.push(messageObj);
+        this.historyManager.addUserMessage(msg.content, msg.attachments);
+        restoredCount++;
+      } else if (msg.role === 'assistant') {
+        // Flush any pending orphaned tool results before an assistant message
+        flushOrphanedToolResults();
+
+        // Restore assistant message with content_blocks if present
+        const messageObj: any = {
+          role: 'assistant',
+          content: msg.content,
+        };
+
+        // Preserve content_blocks with tool_use blocks for proper model context
+        // But handle dangling tool_use blocks (session ended before tool returned)
+        if (msg.content_blocks && msg.content_blocks.length > 0) {
+          const matchingToolResults = toolResultsByAssistantIndex.get(i);
+          const hasMatchingResults = matchingToolResults && matchingToolResults.length > 0;
+
+          if (hasMatchingResults) {
+            // All tool_use blocks have matching results - keep content_blocks as-is
+            messageObj.content_blocks = msg.content_blocks;
+          } else {
+            // Check if any tool_use blocks lack results (dangling)
+            const toolUseBlocks = msg.content_blocks.filter(
+              (b: any) => b.type === 'tool_use' || b.type === 'function_call'
+            );
+            const nonToolBlocks = msg.content_blocks.filter(
+              (b: any) => b.type !== 'tool_use' && b.type !== 'function_call'
+            );
+
+            if (toolUseBlocks.length > 0) {
+              // Strip dangling tool_use blocks - session was interrupted before tool returned
+              // Keep only text blocks to avoid provider API errors
+              if (nonToolBlocks.length > 0) {
+                messageObj.content_blocks = nonToolBlocks;
+              }
+              // If no non-tool blocks remain, omit content_blocks entirely
+            } else {
+              // No tool_use blocks - preserve content_blocks (e.g., text blocks)
+              messageObj.content_blocks = msg.content_blocks;
+            }
+          }
+        }
+
+        newMessages.push(messageObj);
+        this.historyManager.addAssistantMessage(msg.content, msg.content_blocks, msg.thinking);
+        restoredCount++;
+
+        // Add tool results that belong to this assistant message (AFTER the assistant message)
+        const matchingToolResults = toolResultsByAssistantIndex.get(i);
+        if (matchingToolResults && matchingToolResults.length > 0) {
+          const toolResultsMessage = {
+            role: 'user',
+            content: '',
+            tool_results: matchingToolResults.map(tr => ({
+              type: 'tool_result',
+              tool_use_id: tr.tool_use_id,
+              tool_name: tr.tool_name, // Include tool name for Gemini compatibility
+              content: tr.content,
+            })),
+          };
+          newMessages.push(toolResultsMessage);
+        }
+      } else if (msg.role === 'tool' && msg.tool_use_id && !matchedToolUseIds.has(msg.tool_use_id)) {
+        // Orphaned tool result - no matching content_blocks in any assistant message
+        // (common with orchestrator IPC calls or Gemini sessions)
+        // Collect and batch into a text context message
+        pendingOrphanedToolResults.push({
+          toolName: msg.toolName || 'unknown',
+          toolInput: msg.toolInput || {},
+          toolOutput: msg.toolOutput || '',
+        });
+      }
+      // Matched tool messages are handled via toolResultsByAssistantIndex above
+    }
+
+    // Flush any remaining orphaned tool results at the end
+    flushOrphanedToolResults();
+
+    // Convert messages to provider-specific format before adding to context
+    const providerName = this.callbacks.getProviderName();
+    const convertedMessages = this.convertMessagesForProvider(newMessages, providerName);
+    this.logger.log(
+      `  (Converted ${newMessages.length} messages to ${providerName} format)\n`,
+      { type: 'info' },
+    );
+
+    // Prepend restored messages to current conversation (for the model context)
+    messages.unshift(...convertedMessages);
+
+    // Update token count (approximate)
+    const tokenCounter = this.callbacks.getTokenCounter();
+    if (tokenCounter) {
+      let currentTokenCount = this.callbacks.getCurrentTokenCount();
+      for (const msg of newMessages) {
+        currentTokenCount += tokenCounter.countMessageTokens(msg);
+      }
+      this.callbacks.setCurrentTokenCount(currentTokenCount);
+    }
+
+    return restoredCount;
   }
 
   /**

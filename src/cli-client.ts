@@ -19,6 +19,7 @@ import { ServerRefreshCLI } from './cli/server-refresh-cli.js';
 import { HooksCLI } from './cli/hooks-cli.js';
 import { HumanInTheLoopManager } from './managers/hil-manager.js';
 import { isReasoningModel, getThinkingLevelsForProvider } from './utils/model-capabilities.js';
+import { createProvider, validateProviderEnv, PROVIDERS } from './bin.js';
 
 // Command list for tab autocomplete
 const CLI_COMMANDS = [
@@ -26,13 +27,14 @@ const CLI_COMMANDS = [
   '/token-status', '/tokens', '/summarize', '/summarize-now',
   '/settings', '/refresh', '/refresh-servers', '/refresh-select',
   '/set-timeout', '/set-max-iterations', '/set-thinking',
+  '/switch-model',
   '/todo-on', '/todo-off',
   '/orchestrator-on', '/orchestrator-off',
   '/tools', '/tools-list', '/tools-manager', '/tools-select',
   '/prompts', '/prompts-list', '/prompts-manager', '/prompts-select', '/add-prompt',
   '/attachment-upload', '/attachment-list', '/attachment-insert', '/attachment-rename', '/attachment-clear',
   '/chat-list', '/chat-search', '/chat-restore', '/chat-export', '/chat-rename', '/chat-clear',
-  '/ablation-create', '/ablation-list', '/ablation-edit', '/ablation-run', '/ablation-delete', '/ablation-results',
+  '/ablation-create', '/ablation-list', '/ablation-edit', '/ablation-run', '/ablation-delete', '/ablation-results', '/ablation-restore',
   '/tool-replay',
   '/rewind',
   '/hil',
@@ -177,6 +179,7 @@ export class MCPClientCLI {
         collectInput: (prompt: string) => this.keyboardMonitor.collectInput(prompt),
         getHILManager: () => this.hilManager,
         routeSlashCommand: (cmd: string) => this.routeSlashCommand(cmd),
+        getChatHistoryCLI: () => this.chatHistoryCLI,
       },
     );
 
@@ -680,6 +683,7 @@ export class MCPClientCLI {
       `  /set-timeout <seconds> - Set MCP tool timeout (1-3600, or "infinity"/"unlimited")\n` +
       `  /set-max-iterations <number> - Set max iterations between agent calls (1-10000, or "infinity"/"unlimited")\n` +
       `  /set-thinking on|off - Enable/disable thinking/reasoning mode\n` +
+      `  /switch-model [provider] [model] - Switch provider/model mid-session (preserves context)\n` +
       `  /hil - Toggle human-in-the-loop tool approval\n` +
       `\n` +
       `Todo Management:\n` +
@@ -731,9 +735,137 @@ export class MCPClientCLI {
       `  /ablation-edit - Edit an existing ablation study\n` +
       `  /ablation-run - Run an ablation study\n` +
       `  /ablation-delete - Delete an ablation study\n` +
-      `  /ablation-results - View results from past ablation runs\n`,
+      `  /ablation-results - View results from past ablation runs\n` +
+      `  /ablation-restore - Restore outputs and chat from a past ablation run\n`,
       { type: 'info' },
     );
+  }
+
+  /**
+   * Handle /switch-model command — switch provider/model mid-session while preserving context.
+   * Usage:
+   *   /switch-model                    → interactive: show current, pick provider, pick model
+   *   /switch-model <provider>         → switch provider, use default model
+   *   /switch-model <provider> <model> → switch to specific provider + model
+   */
+  private async handleSwitchModel(query: string): Promise<void> {
+    const parts = query.split(/\s+/).slice(1); // Remove '/switch-model'
+    const currentProvider = this.client.getProviderName();
+    const currentModel = this.client.getModel();
+
+    let providerName: string;
+    let modelId: string | undefined;
+
+    if (parts.length === 0) {
+      // Interactive mode
+      if (!this.rl) return;
+
+      this.logger.log(`\nCurrent: ${currentProvider}/${currentModel}\n`, { type: 'info' });
+      this.logger.log('\nAvailable providers:\n', { type: 'info' });
+      for (let i = 0; i < PROVIDERS.length; i++) {
+        const marker = PROVIDERS[i].name === currentProvider ? ' (current)' : '';
+        this.logger.log(`  ${i + 1}. ${PROVIDERS[i].label}${marker}\n`, { type: 'info' });
+      }
+
+      const answer = (await this.rl.question(`\nSelect provider (1-${PROVIDERS.length}, or "q" to cancel): `)).trim();
+      if (answer.toLowerCase() === 'q' || !answer) {
+        this.logger.log('Cancelled.\n', { type: 'info' });
+        return;
+      }
+
+      const idx = parseInt(answer, 10) - 1;
+      if (isNaN(idx) || idx < 0 || idx >= PROVIDERS.length) {
+        this.logger.log('Invalid selection.\n', { type: 'error' });
+        return;
+      }
+      providerName = PROVIDERS[idx].name;
+    } else {
+      providerName = parts[0];
+      modelId = parts[1];
+    }
+
+    // Validate env vars
+    const envError = validateProviderEnv(providerName);
+    if (envError) {
+      this.logger.log(`\n${envError}\n`, { type: 'error' });
+      return;
+    }
+
+    // Create provider
+    const provider = createProvider(providerName);
+    if (!provider) {
+      const available = PROVIDERS.map(p => p.name).join(', ');
+      this.logger.log(`\nUnknown provider "${providerName}". Available: ${available}\n`, { type: 'error' });
+      return;
+    }
+
+    // If model not specified, let user pick interactively
+    if (!modelId) {
+      if (!this.rl) return;
+
+      try {
+        const models = await provider.listAvailableModels();
+        if (models.length === 0) {
+          this.logger.log('\nNo models found for this provider.\n', { type: 'warning' });
+          return;
+        }
+
+        // Paginated display
+        const pageSize = 10;
+        let offset = 0;
+
+        while (true) {
+          const page = models.slice(offset, offset + pageSize);
+          this.logger.log(`\nModels for ${providerName} (${offset + 1}-${offset + page.length} of ${models.length}):\n`, { type: 'info' });
+
+          for (let i = 0; i < page.length; i++) {
+            const m = page[i];
+            const contextInfo = m.contextWindow ? ` (${Math.round(m.contextWindow / 1000)}K)` : '';
+            this.logger.log(`  ${offset + i + 1}. ${m.id}${contextInfo}\n`, { type: 'info' });
+          }
+
+          const hasNext = offset + pageSize < models.length;
+          const hasPrev = offset > 0;
+          const nav = [hasPrev ? 'p=prev' : '', hasNext ? 'n=next' : '', 'q=cancel'].filter(Boolean).join(', ');
+
+          const answer = (await this.rl.question(`\nSelect model (1-${models.length}), ${nav}: `)).trim().toLowerCase();
+
+          if (answer === 'q' || !answer) {
+            this.logger.log('Cancelled.\n', { type: 'info' });
+            return;
+          }
+          if (answer === 'n' && hasNext) { offset += pageSize; continue; }
+          if (answer === 'p' && hasPrev) { offset -= pageSize; continue; }
+
+          const num = parseInt(answer, 10);
+          if (!isNaN(num) && num >= 1 && num <= models.length) {
+            modelId = models[num - 1].id;
+            break;
+          }
+
+          this.logger.log('Invalid selection.\n', { type: 'error' });
+        }
+      } catch (error: any) {
+        // Fallback: if listAvailableModels fails, use default
+        try {
+          modelId = provider.getDefaultModel();
+          this.logger.log(`Using default model: ${modelId}\n`, { type: 'info' });
+        } catch {
+          this.logger.log(`\nCannot discover models and no default available. Use: /switch-model ${providerName} <model-id>\n`, { type: 'error' });
+          return;
+        }
+      }
+    }
+
+    if (!modelId) return;
+
+    // Skip if already on the same provider+model
+    if (providerName === currentProvider && modelId === currentModel) {
+      this.logger.log(`\nAlready using ${providerName}/${modelId}\n`, { type: 'info' });
+      return;
+    }
+
+    await this.client.switchModel(provider, modelId);
   }
 
   private async handleRewind(): Promise<void> {
@@ -966,6 +1098,15 @@ export class MCPClientCLI {
         }
       } catch (error) {
         this.logger.log(`\nFailed to set thinking mode: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (baseCommand === '/switch-model') {
+      try {
+        await this.handleSwitchModel(query);
+      } catch (error) {
+        this.logger.log(`\nFailed to switch model: ${error}\n`, { type: 'error' });
       }
       return true;
     }
@@ -1212,6 +1353,15 @@ export class MCPClientCLI {
         await this.ablationCLI.handleAblationResults();
       } catch (error) {
         this.logger.log(`\nFailed to show ablation results: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/ablation-restore') {
+      try {
+        await this.ablationCLI.handleAblationRestore();
+      } catch (error) {
+        this.logger.log(`\nFailed to restore ablation: ${error}\n`, { type: 'error' });
       }
       return true;
     }

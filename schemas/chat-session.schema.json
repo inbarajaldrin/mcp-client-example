@@ -203,6 +203,7 @@
         "cacheCreationTokens": { "type": "integer", "description": "Tokens used to create cache" },
         "cacheReadTokens": { "type": "integer", "description": "Tokens read from cache" },
         "estimatedCost": { "type": "number", "description": "Estimated cost in USD" },
+        "model": { "type": "string", "description": "Model active at the time of this callback. Tracks mid-session model switches for accurate per-callback cost attribution." },
         "ollamaMetrics": {
           "type": "object",
           "description": "Ollama-specific performance metrics",

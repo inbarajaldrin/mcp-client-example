@@ -110,6 +110,8 @@ export interface AblationCLICallbacks {
   /** Route a slash command through the main CLI's full command handler.
    * Returns true if the command was handled, false if unrecognized. */
   routeSlashCommand: (command: string) => Promise<boolean>;
+  /** Get ChatHistoryCLI instance for restoring chat from ablation runs */
+  getChatHistoryCLI: () => import('./chat-history-cli.js').ChatHistoryCLI;
 }
 
 /**
@@ -3200,8 +3202,122 @@ export class AblationCLI {
   }
 
   /**
+   * Load cost data from a chat.json file within an ablation run directory.
+   * Returns totalCost and tokenUsagePerCallback summary, or null if unavailable.
+   */
+  private loadChatCostData(runDir: string, result: AblationRunResult): {
+    totalCost: number;
+    inputTokens: number;
+    outputTokens: number;
+    cacheReadTokens: number;
+    cacheCreationTokens: number;
+    regularInputTokens: number;
+    callbackCount: number;
+  } | null {
+    const chatFile = result.chatFile;
+    if (!chatFile) return null;
+
+    const chatPath = join(runDir, chatFile);
+    const chatSession = this.ablationManager.loadChatFromFile(chatPath);
+    if (!chatSession) return null;
+
+    const totalCost = chatSession.metadata?.totalCost || 0;
+    const callbacks = chatSession.tokenUsagePerCallback || [];
+
+    let inputTokens = 0;
+    let outputTokens = 0;
+    let cacheReadTokens = 0;
+    let cacheCreationTokens = 0;
+    let regularInputTokens = 0;
+
+    for (const cb of callbacks) {
+      inputTokens += cb.inputTokens || 0;
+      outputTokens += cb.outputTokens || 0;
+      cacheReadTokens += cb.cacheReadTokens || 0;
+      cacheCreationTokens += cb.cacheCreationTokens || 0;
+      regularInputTokens += cb.regularInputTokens || 0;
+    }
+
+    return {
+      totalCost,
+      inputTokens,
+      outputTokens,
+      cacheReadTokens,
+      cacheCreationTokens,
+      regularInputTokens,
+      callbackCount: callbacks.length,
+    };
+  }
+
+  /**
    * Handle /ablation-results command - View past ablation run results
    */
+  /**
+   * Paginated run selection with model info summary.
+   * Returns the selected run or null if cancelled.
+   */
+  private async selectRunPaginated(
+    runs: Array<{ timestamp: string; run: AblationRun }>,
+    title: string,
+  ): Promise<{ timestamp: string; run: AblationRun } | null> {
+    const rl = this.callbacks.getReadline();
+    if (!rl) return null;
+
+    const pageSize = 10;
+    let offset = 0;
+
+    while (true) {
+      const page = runs.slice(offset, offset + pageSize);
+      this.logger.log(`\n${title} (${offset + 1}-${offset + page.length} of ${runs.length}):\n`, { type: 'info' });
+
+      for (let i = 0; i < page.length; i++) {
+        const { timestamp, run } = page[i];
+        const completedCount = run.results.filter(r => r.status === 'completed').length;
+        const totalCount = run.results.length;
+        const duration = run.totalDuration ? formatDuration(run.totalDuration) : 'N/A';
+
+        // Extract unique model short names and phase names from results
+        const modelSet = new Set<string>();
+        const phaseSet = new Set<string>();
+        for (const result of run.results) {
+          modelSet.add(this.ablationManager.getModelShortName(result.model));
+          phaseSet.add(result.phase);
+        }
+        const modelNames = [...modelSet].join(', ');
+        const phaseNames = [...phaseSet].join(', ');
+
+        this.logger.log(`  ${offset + i + 1}. ${timestamp}\n`, { type: 'info' });
+        this.logger.log(
+          `     └─ ${completedCount}/${totalCount} completed | ${duration} | ${modelNames}\n`,
+          { type: 'info' },
+        );
+        this.logger.log(
+          `        ${phaseNames}\n`,
+          { type: 'info' },
+        );
+      }
+
+      const hasNext = offset + pageSize < runs.length;
+      const hasPrev = offset > 0;
+      const nav = [hasPrev ? 'p=prev' : '', hasNext ? 'n=next' : '', 'q=cancel'].filter(Boolean).join(', ');
+
+      const answer = (
+        await rl.question(`\nSelect run (1-${runs.length}), ${nav}: `)
+      ).trim().toLowerCase();
+
+      if (answer === 'q' || !answer) return null;
+      if (answer === 'n' && hasNext) { offset += pageSize; continue; }
+      if (answer === 'p' && hasPrev) { offset -= pageSize; continue; }
+
+      const num = parseInt(answer, 10);
+      if (!isNaN(num) && num >= 1 && num <= runs.length) {
+        return runs[num - 1];
+      }
+
+      this.logger.log('Invalid selection.\n', { type: 'error' });
+    }
+  }
+
   async handleAblationResults(): Promise<void> {
     const rl = this.callbacks.getReadline();
     if (!rl) {
@@ -3211,11 +3327,11 @@ export class AblationCLI {
     const ablations = this.ablationManager.list();
 
     if (ablations.length === 0) {
-      this.logger.log('\n📊 No ablation studies found.\n', { type: 'warning' });
+      this.logger.log('\nNo ablation studies found.\n', { type: 'warning' });
       return;
     }
 
-    this.logger.log('\n📊 Select ablation to view results:\n', { type: 'info' });
+    this.logger.log('\nSelect ablation to view results:\n', { type: 'info' });
 
     for (let i = 0; i < ablations.length; i++) {
       const ablation = ablations[i];
@@ -3237,7 +3353,7 @@ export class AblationCLI {
 
     const index = parseInt(selection) - 1;
     if (isNaN(index) || index < 0 || index >= ablations.length) {
-      this.logger.log('\n✗ Invalid selection.\n', { type: 'error' });
+      this.logger.log('\nInvalid selection.\n', { type: 'error' });
       return;
     }
 
@@ -3245,7 +3361,7 @@ export class AblationCLI {
     const runs = this.ablationManager.listRuns(ablation.name);
 
     if (runs.length === 0) {
-      this.logger.log(`\n📊 No runs found for "${ablation.name}".\n`, {
+      this.logger.log(`\nNo runs found for "${ablation.name}".\n`, {
         type: 'warning',
       });
       this.logger.log('Use /ablation-run to run this ablation study.\n', {
@@ -3254,48 +3370,40 @@ export class AblationCLI {
       return;
     }
 
-    this.logger.log(`\n📊 Runs for "${ablation.name}":\n`, { type: 'info' });
+    const selected = await this.selectRunPaginated(runs, `Runs for "${ablation.name}"`);
+    if (!selected) return;
 
-    for (let i = 0; i < runs.length; i++) {
-      const { timestamp, run } = runs[i];
-      const completedCount = run.results.filter(
-        (r) => r.status === 'completed',
-      ).length;
-      const totalCount = run.results.length;
-      const duration = run.totalDuration
-        ? formatDuration(run.totalDuration)
-        : 'N/A';
+    const { timestamp, run } = selected;
+    const runDir = this.ablationManager.getRunDirectory(ablation.name, timestamp);
 
-      this.logger.log(`  ${i + 1}. ${timestamp}\n`, { type: 'info' });
-      this.logger.log(
-        `     └─ ${completedCount}/${totalCount} completed │ Duration: ${duration}\n`,
-        { type: 'info' },
-      );
+    // Load frozen definition for context mode awareness
+    let persistentContext = false;
+    const frozenDefPath = join(runDir, 'definition.yaml');
+    if (existsSync(frozenDefPath)) {
+      try {
+        const yaml = await import('yaml');
+        const { readFileSync } = await import('fs');
+        const defContent = readFileSync(frozenDefPath, 'utf-8');
+        const frozenDef = yaml.parse(defContent);
+        persistentContext = frozenDef?.settings?.clearContextBetweenPhases === false;
+      } catch { /* fallback */ }
     }
 
-    const runSelection = (
-      await rl.question('\nSelect run to view details (or "q" to cancel): ')
-    ).trim();
-
-    if (runSelection.toLowerCase() === 'q') {
-      return;
+    // Load cost data from chat files for each result
+    type CostData = NonNullable<ReturnType<typeof this.loadChatCostData>>;
+    const costByResult = new Map<AblationRunResult, CostData>();
+    for (const result of run.results) {
+      const cost = this.loadChatCostData(runDir, result);
+      if (cost) costByResult.set(result, cost);
     }
 
-    const runIndex = parseInt(runSelection) - 1;
-    if (isNaN(runIndex) || runIndex < 0 || runIndex >= runs.length) {
-      this.logger.log('\n✗ Invalid selection.\n', { type: 'error' });
-      return;
-    }
-
-    const { run } = runs[runIndex];
-
-    // Display detailed results
+    // ── Header ──
     this.logger.log(
       `\n┌─────────────────────────────────────────────────────────────┐\n`,
       { type: 'info' },
     );
     this.logger.log(
-      `│  RUN RESULTS                                                │\n`,
+      `│  RUN RESULTS: ${ablation.name.padEnd(44)}│\n`,
       { type: 'info' },
     );
     this.logger.log(
@@ -3303,36 +3411,602 @@ export class AblationCLI {
       { type: 'info' },
     );
 
-    this.logger.log(`\n  Started: ${run.startedAt}\n`, { type: 'info' });
-    this.logger.log(`  Completed: ${run.completedAt || 'N/A'}\n`, {
-      type: 'info',
-    });
+    this.logger.log(`\n  Started:  ${run.startedAt}\n`, { type: 'info' });
+    this.logger.log(`  Completed: ${run.completedAt || 'N/A'}\n`, { type: 'info' });
     this.logger.log(
-      `  Total Duration: ${run.totalDuration ? formatDuration(run.totalDuration) : 'N/A'}\n`,
+      `  Duration: ${run.totalDuration ? formatDuration(run.totalDuration) : 'N/A'}\n`,
       { type: 'info' },
     );
+    if (persistentContext) {
+      this.logger.log(`  Context:  Persistent across phases\n`, { type: 'info' });
+    }
 
+    // ── Individual Results ──
     this.logger.log(`\n  Individual Results:\n`, { type: 'info' });
 
     for (const result of run.results) {
-      const status =
-        result.status === 'completed'
-          ? '✓'
-          : result.status === 'failed'
-            ? '✗'
+      const status = result.status === 'completed' ? '✓'
+        : result.status === 'failed' ? '✗'
+          : result.status === 'aborted' ? '!'
             : '○';
-      const duration = result.duration
-        ? formatDuration(result.duration)
-        : 'N/A';
+      const duration = result.duration ? formatDuration(result.duration) : 'N/A';
       const modelShort = this.ablationManager.getModelShortName(result.model);
+      const runLabel = result.run !== undefined ? ` (run ${result.run})` : '';
 
-      this.logger.log(
-        `    ${status} ${result.phase} + ${modelShort} │ ${duration}\n`,
-        { type: result.status === 'failed' ? 'error' : 'info' },
-      );
+      let line = `    ${status} ${result.phase} + ${modelShort}${runLabel} | ${duration}`;
+
+      // Add token info
+      if (result.tokens) {
+        line += ` | ${result.tokens.toLocaleString()} tok`;
+      }
+
+      // Add cost from chat data
+      const cost = costByResult.get(result);
+      if (cost && cost.totalCost > 0) {
+        line += ` | $${cost.totalCost.toFixed(4)}`;
+      }
+
+      this.logger.log(`${line}\n`, { type: result.status === 'failed' ? 'error' : 'info' });
 
       if (result.error) {
         this.logger.log(`      Error: ${result.error}\n`, { type: 'error' });
+      }
+    }
+
+    // ── Per-Model Summary ──
+    const modelKeys = new Map<string, { model: AblationModel; results: AblationRunResult[] }>();
+    for (const result of run.results) {
+      const key = `${result.model.provider}--${result.model.model}`;
+      if (!modelKeys.has(key)) {
+        modelKeys.set(key, { model: result.model, results: [] });
+      }
+      modelKeys.get(key)!.results.push(result);
+    }
+
+    if (modelKeys.size > 0) {
+      this.logger.log(`\n  Per-Model Summary:\n`, { type: 'info' });
+
+      for (const [, { model, results }] of modelKeys) {
+        const modelShort = this.ablationManager.getModelShortName(model);
+        const completedCount = results.filter(r => r.status === 'completed').length;
+        const totalDuration = results.reduce((sum, r) => sum + (r.duration || 0), 0);
+
+        let totalCost = 0;
+        let totalInput = 0;
+        let totalOutput = 0;
+        let totalCacheRead = 0;
+        let totalCacheWrite = 0;
+        for (const r of results) {
+          const c = costByResult.get(r);
+          if (c) {
+            totalCost += c.totalCost;
+            totalInput += c.inputTokens;
+            totalOutput += c.outputTokens;
+            totalCacheRead += c.cacheReadTokens;
+            totalCacheWrite += c.cacheCreationTokens;
+          }
+        }
+
+        // For persistent context, the last phase's tokens represents the cumulative total
+        let tokenDisplay: string;
+        if (persistentContext) {
+          // Last result's tokens is the cumulative total for the model
+          const lastCompleted = [...results].reverse().find(r => r.tokens !== undefined);
+          tokenDisplay = lastCompleted?.tokens ? `${lastCompleted.tokens.toLocaleString()} tok (cumulative)` : 'N/A';
+        } else {
+          const totalTokens = results.reduce((sum, r) => sum + (r.tokens || 0), 0);
+          tokenDisplay = totalTokens > 0 ? `${totalTokens.toLocaleString()} tok` : 'N/A';
+        }
+
+        this.logger.log(`    ${modelShort} (${model.provider})\n`, { type: 'info' });
+        this.logger.log(`      Phases: ${completedCount}/${results.length} completed\n`, { type: 'info' });
+        this.logger.log(`      Duration: ${formatDuration(totalDuration)}\n`, { type: 'info' });
+        this.logger.log(`      Tokens: ${tokenDisplay}\n`, { type: 'info' });
+
+        if (totalCost > 0) {
+          this.logger.log(`      Cost: $${totalCost.toFixed(4)}\n`, { type: 'info' });
+        }
+        if (totalInput > 0 || totalOutput > 0) {
+          this.logger.log(
+            `      Breakdown: ${totalInput.toLocaleString()} in / ${totalOutput.toLocaleString()} out`,
+            { type: 'info' },
+          );
+          if (totalCacheRead > 0 || totalCacheWrite > 0) {
+            this.logger.log(
+              ` (${totalCacheRead.toLocaleString()} cache-read, ${totalCacheWrite.toLocaleString()} cache-write)`,
+              { type: 'info' },
+            );
+          }
+          this.logger.log('\n', { type: 'info' });
+        }
+      }
+    }
+
+    // ── Per-Phase Summary ──
+    const phaseKeys = new Map<string, AblationRunResult[]>();
+    for (const result of run.results) {
+      const key = result.run !== undefined ? `${result.phase} (run ${result.run})` : result.phase;
+      if (!phaseKeys.has(key)) {
+        phaseKeys.set(key, []);
+      }
+      phaseKeys.get(key)!.push(result);
+    }
+
+    if (phaseKeys.size > 0) {
+      this.logger.log(`\n  Per-Phase Summary:\n`, { type: 'info' });
+
+      // For persistent context, compute per-phase token deltas
+      // Group results by model to compute deltas within each model's phase sequence
+      const modelPhaseOrder = new Map<string, AblationRunResult[]>();
+      for (const result of run.results) {
+        const mkey = `${result.model.provider}--${result.model.model}` +
+          (result.run !== undefined ? `--run-${result.run}` : '');
+        if (!modelPhaseOrder.has(mkey)) {
+          modelPhaseOrder.set(mkey, []);
+        }
+        modelPhaseOrder.get(mkey)!.push(result);
+      }
+
+      // Build a map of result -> delta tokens for persistent context
+      const tokenDelta = new Map<AblationRunResult, number>();
+      if (persistentContext) {
+        for (const [, orderedResults] of modelPhaseOrder) {
+          let prevTokens = 0;
+          for (const r of orderedResults) {
+            const current = r.tokens || 0;
+            tokenDelta.set(r, current - prevTokens);
+            prevTokens = current;
+          }
+        }
+      }
+
+      for (const [phaseName, results] of phaseKeys) {
+        const completedCount = results.filter(r => r.status === 'completed').length;
+        const totalDuration = results.reduce((sum, r) => sum + (r.duration || 0), 0);
+
+        let totalCost = 0;
+        for (const r of results) {
+          const c = costByResult.get(r);
+          if (c) totalCost += c.totalCost;
+        }
+
+        let tokenDisplay: string;
+        if (persistentContext) {
+          const totalDelta = results.reduce((sum, r) => sum + (tokenDelta.get(r) || 0), 0);
+          tokenDisplay = totalDelta > 0 ? `${totalDelta.toLocaleString()} tok (delta)` : 'N/A';
+        } else {
+          const totalTokens = results.reduce((sum, r) => sum + (r.tokens || 0), 0);
+          tokenDisplay = totalTokens > 0 ? `${totalTokens.toLocaleString()} tok` : 'N/A';
+        }
+
+        const modelCount = results.length;
+        const modelLabel = modelCount === 1
+          ? this.ablationManager.getModelShortName(results[0].model)
+          : `${modelCount} models`;
+
+        this.logger.log(`    ${phaseName} (${modelLabel})\n`, { type: 'info' });
+        this.logger.log(`      Status: ${completedCount}/${results.length} completed\n`, { type: 'info' });
+        this.logger.log(`      Duration: ${formatDuration(totalDuration)}\n`, { type: 'info' });
+        this.logger.log(`      Tokens: ${tokenDisplay}\n`, { type: 'info' });
+
+        if (totalCost > 0) {
+          this.logger.log(`      Cost: $${totalCost.toFixed(4)}\n`, { type: 'info' });
+        }
+      }
+    }
+
+    // ── Per-Run Iteration Summary (when runs > 1) ──
+    const hasIterations = run.results.some(r => r.run !== undefined);
+    if (hasIterations) {
+      const iterationKeys = new Map<number, AblationRunResult[]>();
+      for (const result of run.results) {
+        const iter = result.run ?? 0;
+        if (!iterationKeys.has(iter)) {
+          iterationKeys.set(iter, []);
+        }
+        iterationKeys.get(iter)!.push(result);
+      }
+
+      this.logger.log(`\n  Per-Iteration Summary:\n`, { type: 'info' });
+
+      const sortedIters = [...iterationKeys.keys()].sort((a, b) => a - b);
+      for (const iter of sortedIters) {
+        const results = iterationKeys.get(iter)!;
+        const completedCount = results.filter(r => r.status === 'completed').length;
+        const totalDuration = results.reduce((sum, r) => sum + (r.duration || 0), 0);
+        const totalTokens = results.reduce((sum, r) => sum + (r.tokens || 0), 0);
+
+        let totalCost = 0;
+        for (const r of results) {
+          const c = costByResult.get(r);
+          if (c) totalCost += c.totalCost;
+        }
+
+        this.logger.log(`    Run ${iter}\n`, { type: 'info' });
+        this.logger.log(`      Status: ${completedCount}/${results.length} completed\n`, { type: 'info' });
+        this.logger.log(`      Duration: ${formatDuration(totalDuration)}\n`, { type: 'info' });
+        if (totalTokens > 0) {
+          this.logger.log(`      Tokens: ${totalTokens.toLocaleString()}\n`, { type: 'info' });
+        }
+        if (totalCost > 0) {
+          this.logger.log(`      Cost: $${totalCost.toFixed(4)}\n`, { type: 'info' });
+        }
+      }
+    }
+
+    // ── Grand Totals ──
+    let grandCost = 0;
+    for (const [, c] of costByResult) {
+      grandCost += c.totalCost;
+    }
+
+    if (grandCost > 0 || (run.totalTokens && run.totalTokens > 0)) {
+      this.logger.log(`\n  Totals:\n`, { type: 'info' });
+      if (run.totalTokens && run.totalTokens > 0) {
+        this.logger.log(`    Tokens: ${run.totalTokens.toLocaleString()}\n`, { type: 'info' });
+      }
+      if (grandCost > 0) {
+        this.logger.log(`    Cost: $${grandCost.toFixed(4)}\n`, { type: 'info' });
+      }
+      this.logger.log(
+        `    Duration: ${run.totalDuration ? formatDuration(run.totalDuration) : 'N/A'}\n`,
+        { type: 'info' },
+      );
+    }
+  }
+
+  // ==================== Ablation Restore ====================
+
+  async handleAblationRestore(): Promise<void> {
+    const rl = this.callbacks.getReadline();
+    if (!rl) {
+      throw new Error('Readline interface not initialized');
+    }
+
+    // Step 1: Pick ablation definition (filter out those with no runs)
+    const allAblations = this.ablationManager.list();
+    const ablations = allAblations.filter(a => this.ablationManager.listRuns(a.name).length > 0);
+
+    if (ablations.length === 0) {
+      this.logger.log('\nNo ablation definitions with past runs found.\n', { type: 'warning' });
+      return;
+    }
+
+    this.logger.log('\nSelect ablation to restore from:\n', { type: 'info' });
+
+    for (let i = 0; i < ablations.length; i++) {
+      const ablation = ablations[i];
+      const runs = this.ablationManager.listRuns(ablation.name);
+      this.logger.log(
+        `  ${i + 1}. ${ablation.name} (${runs.length} past runs)\n`,
+        { type: 'info' },
+      );
+    }
+
+    const ablationSelection = (
+      await rl.question('\nSelect ablation (or "q" to cancel): ')
+    ).trim();
+
+    if (ablationSelection.toLowerCase() === 'q') {
+      this.logger.log('\nCancelled.\n', { type: 'info' });
+      return;
+    }
+
+    const ablationIndex = parseInt(ablationSelection) - 1;
+    if (isNaN(ablationIndex) || ablationIndex < 0 || ablationIndex >= ablations.length) {
+      this.logger.log('\nInvalid selection.\n', { type: 'error' });
+      return;
+    }
+
+    const ablation = ablations[ablationIndex];
+
+    // Step 2: Pick run (paginated with model info)
+    const runs = this.ablationManager.listRuns(ablation.name);
+
+    if (runs.length === 0) {
+      this.logger.log(`\nNo runs found for "${ablation.name}".\n`, { type: 'warning' });
+      return;
+    }
+
+    const selected = await this.selectRunPaginated(runs, `Runs for "${ablation.name}"`);
+    if (!selected) {
+      this.logger.log('\nCancelled.\n', { type: 'info' });
+      return;
+    }
+
+    const { timestamp, run } = selected;
+    const runDir = this.ablationManager.getRunDirectory(ablation.name, timestamp);
+
+    // Load the frozen definition from the run for clearContextBetweenPhases awareness
+    const frozenDefPath = join(runDir, 'definition.yaml');
+    let persistentContext = false;
+    if (existsSync(frozenDefPath)) {
+      try {
+        const yaml = await import('yaml');
+        const defContent = (await import('fs')).readFileSync(frozenDefPath, 'utf-8');
+        const frozenDef = yaml.parse(defContent);
+        persistentContext = frozenDef?.settings?.clearContextBetweenPhases === false;
+      } catch { /* fallback to false */ }
+    }
+
+    // Step 3: Pick model+phase from run results
+    // Group results by model
+    const modelGroups = new Map<string, AblationRunResult[]>();
+    for (const result of run.results) {
+      const modelKey = `${result.model.provider}--${result.model.model}`;
+      if (!modelGroups.has(modelKey)) {
+        modelGroups.set(modelKey, []);
+      }
+      modelGroups.get(modelKey)!.push(result);
+    }
+
+    // If only one model, skip model selection
+    const modelKeys = [...modelGroups.keys()];
+    let selectedModelKey: string;
+    let selectedModelResults: AblationRunResult[];
+
+    if (modelKeys.length === 1) {
+      selectedModelKey = modelKeys[0];
+      selectedModelResults = modelGroups.get(selectedModelKey)!;
+    } else {
+      this.logger.log('\nSelect model:\n', { type: 'info' });
+      for (let i = 0; i < modelKeys.length; i++) {
+        const results = modelGroups.get(modelKeys[i])!;
+        const modelShort = this.ablationManager.getModelShortName(results[0].model);
+        const completedCount = results.filter(r => r.status === 'completed').length;
+        this.logger.log(
+          `  ${i + 1}. ${modelShort} (${completedCount}/${results.length} phases completed)\n`,
+          { type: 'info' },
+        );
+      }
+
+      const modelSelection = (
+        await rl.question('\nSelect model (or "q" to cancel): ')
+      ).trim();
+
+      if (modelSelection.toLowerCase() === 'q') {
+        this.logger.log('\nCancelled.\n', { type: 'info' });
+        return;
+      }
+
+      const modelIdx = parseInt(modelSelection) - 1;
+      if (isNaN(modelIdx) || modelIdx < 0 || modelIdx >= modelKeys.length) {
+        this.logger.log('\nInvalid selection.\n', { type: 'error' });
+        return;
+      }
+
+      selectedModelKey = modelKeys[modelIdx];
+      selectedModelResults = modelGroups.get(selectedModelKey)!;
+    }
+
+    // Show phase selection
+    this.logger.log('\nSelect phase to restore:\n', { type: 'info' });
+
+    for (let i = 0; i < selectedModelResults.length; i++) {
+      const result = selectedModelResults[i];
+      const status = result.status === 'completed' ? '✓'
+        : result.status === 'failed' ? '✗'
+          : result.status === 'aborted' ? '!'
+            : '○';
+      const duration = result.duration ? formatDuration(result.duration) : 'N/A';
+      this.logger.log(
+        `  ${i + 1}. ${status} ${result.phase} | ${duration}\n`,
+        { type: result.status === 'failed' ? 'error' : 'info' },
+      );
+    }
+
+    if (selectedModelResults.length > 1) {
+      this.logger.log(`  a. (All phases — outputs merged in order)\n`, { type: 'info' });
+    }
+
+    const phaseSelection = (
+      await rl.question('\nSelect phase (or "q" to cancel): ')
+    ).trim().toLowerCase();
+
+    if (phaseSelection === 'q') {
+      this.logger.log('\nCancelled.\n', { type: 'info' });
+      return;
+    }
+
+    const selectAll = phaseSelection === 'a' && selectedModelResults.length > 1;
+    let selectedResults: AblationRunResult[];
+
+    if (selectAll) {
+      selectedResults = selectedModelResults;
+    } else {
+      const phaseIdx = parseInt(phaseSelection) - 1;
+      if (isNaN(phaseIdx) || phaseIdx < 0 || phaseIdx >= selectedModelResults.length) {
+        this.logger.log('\nInvalid selection.\n', { type: 'error' });
+        return;
+      }
+      selectedResults = [selectedModelResults[phaseIdx]];
+    }
+
+    // Step 4: Handle outputs folder
+    const outputsEmpty = this.ablationManager.isOutputsEmpty();
+
+    if (!outputsEmpty) {
+      const action = (
+        await rl.question('\nOutputs folder is not empty. (o)verwrite, (s)tash, or (c)ancel? ')
+      ).trim().toLowerCase();
+
+      if (action === 'c' || action === 'cancel') {
+        this.logger.log('\nCancelled.\n', { type: 'info' });
+        return;
+      }
+
+      if (action === 's' || action === 'stash') {
+        // Use a temporary run dir for stashing
+        const stashed = this.ablationManager.stashOutputs(runDir);
+        if (!stashed) {
+          this.logger.log('\nFailed to stash outputs. Aborting.\n', { type: 'error' });
+          return;
+        }
+        this.logger.log('  Current outputs stashed to .mcp-client-data/ablations/_stashed_outputs/\n', { type: 'info' });
+        this.logger.log('  Run /ablation-restore again and choose (o)verwrite to get them back, or delete the stash manually.\n', { type: 'info' });
+      } else if (action === 'o' || action === 'overwrite') {
+        this.ablationManager.clearOutputs();
+        this.logger.log('  Outputs cleared.\n', { type: 'info' });
+      } else {
+        this.logger.log('\nInvalid option. Aborting.\n', { type: 'error' });
+        return;
+      }
+    }
+
+    // Copy outputs from selected phase(s)
+    let totalRestored = 0;
+    for (const result of selectedResults) {
+      const phaseDir = this.ablationManager.getRunOutputsDir(
+        runDir,
+        result.phase,
+        result.model,
+        result.run,
+      );
+      const count = this.ablationManager.restoreRunOutputs(phaseDir);
+      totalRestored += count;
+      if (count > 0) {
+        this.logger.log(`  Restored outputs from "${result.phase}" (${count} items)\n`, { type: 'info' });
+      }
+    }
+
+    if (totalRestored === 0) {
+      this.logger.log('\nNo output files found in the selected phase(s).\n', { type: 'warning' });
+    } else {
+      this.logger.log(`\n✓ Restored ${totalRestored} output items to outputs folder.\n`, { type: 'success' });
+    }
+
+    // Step 5: Optionally restore chat
+    // Determine where chat.json lives
+    let chatFilePath: string | null = null;
+
+    if (persistentContext) {
+      // Single cumulative chat at model level
+      const model = selectedResults[0].model;
+      const modelDir = this.ablationManager.getModelDirName(model);
+      const runIter = selectedResults[0].run;
+      const modelChatDir = runIter !== undefined
+        ? join(runDir, modelDir, `run-${runIter}`)
+        : join(runDir, modelDir);
+      const candidatePath = join(modelChatDir, 'chat.json');
+      if (existsSync(candidatePath)) {
+        chatFilePath = candidatePath;
+      }
+    } else if (!selectAll) {
+      // Per-phase chat — use the selected phase
+      const result = selectedResults[0];
+      const phaseDir = this.ablationManager.getRunOutputsDir(
+        runDir,
+        result.phase,
+        result.model,
+        result.run,
+      );
+      const candidatePath = join(phaseDir, 'chat.json');
+      if (existsSync(candidatePath)) {
+        chatFilePath = candidatePath;
+      }
+    } else {
+      // "All phases" with per-phase chats — ask which phase's chat to restore
+      this.logger.log('\nMultiple phase chats available. Select one to restore:\n', { type: 'info' });
+      const chatCandidates: { result: AblationRunResult; path: string }[] = [];
+      for (const result of selectedResults) {
+        const phaseDir = this.ablationManager.getRunOutputsDir(
+          runDir,
+          result.phase,
+          result.model,
+          result.run,
+        );
+        const candidatePath = join(phaseDir, 'chat.json');
+        if (existsSync(candidatePath)) {
+          chatCandidates.push({ result, path: candidatePath });
+        }
+      }
+
+      if (chatCandidates.length === 0) {
+        this.logger.log('  No chat files found.\n', { type: 'info' });
+      } else {
+        for (let i = 0; i < chatCandidates.length; i++) {
+          this.logger.log(
+            `  ${i + 1}. ${chatCandidates[i].result.phase}\n`,
+            { type: 'info' },
+          );
+        }
+        this.logger.log(`  s. Skip chat restore\n`, { type: 'info' });
+
+        const chatSelection = (
+          await rl.question('\nSelect chat to restore (or "s" to skip): ')
+        ).trim().toLowerCase();
+
+        if (chatSelection !== 's' && chatSelection !== 'skip') {
+          const chatIdx = parseInt(chatSelection) - 1;
+          if (!isNaN(chatIdx) && chatIdx >= 0 && chatIdx < chatCandidates.length) {
+            chatFilePath = chatCandidates[chatIdx].path;
+          }
+        }
+      }
+    }
+
+    if (chatFilePath) {
+      const restoreChat = (
+        await rl.question('\nAlso restore chat into conversation context? (y/n, default: n): ')
+      ).trim().toLowerCase();
+
+      if (restoreChat === 'y' || restoreChat === 'yes') {
+        // Auto-switch: check if the run's model differs from current
+        const runModel = selectedResults[0].model;
+        const currentProviderName = this.client.getProviderName();
+        const currentModelId = this.client.getModel();
+        const needsSwitch = runModel.provider !== currentProviderName || runModel.model !== currentModelId;
+
+        if (needsSwitch) {
+          const runModelShort = this.ablationManager.getModelShortName(runModel);
+          const switchAnswer = (
+            await rl.question(
+              `\nRun used ${runModel.provider}/${runModelShort} (current: ${currentProviderName}/${currentModelId}).\n` +
+              `Switch to the run's model before restoring? (y/n, default: n): `
+            )
+          ).trim().toLowerCase();
+
+          if (switchAnswer === 'y' || switchAnswer === 'yes') {
+            const provider = createProvider(runModel.provider);
+            if (provider) {
+              // Use switchProviderAndModel which clears context as part of the switch
+              await this.client.switchProviderAndModel(provider, runModel.model);
+            } else {
+              this.logger.log(`  Warning: Could not create provider "${runModel.provider}", continuing with current model.\n`, { type: 'warning' });
+              // Still clear context even without model switch
+              this.client.clearContext();
+            }
+          } else {
+            // User declined model switch but still restoring chat — clear context for a clean slate
+            this.client.clearContext();
+          }
+        } else {
+          // Same model — just clear context for the restored session
+          this.client.clearContext();
+        }
+
+        const chatSession = this.ablationManager.loadChatFromFile(chatFilePath);
+        if (chatSession && chatSession.messages) {
+          const chatHistoryCLI = this.callbacks.getChatHistoryCLI();
+          const restoredCount = chatHistoryCLI.restoreFromSession(chatSession);
+          this.logger.log(
+            `\n✓ Restored ${restoredCount} messages into conversation context.\n`,
+            { type: 'success' },
+          );
+        } else {
+          this.logger.log('\nFailed to load chat session from file.\n', { type: 'error' });
+        }
+      }
+    } else if (!selectAll || !persistentContext) {
+      // Only mention no chat if we didn't already handle chat selection above
+      const phaseDir = this.ablationManager.getRunOutputsDir(
+        runDir,
+        selectedResults[0].phase,
+        selectedResults[0].model,
+        selectedResults[0].run,
+      );
+      if (!existsSync(join(phaseDir, 'chat.json'))) {
+        this.logger.log('\n  (No chat file found for this phase — likely a dry run)\n', { type: 'info' });
       }
     }
   }

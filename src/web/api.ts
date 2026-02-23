@@ -660,9 +660,9 @@ export function createApiRouter(client: MCPClient): Router {
     }
   });
 
-  // POST /api/provider — switch provider and model
+  // POST /api/provider — switch provider and model (preserves context by default)
   router.post('/provider', async (req: Request, res: Response) => {
-    const { provider: providerName, model } = req.body;
+    const { provider: providerName, model, clearContext } = req.body;
     if (!providerName || !model) {
       res.status(400).json({ error: 'provider and model are required' });
       return;
@@ -673,7 +673,11 @@ export function createApiRouter(client: MCPClient): Router {
         res.status(400).json({ error: `Unknown provider: ${providerName}` });
         return;
       }
-      await client.switchProviderAndModel(provider, model);
+      if (clearContext) {
+        await client.switchProviderAndModel(provider, model);
+      } else {
+        await client.switchModel(provider, model);
+      }
       res.json({ provider: providerName, model });
     } catch (err: any) {
       res.status(500).json({ error: err.message || String(err) });

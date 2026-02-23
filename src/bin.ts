@@ -368,6 +368,25 @@ async function selectModel(provider: ModelProvider): Promise<string> {
   }
 }
 
+/**
+ * Non-fatal env var validation — returns error string or null.
+ * Unlike checkRequiredEnvVars(), does not call process.exit().
+ */
+export function validateProviderEnv(providerName: string): string | null {
+  const name = providerName.toLowerCase();
+  const envMap: Record<string, string> = {
+    anthropic: 'ANTHROPIC_API_KEY',
+    openai: 'OPENAI_API_KEY',
+    google: 'GEMINI_API_KEY',
+    xai: 'XAI_API_KEY',
+  };
+  const envVar = envMap[name];
+  if (envVar && !process.env[envVar]) {
+    return `${envVar} environment variable is required for ${providerName}`;
+  }
+  return null;
+}
+
 // Check for required environment variables based on provider
 function checkRequiredEnvVars(provider?: string) {
   const providerName = provider?.toLowerCase() || 'anthropic';
