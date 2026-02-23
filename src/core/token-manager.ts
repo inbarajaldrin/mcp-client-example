@@ -117,6 +117,32 @@ export class TokenManager {
 
   /**
    * Automatically summarize conversation when context window is approaching limit.
+   *
+   * TODO: Pre-summarization chat archival
+   * Before replacing messages with the summary, save the full pre-summarization
+   * conversation to disk so nothing is lost. Then include the saved chat location
+   * in the summary message so the agent can reference the original conversation.
+   *
+   * Key considerations:
+   * - Regular chats: save via ChatHistoryManager (ChatSession schema) to the
+   *   standard chats directory (.mcp-client-data/chats/YYYY-MM-DD/).
+   *   The session should be ended/saved before summarization, then a new session
+   *   started with the summary message. The summary message should reference the
+   *   saved session ID and file path.
+   * - Ablation runs: save via the ablation path (different schema — AblationRunResult
+   *   with phase directories). The chat is saved to {runDir}/{modelDir}/(run-N)/{phase}/
+   *   and is typically moved/copied there by savePhaseChatHistory() after the phase ends.
+   *   Mid-phase summarization needs to save the pre-summary chat to the phase directory
+   *   WITHOUT ending the phase. Note: ablation chats are often moved to the run directory
+   *   after the phase completes, so the path referenced in the summary may change.
+   * - The TokenManager currently has no access to ChatHistoryManager or AblationManager.
+   *   A new callback (e.g. onPreSummarize) should be added to TokenManagerCallbacks so
+   *   the caller (MCPClient / AblationCLI) can handle archival in the appropriate way.
+   * - The summary message content should include the archive location, e.g.:
+   *   "[Previous conversation archived to: {path}. Summary: {summaryText}]"
+   * - For ablations: summarization mid-phase can skew comparisons between models.
+   *   Consider logging a flag in AblationRunResult when summarization occurs so
+   *   results can be interpreted correctly.
    */
   async autoSummarize(): Promise<void> {
     await this.ensureTokenCounter();
