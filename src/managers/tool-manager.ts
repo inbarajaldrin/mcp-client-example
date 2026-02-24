@@ -125,9 +125,18 @@ export class ToolManager {
   /**
    * Remove entries from tool states that no longer exist on any connected server.
    * @param knownToolNames Set of all tool names currently available across all servers
+   * @param skipPrefixes Prefixes of servers that failed to load — their tools are preserved
    */
-  pruneStaleTools(knownToolNames: Set<string>): void {
-    const staleKeys = Object.keys(this.toolStates).filter(name => !knownToolNames.has(name));
+  pruneStaleTools(knownToolNames: Set<string>, skipPrefixes?: Set<string>): void {
+    const staleKeys = Object.keys(this.toolStates).filter(name => {
+      if (knownToolNames.has(name)) return false;
+      if (skipPrefixes) {
+        for (const prefix of skipPrefixes) {
+          if (name.startsWith(prefix)) return false;
+        }
+      }
+      return true;
+    });
     if (staleKeys.length === 0) return;
 
     for (const key of staleKeys) {

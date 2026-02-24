@@ -976,6 +976,7 @@ export class MCPClient {
   private async initMCPTools() {
     const allTools: Tool[] = [];
     const allKnownToolNames = new Set<string>(); // Track ALL tool names across all servers (including disabled) for pruning
+    const failedServerPrefixes = new Set<string>(); // Track servers that failed to load tools
     const serversWithTools = new Set<string>();
 
     // Load tools from each server and prefix with server name
@@ -1031,6 +1032,7 @@ export class MCPClient {
           allTools.push(...serverTools);
         }
       } catch (error) {
+        failedServerPrefixes.add(`${serverName}__`);
         this.logger.log(
           `Failed to load tools from server "${serverName}": ${error}\n`,
           { type: 'warning' },
@@ -1041,8 +1043,9 @@ export class MCPClient {
     // Update state for new tools (set them to enabled by default)
     this.toolManager.updateStateForNewTools(allTools);
 
-    // Prune stale tools that no longer exist on any connected server
-    this.toolManager.pruneStaleTools(allKnownToolNames);
+    // Prune stale tools that no longer exist on any connected server,
+    // but skip tools belonging to servers that failed to load (preserve their states)
+    this.toolManager.pruneStaleTools(allKnownToolNames, failedServerPrefixes);
 
     // Filter tools based on enabled state
     const enabledTools = this.toolManager.filterTools(allTools);
