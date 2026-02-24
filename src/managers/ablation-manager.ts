@@ -22,12 +22,20 @@ export interface AblationModel {
   thinking?: string;  // Provider-specific thinking level. Absent = thinking off.
 }
 
+export interface ConditionalGate {
+  run: string;                           // Tool-exec to evaluate as gate condition
+  whenOutput: Record<string, unknown>;   // Condition on gate tool result
+  onPass: string[];                      // Commands if gate passes
+  onFail: string[];                      // Commands if gate fails
+}
+
 export interface PostToolHook {
   after?: string;    // Full tool name to match AFTER execution (e.g. "ros-mcp-server__verify_assembly")
   before?: string;   // Full tool name to match BEFORE execution (only for @tool-exec/@tool commands)
   whenInput?: Record<string, unknown>;   // Match against tool input arguments only
   whenOutput?: Record<string, unknown>;  // Match against tool output JSON only
-  run: string;       // Command to execute (e.g. "@tool-exec:ros2-video-recorder__capture_camera_image(...)")
+  run?: string;      // Command to execute (ignored when gate is present; either run or gate required)
+  gate?: ConditionalGate;  // Conditional gate: evaluate tool, branch on result
 }
 
 export type AblationArgumentType = 'string' | 'attachment';
@@ -656,13 +664,23 @@ export class AblationManager {
       if (phase.onEnd) scanCommands(phase.onEnd);
       if (phase.hooks) {
         for (const hook of phase.hooks) {
-          scanCommands([hook.run]);
+          if (hook.run) scanCommands([hook.run]);
+          if (hook.gate) {
+            scanCommands([hook.gate.run]);
+            scanCommands(hook.gate.onPass);
+            scanCommands(hook.gate.onFail);
+          }
         }
       }
     }
     if (ablation.hooks) {
       for (const hook of ablation.hooks) {
-        scanCommands([hook.run]);
+        if (hook.run) scanCommands([hook.run]);
+        if (hook.gate) {
+          scanCommands([hook.gate.run]);
+          scanCommands(hook.gate.onPass);
+          scanCommands(hook.gate.onFail);
+        }
       }
     }
 

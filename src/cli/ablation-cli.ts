@@ -2766,6 +2766,7 @@ export class AblationCLI {
                   for (const hook of hooks) {
                     if (hook.before === parsed.toolName) {
                       if (this.callbacks.isAbortRequested()) break;
+                      if (!hook.run) continue;
 
                       const hookCmd = resolvedArguments
                         ? this.ablationManager.substituteArguments([hook.run], resolvedArguments)[0]
@@ -2836,6 +2837,7 @@ export class AblationCLI {
                     }
                     // Check for abort before hook
                     if (this.callbacks.isAbortRequested()) break;
+                    if (!hook.run) continue;
 
                     const hookCmd = resolvedArguments
                       ? this.ablationManager.substituteArguments([hook.run], resolvedArguments)[0]

@@ -116,16 +116,38 @@
         }
       }
     },
+    "ConditionalGate": {
+      "type": "object",
+      "required": ["run", "whenOutput", "onPass", "onFail"],
+      "properties": {
+        "run": { "type": "string", "description": "Tool-exec command to evaluate as gate condition" },
+        "whenOutput": { "type": "object", "additionalProperties": true, "description": "Condition on the gate tool's output. If matched, onPass commands run; otherwise onFail." },
+        "onPass": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Commands to run if gate condition passes"
+        },
+        "onFail": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Commands to run if gate condition fails"
+        }
+      }
+    },
     "PostToolHook": {
       "type": "object",
-      "required": ["run"],
       "properties": {
         "after": { "type": "string", "description": "Tool name to match after execution" },
         "before": { "type": "string", "description": "Tool name to match before execution" },
         "whenInput": { "type": "object", "additionalProperties": true, "description": "Condition match on tool input arguments only. Use \"*\" as a wildcard value to match any value (key must be present)." },
         "whenOutput": { "type": "object", "additionalProperties": true, "description": "Condition match on tool output JSON only. Use \"*\" as a wildcard value to match any value (key must be present)." },
-        "run": { "type": "string", "description": "Command to execute" }
-      }
+        "run": { "type": "string", "description": "Command to execute (ignored when gate is present)" },
+        "gate": { "$ref": "#/$defs/ConditionalGate", "description": "Conditional gate: evaluate tool, branch on pass/fail. When present, run is ignored." }
+      },
+      "oneOf": [
+        { "required": ["run"] },
+        { "required": ["gate"] }
+      ]
     }
   }
 }

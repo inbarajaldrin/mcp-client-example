@@ -6,7 +6,7 @@ import { fileURLToPath } from 'url';
 import { randomUUID } from 'crypto';
 import * as yaml from 'yaml';
 import { Logger } from '../logger.js';
-import type { PostToolHook } from './ablation-manager.js';
+import type { PostToolHook, ConditionalGate } from './ablation-manager.js';
 import { parseDirectToolCall, matchesWhenInputCondition, matchesWhenOutputCondition } from '../utils/hook-utils.js';
 import type { ToolExecutionResult } from '../core/tool-executor.js';
 
@@ -360,11 +360,13 @@ export class HookManager {
     for (const hook of hooksToCheck) {
       if (!hook.enabled) continue;
       if (hook.after !== toolName) continue;
+      // Gate hooks are always deferred
+      if (hook.gate) continue;
       // Only evaluate hooks that have a whenInput condition (no whenOutput — we don't have output yet)
       if (!hook.whenInput) continue;
       if (!matchesWhenInputCondition(hook.whenInput, toolInput)) continue;
       // Only fire special commands early; regular tool-exec hooks still wait for completion
-      if (this.handleSpecialCommand(hook.run, toolName, undefined, hook.whenInput as Record<string, unknown>)) {
+      if (hook.run && this.handleSpecialCommand(hook.run, toolName, undefined, hook.whenInput as Record<string, unknown>)) {
         triggered = true;
       }
     }
@@ -403,6 +405,9 @@ export class HookManager {
         if (!hook.enabled) continue;
         if (hook.after !== toolName) continue;
 
+        // Gate hooks are always deferred — they need tool execution + condition checking
+        if (hook.gate) continue;
+
         if (hook.whenInput && !matchesWhenInputCondition(hook.whenInput, toolResult.toolInput)) {
           continue;
         }
@@ -411,11 +416,11 @@ export class HookManager {
         }
 
         // Special commands (@complete-phase, @abort) always fire immediately for cancellation
-        if (this.handleSpecialCommand(hook.run, toolName, hook.whenOutput as Record<string, unknown>, hook.whenInput as Record<string, unknown>)) {
+        if (hook.run && this.handleSpecialCommand(hook.run, toolName, hook.whenOutput as Record<string, unknown>, hook.whenInput as Record<string, unknown>)) {
           continue;
         }
 
-        const parsed = parseDirectToolCall(hook.run);
+        const parsed = hook.run ? parseDirectToolCall(hook.run) : null;
         if (!parsed) {
           this.logger.log(`[Hook invalid command: ${hook.run}]\n`, { type: 'warning' });
           continue;
@@ -497,6 +502,15 @@ export class HookManager {
             continue;
           }
 
+          // ---- Gate hooks: evaluate gate tool, branch on result ----
+          if (hook.gate) {
+            await this.executeGate(hook.gate, completion.toolName, executeTool);
+            continue;
+          }
+
+          // Skip hooks without run command (shouldn't happen after gate check, but be safe)
+          if (!hook.run) continue;
+
           // Special commands were already handled inline — skip
           const trimmed = hook.run.trim();
           if (trimmed === '@complete-phase' || trimmed.startsWith('@complete-phase:') || trimmed === '@abort') {
@@ -545,6 +559,98 @@ export class HookManager {
   }
 
   /**
+   * Execute a conditional gate: run the gate tool, check its output, then
+   * execute the appropriate command list (onPass or onFail).
+   */
+  private async executeGate(
+    gate: ConditionalGate,
+    triggerTool: string,
+    executeTool: (name: string, args: Record<string, unknown>) => Promise<ToolExecutionResult>,
+  ): Promise<void> {
+    // 1. Parse & execute the gate tool
+    const gateParsed = parseDirectToolCall(gate.run);
+    if (!gateParsed) {
+      this.logger.log(`[Gate invalid command: ${gate.run}]\n`, { type: 'warning' });
+      return;
+    }
+
+    this.logger.log(`[Gate evaluating: ${gateParsed.toolName}]\n`, { type: 'info' });
+
+    let gateResult: ToolExecutionResult;
+    try {
+      gateResult = await executeTool(gateParsed.toolName, gateParsed.args);
+    } catch (error: any) {
+      this.logger.log(`[Gate tool failed: ${error.message} — running onFail commands]\n`, { type: 'warning' });
+      await this.executeGateCommands(gate.onFail, triggerTool, executeTool);
+      return;
+    }
+
+    // 2. Check gate result against whenOutput condition
+    const gateMatches = matchesWhenOutputCondition(gate.whenOutput, gateResult.displayText);
+    const branch = gateMatches ? 'PASS' : 'FAIL';
+    const commands = gateMatches ? gate.onPass : gate.onFail;
+
+    this.logger.log(`[Gate ${branch}: ${gateParsed.toolName} — executing ${commands.length} command(s)]\n`, { type: 'info' });
+
+    this.chatLogger?.addHookToolExecution(gateParsed.toolName, gateParsed.args, gateResult.displayText, {
+      type: 'after',
+      triggerTool,
+      action: 'tool-exec',
+      whenOutput: gate.whenOutput,
+    });
+
+    // 3. Execute the chosen command list
+    await this.executeGateCommands(commands, triggerTool, executeTool);
+  }
+
+  /**
+   * Execute a list of commands from a gate's onPass or onFail array.
+   * Supports: @tool-exec, special commands (@insert-prompt, @complete-phase, etc.),
+   * and plain text (treated as @insert-prompt with inline text).
+   */
+  private async executeGateCommands(
+    commands: string[],
+    triggerTool: string,
+    executeTool: (name: string, args: Record<string, unknown>) => Promise<ToolExecutionResult>,
+  ): Promise<void> {
+    for (const cmd of commands) {
+      const trimmed = cmd.trim();
+
+      // Special commands (@insert-prompt, @complete-phase, @abort, etc.)
+      if (this.handleSpecialCommand(trimmed, triggerTool)) {
+        continue;
+      }
+
+      // @tool-exec or @tool commands
+      const parsed = parseDirectToolCall(trimmed);
+      if (parsed) {
+        this.logger.log(`[Gate command: ${parsed.toolName}]\n`, { type: 'info' });
+        try {
+          const result = await executeTool(parsed.toolName, parsed.args);
+          this.logger.log(`[Gate command completed: ${parsed.toolName}]\n`, { type: 'info' });
+          this.chatLogger?.addHookToolExecution(parsed.toolName, parsed.args, result.displayText, {
+            type: 'after',
+            triggerTool,
+            action: 'tool-exec',
+          });
+        } catch (error: any) {
+          this.logger.log(`[Gate command failed: ${error.message}]\n`, { type: 'warning' });
+        }
+        continue;
+      }
+
+      // Plain text (no @ prefix) — treat as inline @insert-prompt
+      if (!trimmed.startsWith('@')) {
+        this.logger.log(`[Gate insert-prompt (inline): ${trimmed.slice(0, 60)}...]\n`, { type: 'info' });
+        this.pendingPromptInsertion = `@insert-prompt:${trimmed}`;
+        continue;
+      }
+
+      this.logger.log(`[Gate unknown command: ${trimmed}]\n`, { type: 'warning' });
+    }
+  }
+
+  /**
    * Execute matching before-hooks for a tool about to run.
    * Hook results are NOT injected into LLM conversation.
    */
@@ -568,6 +674,7 @@ export class HookManager {
       for (const hook of hooksToCheck) {
         if (!hook.enabled) continue;
         if (hook.before !== toolName) continue;
+        if (!hook.run) continue;
 
         // Handle special commands
         if (this.handleSpecialCommand(hook.run, toolName)) {
