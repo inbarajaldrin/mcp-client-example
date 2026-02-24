@@ -339,6 +339,14 @@ export class HookManager {
    * we can fire special commands early. This allows auto-declining elicitations
    * that arrive during the tool call when the phase is already complete.
    *
+   * KEY DISTINCTION — elicitation behavior:
+   *   whenInput hooks CAN auto-decline elicitations: input args are known before the
+   *     tool executes, so @complete-phase/@abort fires early and sets the auto-decline
+   *     flag, causing any elicitation from the MCP server to be declined without human input.
+   *   whenOutput hooks CANNOT auto-decline elicitations: the tool output isn't available
+   *     until the tool finishes, and if the tool sends an elicitation, the human must
+   *     attend to it before the tool returns. whenOutput hooks only evaluate afterward.
+   *
    * Returns true if a special command (@complete-phase or @abort) was triggered.
    */
   preEvaluateWhenInput(toolName: string, toolInput: Record<string, unknown>): boolean {
