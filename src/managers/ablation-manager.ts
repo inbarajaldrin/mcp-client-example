@@ -50,6 +50,7 @@ export interface AblationArgument {
 
 export interface AblationPhase {
   name: string;
+  enabled?: boolean;        // Default true; set false to skip this phase
   commands: string[];
   hooks?: PostToolHook[];   // Post-tool hooks for this phase only (in addition to top-level)
   onStart?: string[];       // Commands to run before phase commands
@@ -60,6 +61,7 @@ export interface AblationSettings {
   maxIterations: number;      // Max agent iterations per run
   mcpConfigPath?: string;     // Optional path to custom MCP config file
   clearContextBetweenPhases?: boolean; // Default true; when false, conversation carries over between phases
+  resetOutputsBetweenPhases?: string[]; // Output subdirs cleared between phases (e.g. ['screenshots'])
 }
 
 export interface AblationDefinition {
@@ -421,15 +423,16 @@ export class AblationManager {
   }
 
   /**
-   * Get total number of scenarios (phases × models × iterations).
+   * Get total number of scenarios (enabled phases × models × iterations).
    * A "scenario" = one phase executed by one model in one iteration.
    */
   getTotalScenarios(ablation: AblationDefinition): number {
     const iterations = ablation.runs ?? 1;
+    const enabledPhases = ablation.phases.filter(p => p.enabled !== false).length;
     if (ablation.dryRun) {
-      return ablation.phases.length * iterations;
+      return enabledPhases * iterations;
     }
-    return ablation.phases.length * ablation.models.length * iterations;
+    return enabledPhases * ablation.models.length * iterations;
   }
 
   /**
@@ -867,6 +870,25 @@ export class AblationManager {
       }
     } catch (error) {
       this.logger.log(`Failed to clear outputs: ${error}\n`, { type: 'error' });
+    }
+  }
+
+  /**
+   * Clear specific output subdirectories between phases.
+   * Preserves the directories themselves (MCP servers expect them to persist).
+   */
+  resetOutputSubdirs(subdirs: string[]): void {
+    for (const subdir of subdirs) {
+      const subdirPath = join(OUTPUTS_DIR, subdir);
+      try {
+        if (existsSync(subdirPath) && statSync(subdirPath).isDirectory()) {
+          for (const child of readdirSync(subdirPath)) {
+            rmSync(join(subdirPath, child), { recursive: true, force: true });
+          }
+        }
+      } catch (error) {
+        this.logger.log(`Failed to reset output subdir "${subdir}": ${error}\n`, { type: 'error' });
+      }
     }
   }
 

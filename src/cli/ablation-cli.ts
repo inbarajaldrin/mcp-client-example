@@ -648,7 +648,7 @@ export class AblationCLI {
         this.logger.log(`    ${i + 1}. ${commands[i]}\n`, { type: 'info' });
       }
 
-      phases.push({ name: phaseName, commands });
+      phases.push({ name: phaseName, enabled: true, commands });
 
       const addAnother = (
         await rl.question('\n  Add another phase? (Y/n): ')
@@ -2593,6 +2593,13 @@ export class AblationCLI {
         for (const phase of ablation.phases) {
           if (shouldBreak || modelAborted) break;
 
+          // Skip disabled phases
+          if (phase.enabled === false) {
+            this.logger.log(`\n  ⤳ Skipping disabled phase: ${phase.name}\n`, { type: 'info' });
+            run.results.push({ phase: phase.name, model, status: 'skipped' });
+            continue;
+          }
+
           // Check for abort (Ctrl+A or Ctrl+C)
           if (this.callbacks.isAbortRequested()) {
             this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
@@ -2600,9 +2607,9 @@ export class AblationCLI {
             break;
           }
 
-          // Conditional context clearing between phases (not for first phase)
-          const isFirstPhase = phase === ablation.phases[0];
-          if (!isFirstPhase && !ablation.dryRun) {
+          // Conditional context clearing between phases (not for first enabled phase)
+          const isFirstEnabledPhase = ablation.phases.find(p => p.enabled !== false) === phase;
+          if (!isFirstEnabledPhase && !ablation.dryRun) {
             if (ablation.settings.clearContextBetweenPhases !== false) {
               this.client.clearContext();
             }
@@ -2925,6 +2932,9 @@ export class AblationCLI {
 
               // Capture any outputs produced before abort (for diagnostics)
               this.ablationManager.captureRunOutputs(runDir, phase.name, model, getRunIter(iteration));
+              if (ablation.settings.resetOutputsBetweenPhases?.length) {
+                this.ablationManager.resetOutputSubdirs(ablation.settings.resetOutputsBetweenPhases);
+              }
 
               // Save chat history on abort so it's preserved in the run directory
               if (ablation.settings.clearContextBetweenPhases !== false) {
@@ -2948,6 +2958,9 @@ export class AblationCLI {
 
               // Capture any outputs produced before @abort (for diagnostics)
               this.ablationManager.captureRunOutputs(runDir, phase.name, model, getRunIter(iteration));
+              if (ablation.settings.resetOutputsBetweenPhases?.length) {
+                this.ablationManager.resetOutputSubdirs(ablation.settings.resetOutputsBetweenPhases);
+              }
 
               // Save chat history on @abort so it's preserved in the run directory
               if (ablation.settings.clearContextBetweenPhases !== false) {
@@ -3024,6 +3037,9 @@ export class AblationCLI {
 
           // Capture outputs produced during this phase (even on failure, for diagnostics)
           this.ablationManager.captureRunOutputs(runDir, phase.name, model, getRunIter(iteration));
+          if (ablation.settings.resetOutputsBetweenPhases?.length) {
+            this.ablationManager.resetOutputSubdirs(ablation.settings.resetOutputsBetweenPhases);
+          }
 
           // On failure: skip remaining phases for this model
           if (result.status === 'failed') {
@@ -4042,7 +4058,7 @@ export class AblationCLI {
     }
 
     try {
-      this.ablationManager.addPhase(ablationName, { name: phaseName, commands });
+      this.ablationManager.addPhase(ablationName, { name: phaseName, enabled: true, commands });
       this.logger.log('\n✓ Phase added.\n', { type: 'success' });
     } catch (error: any) {
       this.logger.log(`\n✗ ${error.message}\n`, { type: 'error' });

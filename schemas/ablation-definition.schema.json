@@ -67,6 +67,7 @@
       "required": ["name", "commands"],
       "properties": {
         "name": { "type": "string", "description": "Phase name used in results and logs" },
+        "enabled": { "type": "boolean", "default": true, "description": "Set to false to skip this phase without removing it from the definition" },
         "commands": {
           "type": "array",
           "items": { "type": "string" },
@@ -113,6 +114,11 @@
           "type": "boolean",
           "default": true,
           "description": "When true (default), clears conversation context between phases. When false, conversation carries over across phases for the same model."
+        },
+        "resetOutputsBetweenPhases": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Output subdirectories to clear between phases. Files in these folders are captured per-phase but not carried forward."
         }
       }
     },
