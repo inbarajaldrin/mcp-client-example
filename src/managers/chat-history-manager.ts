@@ -7,6 +7,12 @@ import { getModelInfo } from '../utils/models-dev.js';
 import { sanitizeFolderName } from '../utils/path-utils.js';
 import { directoryHasFiles, copyDirectoryRecursive, moveDirectoryRecursive } from '../utils/file-ops.js';
 
+// Strip ANSI escape codes (chalk colors) from tool output before persisting
+const ANSI_RE = /\u001b\[[0-9;]*m/g;
+function stripAnsi(text: string): string {
+  return text.replace(ANSI_RE, '');
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 
@@ -359,14 +365,15 @@ export class ChatHistoryManager {
 
     const toolOutputTime = new Date().toISOString();
     const timestamp = toolInputTime || toolOutputTime; // Use input time if available, otherwise output time
+    const cleanOutput = stripAnsi(toolOutput);
 
     const message: any = {
       timestamp,
       role: 'tool',
-      content: toolOutput,
+      content: cleanOutput,
       toolName,
       toolInput,
-      toolOutput,
+      toolOutput: cleanOutput,
       toolInputTime: toolInputTime || toolOutputTime, // If not provided, use output time as fallback
       toolOutputTime,
       orchestratorMode,
@@ -411,13 +418,14 @@ export class ChatHistoryManager {
     if (!this.currentSession) return;
 
     const now = new Date().toISOString();
+    const cleanOutput = stripAnsi(toolOutput);
     this.currentSession.messages.push({
       timestamp: now,
       role: 'tool',
-      content: toolOutput,
+      content: cleanOutput,
       toolName,
       toolInput,
-      toolOutput,
+      toolOutput: cleanOutput,
       toolInputTime: now,
       toolOutputTime: now,
       isHookCall: true,
