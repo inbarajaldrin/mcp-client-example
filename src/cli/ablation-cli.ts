@@ -3,6 +3,7 @@
  */
 
 import readline from 'readline/promises';
+import chalk from 'chalk';
 import { cpSync, existsSync, mkdirSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
@@ -210,15 +211,177 @@ export class AblationCLI {
 
   /**
    * Prompt the user during a dry-run pause (Ctrl+A after a @tool-exec).
-   * Returns 'retry' to re-run the same command, 'resume' to continue, or 'cancel' to skip remaining.
+   * Returns 'resume' to continue, 'cancel' to skip remaining,
+   * 'restart-phase' to restart the current phase, or { rewindTo: index } to
+   * rewind to a specific command index in phaseCommands.
    */
-  private async promptDryRunPause(command: string): Promise<'retry' | 'resume' | 'cancel'> {
+  private async promptDryRunPause(
+    command: string,
+    executedCommands: { index: number; command: string }[],
+  ): Promise<'resume' | 'cancel' | 'restart-phase' | { rewindTo: number }> {
     this.logger.log(`\n  ⏸ Paused after: ${command}\n`, { type: 'warning' });
-    this.logger.log('  [r]etry | [Enter] resume | [c]ancel\n', { type: 'info' });
+    this.logger.log('  [Enter] resume | [c]ancel | [r]ewind | [s] restart phase\n', { type: 'info' });
     const input = await this.callbacks.collectInput('  Choice: ');
     if (input === null || input.trim().toLowerCase() === 'c') return 'cancel';
-    if (input.trim().toLowerCase() === 'r') return 'retry';
+    if (input.trim().toLowerCase() === 's') return 'restart-phase';
+    if (input.trim().toLowerCase() === 'r') {
+      if (executedCommands.length < 1) {
+        this.logger.log('  Nothing to rewind to.\n', { type: 'warning' });
+        return 'resume';
+      }
+      const picked = await this.promptRewindPicker(executedCommands);
+      if (picked === null) return 'resume'; // User cancelled the picker
+      return { rewindTo: picked };
+    }
     return 'resume';
+  }
+
+  private static readonly REWIND_VISIBLE_WINDOW = 15;
+
+  /**
+   * Interactive arrow-key list picker for selecting which command to rewind to.
+   * Shows all executed commands in the current phase. Returns the phaseCommands
+   * index to rewind to, or null if the user cancelled (q/Esc).
+   */
+  private async promptRewindPicker(
+    executedCommands: { index: number; command: string }[],
+  ): Promise<number | null> {
+    // Stop keyboard monitor so we own raw stdin
+    this.callbacks.stopKeyboardMonitor();
+
+    const stdin = process.stdin;
+    if (stdin.setRawMode) stdin.setRawMode(true);
+    stdin.resume();
+    stdin.setEncoding('utf8');
+
+    // Remove any existing data listeners
+    const existingListeners = stdin.listeners('data').slice();
+    stdin.removeAllListeners('data');
+
+    let selectedIndex = executedCommands.length - 1; // Start at most recent
+    this.renderRewindList(executedCommands, selectedIndex);
+
+    const result = await new Promise<number | null>((resolve) => {
+      let escapeBuffer = '';
+      let escapeTimeout: ReturnType<typeof setTimeout> | null = null;
+
+      const cleanup = () => {
+        if (escapeTimeout) { clearTimeout(escapeTimeout); escapeTimeout = null; }
+        escapeBuffer = '';
+        stdin.removeListener('data', keyHandler);
+      };
+
+      const keyHandler = (key: string) => {
+        // Arrow keys as complete sequences
+        if (key === '\x1B[A') {
+          if (escapeTimeout) clearTimeout(escapeTimeout);
+          escapeBuffer = '';
+          if (selectedIndex > 0) { selectedIndex--; this.renderRewindList(executedCommands, selectedIndex); }
+          return;
+        }
+        if (key === '\x1B[B') {
+          if (escapeTimeout) clearTimeout(escapeTimeout);
+          escapeBuffer = '';
+          if (selectedIndex < executedCommands.length - 1) { selectedIndex++; this.renderRewindList(executedCommands, selectedIndex); }
+          return;
+        }
+
+        // Escape sequence buffering (byte-by-byte)
+        if (escapeBuffer.length > 0) {
+          escapeBuffer += key;
+          if (escapeTimeout) clearTimeout(escapeTimeout);
+          if (escapeBuffer === '\x1B[A') {
+            escapeBuffer = '';
+            if (selectedIndex > 0) { selectedIndex--; this.renderRewindList(executedCommands, selectedIndex); }
+            return;
+          }
+          if (escapeBuffer === '\x1B[B') {
+            escapeBuffer = '';
+            if (selectedIndex < executedCommands.length - 1) { selectedIndex++; this.renderRewindList(executedCommands, selectedIndex); }
+            return;
+          }
+          if (escapeBuffer.length >= 3) escapeBuffer = '';
+          return;
+        }
+
+        // Start of escape sequence
+        if (key === '\x1B') {
+          escapeBuffer = '\x1B';
+          escapeTimeout = setTimeout(() => { escapeBuffer = ''; cleanup(); resolve(null); }, 50);
+          return;
+        }
+
+        // Enter — select
+        if (key === '\r' || key === '\n') { cleanup(); resolve(executedCommands[selectedIndex].index); return; }
+        // q — cancel
+        if (key === 'q') { cleanup(); resolve(null); return; }
+        // Ctrl+C
+        if (key === '\x03') { cleanup(); process.emit('SIGINT', 'SIGINT'); return; }
+      };
+
+      stdin.on('data', keyHandler);
+    });
+
+    // Restore terminal state
+    if (stdin.setRawMode) stdin.setRawMode(false);
+    // Restore previous listeners
+    for (const listener of existingListeners) {
+      stdin.on('data', listener as (...args: any[]) => void);
+    }
+    // Restart keyboard monitor
+    this.callbacks.startKeyboardMonitor();
+
+    // Clear rewind UI
+    process.stdout.write('\x1B[2J\x1B[H');
+    return result;
+  }
+
+  /**
+   * Render the rewind command list with the selected item highlighted.
+   */
+  private renderRewindList(
+    commands: { index: number; command: string }[],
+    selectedIndex: number,
+  ): void {
+    process.stdout.write('\x1B[2J\x1B[H');
+
+    console.log(
+      chalk.bold.yellow('Rewind') + chalk.dim(' - Select a command to rewind to'),
+    );
+    console.log(chalk.dim('  Up/Down: navigate  |  Enter: rewind here  |  q/Esc: cancel'));
+    console.log();
+
+    const windowSize = AblationCLI.REWIND_VISIBLE_WINDOW;
+    const windowStart = Math.max(0, Math.min(
+      selectedIndex - Math.floor(windowSize / 2),
+      commands.length - windowSize,
+    ));
+    const windowEnd = Math.min(commands.length, windowStart + windowSize);
+
+    if (windowStart > 0) {
+      console.log(chalk.dim(`  ... ${windowStart} more above`));
+    }
+
+    for (let i = windowStart; i < windowEnd; i++) {
+      const entry = commands[i];
+      const stepNum = `${i + 1}`;
+      const cmdPreview = entry.command.length > 80
+        ? entry.command.substring(0, 77) + '...'
+        : entry.command;
+
+      if (i === selectedIndex) {
+        console.log(chalk.bgCyan.black.bold(`> [${stepNum}] ${cmdPreview}`));
+      } else {
+        console.log(`  ${chalk.dim(`[${stepNum}]`)} ${chalk.cyan(cmdPreview)}`);
+      }
+    }
+
+    if (windowEnd < commands.length) {
+      console.log(chalk.dim(`  ... ${commands.length - windowEnd} more below`));
+    }
+
+    console.log();
+    console.log(chalk.dim(`[${selectedIndex + 1}/${commands.length}]`));
   }
 
   /**
@@ -2664,12 +2827,20 @@ export class AblationCLI {
           const phaseOnEnd = phase.onEnd ? sub(phase.onEnd) : undefined;
 
           try {
+            let aborted = false;
+            let abortCurrentModel = false;
+            let phaseCompletedViaSignal = false;
+            let restartPhase = false;
+
+            // Outer loop: re-entered when user chooses "restart phase"
+            // eslint-disable-next-line no-constant-condition
+            while (true) {
+            restartPhase = false;
+
             // Log phase-start event to chat history
             this.client.getChatHistoryManager().addPhaseEvent('phase-start', phase.name);
 
             // Execute onStart lifecycle hooks
-            let aborted = false;
-            let abortCurrentModel = false;
             if (phaseOnStart && phaseOnStart.length > 0) {
               this.logger.log(`  ⤷ Phase onStart hooks...\n`, { type: 'info' });
               for (const startCmd of phaseOnStart) {
@@ -2735,7 +2906,7 @@ export class AblationCLI {
             // Execute remaining (non-staged) commands for this phase
             const remainingCount = phaseCommands.length - stagedIndices.size;
             let remainingIdx = 0;
-            let phaseCompletedViaSignal = false;
+            const executedCommands: { index: number; command: string }[] = [];
             for (let i = 0; i < phaseCommands.length && !aborted; i++) {
               if (stagedIndices.has(i)) continue; // Already pre-staged
               remainingIdx++;
@@ -2802,17 +2973,35 @@ export class AblationCLI {
                 phase.name,
               );
 
+              // Track executed commands for rewind picker
+              executedCommands.push({ index: i, command });
+
               // Dry-run pause: after each tool-exec, check for Ctrl+A interrupt
               if (ablation.dryRun && this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()) {
                 this.callbacks.resetInterrupt();
-                const choice = await this.promptDryRunPause(command);
-                if (choice === 'retry') {
-                  i--; // Decrement so the for-loop re-runs this command
-                  continue;
-                } else if (choice === 'cancel') {
+                const choice = await this.promptDryRunPause(command, executedCommands);
+
+                if (choice === 'cancel') {
                   aborted = true;
                   shouldBreak = true;
                   break;
+                } else if (choice === 'restart-phase') {
+                  this.logger.log(`  ↻ Restarting phase "${phase.name}" from onStart...\n`, { type: 'warning' });
+                  restartPhase = true;
+                  break;
+                } else if (typeof choice === 'object' && 'rewindTo' in choice) {
+                  const target = choice.rewindTo;
+                  // Recalculate remainingIdx for the target position
+                  remainingIdx = 0;
+                  for (let j = 0; j < target; j++) {
+                    if (!stagedIndices.has(j)) remainingIdx++;
+                  }
+                  // Trim executedCommands to only entries before the target
+                  const trimIdx = executedCommands.findIndex(e => e.index >= target);
+                  if (trimIdx >= 0) executedCommands.length = trimIdx;
+                  i = target - 1; // Will become target after for-loop increment
+                  this.logger.log(`  ↺ Rewinding to command ${target + 1}...\n`, { type: 'warning' });
+                  continue;
                 }
                 // 'resume' → continue to next command
               }
@@ -2885,6 +3074,13 @@ export class AblationCLI {
                 break;
               }
             }
+
+            // If restart-phase was requested, loop back to re-run onStart + commands
+            if (restartPhase) continue;
+
+            // Normal exit from the restart loop
+            break;
+            } // end while(true) restart-phase loop
 
             // Execute onEnd lifecycle hooks (only if not aborted)
             if (!aborted && phaseOnEnd && phaseOnEnd.length > 0) {
