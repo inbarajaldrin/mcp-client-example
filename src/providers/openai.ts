@@ -314,8 +314,22 @@ export class OpenAIProvider implements ModelProvider {
 
     const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
     let messageStarted = false;
+    let finalUsage: {
+      prompt_tokens: number;
+      completion_tokens: number;
+      prompt_tokens_details?: { cached_tokens?: number };
+    } | null = null;
 
     for await (const chunk of stream) {
+      // Capture usage information BEFORE choice check (OpenAI sends usage in a final chunk with empty choices)
+      if (chunk.usage) {
+        finalUsage = {
+          prompt_tokens: chunk.usage.prompt_tokens || 0,
+          completion_tokens: chunk.usage.completion_tokens || 0,
+          prompt_tokens_details: (chunk.usage as any).prompt_tokens_details || undefined,
+        };
+      }
+
       const choice = chunk.choices?.[0];
       if (!choice) continue;
 
@@ -406,30 +420,27 @@ export class OpenAIProvider implements ModelProvider {
           } as MessageStreamEvent;
         }
 
-        // Yield token usage at the end of stream
-        if (chunk.usage) {
-          const promptTokens = chunk.usage.prompt_tokens || 0;
-          const completionTokens = chunk.usage.completion_tokens || 0;
-          const cachedTokens = (chunk.usage as any).prompt_tokens_details?.cached_tokens || 0;
-          const regularInputTokens = promptTokens - cachedTokens; // Regular input = total - cached
-          
-          yield {
-            type: 'token_usage',
-            input_tokens: promptTokens,
-            output_tokens: completionTokens,
-            // Include breakdown for detailed tracking (similar to Anthropic)
-            input_tokens_breakdown: {
-              input_tokens: regularInputTokens,
-              cache_creation_input_tokens: 0, // OpenAI doesn't track cache creation separately
-              cache_read_input_tokens: cachedTokens,
-            },
-          } as MessageStreamEvent;
-        }
-
         yield {
           type: 'message_stop',
         } as MessageStreamEvent;
       }
+    }
+
+    // Yield token usage after stream completes (OpenAI sends usage in a final chunk with empty choices)
+    if (finalUsage) {
+      const cachedTokens = finalUsage.prompt_tokens_details?.cached_tokens || 0;
+      const regularInputTokens = finalUsage.prompt_tokens - cachedTokens;
+
+      yield {
+        type: 'token_usage',
+        input_tokens: finalUsage.prompt_tokens,
+        output_tokens: finalUsage.completion_tokens,
+        input_tokens_breakdown: {
+          input_tokens: regularInputTokens,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: cachedTokens,
+        },
+      } as MessageStreamEvent;
     }
   }
 
