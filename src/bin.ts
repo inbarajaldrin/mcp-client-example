@@ -502,6 +502,7 @@ async function main() {
         'web': { type: 'boolean' },
         'web-port': { type: 'string' },
         'web-host': { type: 'string' },
+        'headless': { type: 'string' },
       },
       allowPositionals: true,
     });
@@ -586,6 +587,7 @@ async function main() {
       const cli = new MCPClientCLI(serverConfigs, {
         provider,
         model: selectedModel,
+        headless: args.values['headless'],
       });
       await cli.start();
       return;
@@ -666,6 +668,7 @@ async function main() {
       const cli = new MCPClientCLI(allServerConfigs, {
         provider: finalProvider,
         model: selectedModel,
+        headless: args.values['headless'],
       });
       await cli.start();
       return;
@@ -700,6 +703,7 @@ async function main() {
     }, {
       provider,
       model: selectedModel,
+      headless: args.values['headless'],
     });
 
     await cli.start();

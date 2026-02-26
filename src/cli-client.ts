@@ -3,6 +3,7 @@ import readline from 'readline/promises';
 import * as readlineSync from 'readline';
 import { MCPClient } from './index.js';
 import { consoleStyles, Logger } from './logger.js';
+import { runHeadless } from './cli/headless-runner.js';
 import type { ModelProvider } from './model-provider.js';
 import { AttachmentManager, type AttachmentInfo } from './managers/attachment-manager.js';
 import { PreferencesManager } from './managers/preferences-manager.js';
@@ -65,10 +66,13 @@ export class MCPClientCLI {
   private hilManager: HumanInTheLoopManager;
   private escapeKeyHandler: ((_str: string, key: { name?: string }) => void) | null = null;
 
+  private headlessScript: string | undefined;
+
   constructor(
     serverConfig: StdioServerParameters | Array<{ name: string; config: StdioServerParameters }>,
-    options?: { provider?: ModelProvider; model?: string },
+    options?: { provider?: ModelProvider; model?: string; headless?: string },
   ) {
+    this.headlessScript = options?.headless;
     if (Array.isArray(serverConfig)) {
       // Multiple servers
       this.client = MCPClient.createMultiServer(serverConfig, {
@@ -245,6 +249,20 @@ export class MCPClientCLI {
 
   async start() {
     try {
+      // In headless mode, skip interactive banners and go straight to script execution
+      if (this.headlessScript) {
+        await this.client.start();
+        await runHeadless(this.headlessScript, {
+          client: this.client,
+          logger: this.logger,
+          hilManager: this.hilManager,
+          preferencesManager: this.preferencesManager,
+          ablationCLI: this.ablationCLI,
+          routeSlashCommand: (cmd) => this.routeSlashCommand(cmd),
+        });
+        return;
+      }
+
       this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
       this.logger.log('🤖 Interactive CLI\n', { type: 'info' });
       this.logger.log(`Type your queries, "/exit" or "exit" to exit\n`, {
@@ -264,10 +282,10 @@ export class MCPClientCLI {
       );
       this.displayHelp();
       this.logger.log(consoleStyles.separator + '\n', { type: 'info' });
-      
+
       // Wait for MCP client to fully connect before creating readline
       await this.client.start();
-      
+
       // Create readline interface after MCP connection is established
       this.rl = readline.createInterface({
         input: process.stdin,
