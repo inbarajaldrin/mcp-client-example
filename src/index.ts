@@ -2557,7 +2557,13 @@ export class MCPClient {
             // and for general context preservation across turns
             content_blocks: contentBlocks,
           };
-          this.messages.push(assistantMessage);
+          // For Anthropic end_turn, the complete response handler (below) pushes
+          // the richer assistantMessage built from chunk.content. Only push here
+          // for non-Anthropic providers (always) and Anthropic tool_use (where
+          // the complete response handler doesn't fire).
+          if (!isAnthropic || hasToolCalls) {
+            this.messages.push(assistantMessage);
+          }
 
           // Save assistant messages to chat history
           // For non-Anthropic providers, this is the only place messages get persisted
@@ -2579,18 +2585,8 @@ export class MCPClient {
           // Note: For OpenAI, tool results are added immediately at tool_use_complete events
           // (tools execute AFTER message_stop, so pendingToolResults would be empty here)
 
-          // Use official token counting for accurate counts
-          if (this.modelProvider.getProviderName() === 'anthropic') {
-            const provider = this.modelProvider as any;
-            const exactCount = await provider.countTokensOfficial(
-              this.messages,
-              this.model,
-              this.tools,
-            );
-            this.currentTokenCount = exactCount;
-          }
-          // OpenAI: token counts come from token_usage events (already handled above)
-          
+          // Token counts come from token_usage events (line ~2469) for all providers
+
           // Log token usage per callback to chat history (not terminal)
           if (this.modelProvider.getProviderName() === 'openai' && lastTokenUsage) {
             // OpenAI: use exact counts from API
@@ -2772,17 +2768,7 @@ export class MCPClient {
           }
         }
         
-        // Use official token counting for accurate counts
-        if (this.modelProvider.getProviderName() === 'anthropic') {
-          const provider = this.modelProvider as any;
-          const exactCount = await provider.countTokensOfficial(
-            this.messages,
-            this.model,
-            this.tools,
-          );
-          this.currentTokenCount = exactCount;
-        }
-        // OpenAI: token counts come from token_usage events (already handled above)
+        // Token counts come from token_usage events (line ~2469) for all providers
 
         // Log token usage per callback to chat history (not terminal)
         if (this.modelProvider.getProviderName() === 'openai' && lastTokenUsage) {
@@ -3223,26 +3209,6 @@ export class MCPClient {
         );
         const followUpResult = await this.processToolUseStream(hookFollowUpStream, cancellationCheck, this.currentTokenCount, observer);
         currentDeferredData = followUpResult.deferredHookData;
-      }
-
-      // Always update token count using official API after stream completes
-      // This ensures accurate counts including images/attachments
-      if (this.modelProvider.getProviderName() === 'anthropic') {
-        const provider = this.modelProvider as any;
-        try {
-          const exactCount = await provider.countTokensOfficial(
-            this.messages,
-            this.model,
-            this.tools,
-          );
-          this.currentTokenCount = exactCount;
-        } catch (error) {
-          // If token counting fails, log warning but continue
-          this.logger.log(
-            `\n⚠️  Failed to get exact token count: ${error}\n`,
-            { type: 'warning' },
-          );
-        }
       }
 
       // Log final token usage if there's one remaining from the stream
