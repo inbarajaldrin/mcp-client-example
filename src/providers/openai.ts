@@ -410,7 +410,7 @@ export class OpenAIProvider implements ModelProvider {
         if (chunk.usage) {
           const promptTokens = chunk.usage.prompt_tokens || 0;
           const completionTokens = chunk.usage.completion_tokens || 0;
-          const cachedTokens = (chunk.usage as any).input_tokens_details?.cached_tokens || 0;
+          const cachedTokens = (chunk.usage as any).prompt_tokens_details?.cached_tokens || 0;
           const regularInputTokens = promptTokens - cachedTokens; // Regular input = total - cached
           
           yield {
@@ -505,7 +505,7 @@ export class OpenAIProvider implements ModelProvider {
       let finalUsage: {
         prompt_tokens: number;
         completion_tokens: number;
-        input_tokens_details?: { cached_tokens?: number };
+        prompt_tokens_details?: { cached_tokens?: number };
       } | null = null;
 
       // Stream events to user while collecting response
@@ -515,7 +515,7 @@ export class OpenAIProvider implements ModelProvider {
           finalUsage = {
             prompt_tokens: chunk.usage.prompt_tokens || 0,
             completion_tokens: chunk.usage.completion_tokens || 0,
-            input_tokens_details: (chunk.usage as any).input_tokens_details || undefined,
+            prompt_tokens_details: (chunk.usage as any).prompt_tokens_details || undefined,
           };
         }
 
@@ -668,7 +668,7 @@ export class OpenAIProvider implements ModelProvider {
       if (usageToYield) {
         const promptTokens = usageToYield.prompt_tokens || 0;
         const completionTokens = usageToYield.completion_tokens || 0;
-        const cachedTokens = (usageToYield as any).input_tokens_details?.cached_tokens || 0;
+        const cachedTokens = (usageToYield as any).prompt_tokens_details?.cached_tokens || 0;
         const regularInputTokens = promptTokens - cachedTokens; // Regular input = total - cached
         
         yield {
