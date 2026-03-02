@@ -36,6 +36,8 @@ export interface ToolExecutionResult {
   contentBlocks: ContentBlock[];
   /** Whether this result contains images */
   hasImages: boolean;
+  /** Args coerced by client before sending to MCP (e.g. string→int). Original args stay in toolInput. */
+  clientFixedArgs?: string[];
 }
 
 /**
@@ -50,7 +52,7 @@ interface ServerConnection {
       options?: { timeout?: number }
     ) => Promise<any>;
   };
-  tools: Array<{ name: string }>;
+  tools: Array<{ name: string; input_schema?: { type: string; properties?: Record<string, any> } }>;
 }
 
 /**
@@ -94,6 +96,43 @@ export interface MCPToolExecutorCallbacks {
   setElicitationAutoDecline?: (value: boolean) => void;
 }
 
+/**
+ * Coerce tool arguments to match the expected schema types.
+ * Models (especially Gemini) sometimes send strings where integers/numbers are expected.
+ * Returns the coerced args and a list of fields that were fixed (for logging as client-fixed).
+ */
+function coerceToolArgs(
+  args: Record<string, any>,
+  schema?: { type: string; properties?: Record<string, any> },
+): { coerced: Record<string, any>; fixes: string[] } {
+  if (!schema?.properties) return { coerced: args, fixes: [] };
+  const coerced = { ...args };
+  const fixes: string[] = [];
+  for (const [key, value] of Object.entries(coerced)) {
+    const propSchema = schema.properties[key];
+    if (!propSchema || value === undefined || value === null) continue;
+    // String → number/integer coercion
+    if (typeof value === 'string' && (propSchema.type === 'integer' || propSchema.type === 'number')) {
+      const num = Number(value);
+      if (!isNaN(num)) {
+        coerced[key] = propSchema.type === 'integer' ? Math.round(num) : num;
+        fixes.push(`${key}: "${value}" → ${coerced[key]}`);
+      }
+    }
+    // Number → string coercion (less common but possible)
+    if (typeof value === 'number' && propSchema.type === 'string') {
+      coerced[key] = String(value);
+      fixes.push(`${key}: ${value} → "${coerced[key]}"`);
+    }
+    // Boolean coercion
+    if (typeof value === 'string' && propSchema.type === 'boolean') {
+      if (value === 'true') { coerced[key] = true; fixes.push(`${key}: "true" → true`); }
+      if (value === 'false') { coerced[key] = false; fixes.push(`${key}: "false" → false`); }
+    }
+  }
+  return { coerced, fixes };
+}
+
 /** Force stop timeout in seconds */
 const FORCE_STOP_TIMEOUT_SECONDS = 15;
 
@@ -104,6 +143,14 @@ export class MCPToolExecutor {
   private logger: Logger;
   private callbacks: MCPToolExecutorCallbacks;
   private forceStopPromptActive: boolean = false; // Mutex to prevent multiple concurrent prompts
+  private _lastClientFixedArgs: string[] = []; // Coercion fixes from last executeMCPTool call
+
+  /** Get and clear the client-fixed args from the last tool execution. */
+  consumeClientFixedArgs(): string[] {
+    const fixes = this._lastClientFixedArgs;
+    this._lastClientFixedArgs = [];
+    return fixes;
+  }
 
   constructor(logger: Logger, callbacks: MCPToolExecutorCallbacks) {
     this.logger = logger;
@@ -331,6 +378,23 @@ export class MCPToolExecutor {
     }
 
     let toolResult;
+    let clientFixedArgs: string[] = [];
+    this._lastClientFixedArgs = [];
+
+    // Coerce tool arguments to match schema types (e.g. string→int for Gemini)
+    let coercedInput = toolInput;
+    if (serverName && servers.has(serverName)) {
+      const conn = servers.get(serverName)!;
+      const toolDef = conn.tools.find(t => t.name === toolName || t.name === actualToolName);
+      if (toolDef?.input_schema) {
+        const { coerced, fixes } = coerceToolArgs(toolInput, toolDef.input_schema);
+        if (fixes.length > 0) {
+          this.logger.log(`  [client-fixed] ${fixes.join(', ')}\n`, { type: 'warning' });
+          coercedInput = coerced;
+          clientFixedArgs = fixes;
+        }
+      }
+    }
 
     try { // outer try: clears auto-decline in finally
     try {
@@ -342,7 +406,7 @@ export class MCPToolExecutor {
             method: 'tools/call',
             params: {
               name: actualToolName,
-              arguments: toolInput,
+              arguments: coercedInput,
             },
           },
           CallToolResultSchema,
@@ -370,12 +434,21 @@ export class MCPToolExecutor {
             const actualName = tool.name.includes('__')
               ? tool.name.split('__')[1]
               : tool.name;
+            // Coerce in fallback path too
+            let fallbackInput = toolInput;
+            if (tool.input_schema) {
+              const { coerced, fixes } = coerceToolArgs(toolInput, tool.input_schema);
+              if (fixes.length > 0) {
+                this.logger.log(`  [client-fixed] ${fixes.join(', ')}\n`, { type: 'warning' });
+                fallbackInput = coerced;
+              }
+            }
             const toolPromise = connection.client.request(
               {
                 method: 'tools/call',
                 params: {
                   name: actualName,
-                  arguments: toolInput,
+                  arguments: fallbackInput,
                 },
               },
               CallToolResultSchema,
@@ -434,6 +507,10 @@ export class MCPToolExecutor {
       }
 
       const result: ToolExecutionResult = { displayText, contentBlocks, hasImages };
+      if (clientFixedArgs.length > 0) {
+        result.clientFixedArgs = clientFixedArgs;
+        this._lastClientFixedArgs = clientFixedArgs;
+      }
 
       // Execute immediate after-hooks inline (@tool-exec: and special commands)
       const hookMgr = this.callbacks.getHookManager?.();

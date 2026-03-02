@@ -1935,6 +1935,7 @@ export class MCPClient {
       // Log to chat history (use stringified result to avoid [object Object])
       // Skip recording if history recording is disabled (e.g., during tool replay)
       if (!this._disableHistoryRecording) {
+        const ipcFixedArgs = this.toolExecutor.consumeClientFixedArgs();
         this.chatHistoryManager.addToolExecution(
           event.toolName,
           event.args || {},
@@ -1942,6 +1943,8 @@ export class MCPClient {
           true, // orchestratorMode - IPC calls are in orchestrator mode
           true, // isIPCCall - this is an automatic IPC call
           toolInputTime, // Pass the input time
+          undefined, // toolUseId - IPC calls don't have one
+          ipcFixedArgs.length > 0 ? ipcFixedArgs : undefined,
         );
       }
     });
@@ -2315,6 +2318,7 @@ export class MCPClient {
         // Log tool execution to history
         // TODO: Persist tool result images for chat restore.
         // Currently, image base64 data from tool results (chunk.hasImages) is lost on save.
+        const regularFixedArgs = this.toolExecutor.consumeClientFixedArgs();
         this.chatHistoryManager.addToolExecution(
           chunk.toolName,
           chunk.toolInput || {},
@@ -2323,6 +2327,7 @@ export class MCPClient {
           false, // isIPCCall - regular tool calls
           toolInputTime, // Pass the input time
           toolId, // Pass the tool_use_id for pairing with assistant's tool_use block
+          regularFixedArgs.length > 0 ? regularFixedArgs : undefined,
         );
 
         // Collect tool completion data for deferred hook processing after agent response.

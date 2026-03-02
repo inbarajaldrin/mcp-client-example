@@ -92,6 +92,7 @@ export interface ChatSession {
     toolOutput?: string;
     toolInputTime?: string; // ISO timestamp when tool input was sent
     toolOutputTime?: string; // ISO timestamp when tool output was received
+    clientFixedArgs?: string[]; // Args coerced by client (e.g. string→int), original in toolInput
     orchestratorMode?: boolean; // Track if tool was called in orchestrator mode
     isIPCCall?: boolean; // Track if this was an IPC call (automatic, not by agent)
     isHookCall?: boolean; // Track if this was triggered by a hook (@tool-exec:, @tool:, or onStart)
@@ -355,6 +356,7 @@ export class ChatHistoryManager {
     isIPCCall: boolean = false,
     toolInputTime?: string, // Optional ISO timestamp when tool input was sent
     toolUseId?: string, // Optional tool_use_id for pairing with assistant's tool_use block
+    clientFixedArgs?: string[], // Args coerced by client (e.g. string→int for Gemini)
   ): void {
     if (!this.currentSession) {
       this.logger.log('No active session. Call startSession() first.\n', {
@@ -383,6 +385,10 @@ export class ChatHistoryManager {
     // Store tool_use_id if provided (needed for proper restore)
     if (toolUseId) {
       message.tool_use_id = toolUseId;
+    }
+    // Store client-fixed args if any (model sent wrong types, client coerced before MCP call)
+    if (clientFixedArgs && clientFixedArgs.length > 0) {
+      message.clientFixedArgs = clientFixedArgs;
     }
 
     this.currentSession.messages.push(message);

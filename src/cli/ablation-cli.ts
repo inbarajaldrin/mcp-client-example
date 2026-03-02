@@ -1754,12 +1754,28 @@ export class AblationCLI {
         const pendingResult = await this.consumePendingHookDirectives(hookMgr, maxIterations, ablation, phaseName);
         if (pendingResult) return pendingResult;
 
-        // Agent stopped responding during ablation without @complete-phase or @abort
-        // — treat as implicit phase completion so the run continues to the next phase/model
+        // Agent stopped responding without @complete-phase or @abort.
+        // Nudge it once — if it still doesn't signal, abort.
         if (ablation && phaseName && !this.callbacks.isAbortRequested()) {
-          this.logger.log(`  ℹ Phase "${phaseName}": agent stopped without @complete-phase — treating as complete\n`, { type: 'info' });
+          const nudgeMsg = `You stopped without signaling phase completion. Call signal_phase_complete with status "success" if the phase objectives were met, or status "failure" if they were not. Do not continue working — just signal.`;
+          this.logger.log(`  ℹ Phase "${phaseName}": nudging agent to signal phase completion\n`, { type: 'info' });
+          this.client.getChatHistoryManager().addUserMessage(nudgeMsg);
+          const nudgeCancel = () => hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || this.callbacks.isAbortRequested();
+          await this.client.processQuery(nudgeMsg, false, undefined, nudgeCancel);
+
+          // Check if the nudge worked
+          if (hookMgr.isPhaseCompleteRequested()) {
+            hookMgr.resetPhaseComplete();
+            return { phaseComplete: true };
+          }
+          if (hookMgr.isAbortRunRequested()) {
+            hookMgr.resetAbortRun();
+            return { abortRun: true };
+          }
+          // Nudge didn't work — abort
+          this.logger.log(`  ⚠ Phase "${phaseName}": agent still did not signal after nudge — aborting remaining phases\n`, { type: 'warning' });
           this.client.getChatHistoryManager().addPhaseEvent('phase-abort', phaseName, { after: 'agent-stopped' });
-          return { phaseComplete: true };
+          return { abortRun: true };
         }
       }
       return {};
@@ -1926,12 +1942,28 @@ export class AblationCLI {
       const pendingResult = await this.consumePendingHookDirectives(hookManager, maxIterations, ablation, phaseName);
       if (pendingResult) return pendingResult;
 
-      // Agent stopped responding during ablation without @complete-phase or @abort
-      // — treat as implicit phase completion so the run continues to the next phase/model
+      // Agent stopped responding without @complete-phase or @abort.
+      // Nudge it once — if it still doesn't signal, abort.
       if (ablation && phaseName && !this.callbacks.isAbortRequested()) {
-        this.logger.log(`  ℹ Phase "${phaseName}": agent stopped without @complete-phase — treating as complete\n`, { type: 'info' });
+        const nudgeMsg = `You stopped without signaling phase completion. Call signal_phase_complete with status "success" if the phase objectives were met, or status "failure" if they were not. Do not continue working — just signal.`;
+        this.logger.log(`  ℹ Phase "${phaseName}": nudging agent to signal phase completion\n`, { type: 'info' });
+        this.client.getChatHistoryManager().addUserMessage(nudgeMsg);
+        const nudgeCancel = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || this.callbacks.isAbortRequested();
+        await this.client.processQuery(nudgeMsg, false, undefined, nudgeCancel);
+
+        // Check if the nudge worked
+        if (hookManager.isPhaseCompleteRequested()) {
+          hookManager.resetPhaseComplete();
+          return { phaseComplete: true };
+        }
+        if (hookManager.isAbortRunRequested()) {
+          hookManager.resetAbortRun();
+          return { abortRun: true };
+        }
+        // Nudge didn't work — abort
+        this.logger.log(`  ⚠ Phase "${phaseName}": agent still did not signal after nudge — aborting remaining phases\n`, { type: 'warning' });
         this.client.getChatHistoryManager().addPhaseEvent('phase-abort', phaseName, { after: 'agent-stopped' });
-        return { phaseComplete: true };
+        return { abortRun: true };
       }
     }
 
