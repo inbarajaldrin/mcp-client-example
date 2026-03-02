@@ -1668,6 +1668,11 @@ export class AblationCLI {
               let continueAfterPause = false;
 
               do {
+                // Reset interrupt flag so Ctrl+A works reliably on each iteration.
+                // Same rationale as the command loop reset — prevents stale flag from
+                // blocking the keyboard monitor's Ctrl+A guard.
+                if (!isFirstAttempt) this.callbacks.resetInterrupt();
+
                 const queryText = isFirstAttempt ? msg.content.text : 'Continue from where you left off.';
                 const attachments = (isFirstAttempt && !attachmentsConsumed && promptAttachments.length > 0)
                   ? promptAttachments : undefined;
@@ -1843,6 +1848,11 @@ export class AblationCLI {
         const cancellationCheck = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || hookManager.hasPendingInjection() || hookManager.hasPendingDirectives() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
 
         do {
+          // Reset interrupt flag so Ctrl+A works reliably on each iteration.
+          // Same rationale as the command loop reset — prevents stale flag from
+          // blocking the keyboard monitor's Ctrl+A guard.
+          if (!isFirstAttempt) this.callbacks.resetInterrupt();
+
           const query = isFirstAttempt ? trimmedCommand : 'Continue from where you left off.';
           const atts = isFirstAttempt
             ? (pendingAttachments.length > 0 ? pendingAttachments : undefined)
@@ -2564,6 +2574,61 @@ export class AblationCLI {
   }
 
   /**
+   * Prompt user to force stop a long-running tool call during ablation.
+   * Mirrors cli-client's askForceStopPrompt but uses ablation callbacks.
+   */
+  private async askForceStopPrompt(toolName: string, elapsedSeconds: number, abortSignal?: AbortSignal): Promise<boolean> {
+    if (abortSignal?.aborted) {
+      return false;
+    }
+
+    const serverName = toolName.includes('__') ? toolName.split('__')[0] : 'the server';
+    console.log(`\nTool "${toolName}" has been running for ${elapsedSeconds} seconds after abort.`);
+    console.log(`⚠️  Force stopping will kill and restart "${serverName}" server.`);
+    console.log('Do you want to force stop this tool call? (y/n, Enter to skip)');
+
+    const response = await new Promise<string | null>((resolve) => {
+      let resolved = false;
+
+      const onAbort = () => {
+        if (!resolved) {
+          resolved = true;
+          process.stdout.write('\r\x1b[K');
+          console.log('(Tool completed, prompt dismissed)');
+          resolve('');
+        }
+      };
+
+      if (abortSignal) {
+        abortSignal.addEventListener('abort', onAbort, { once: true });
+      }
+
+      this.callbacks.collectInput('> ').then((answer) => {
+        if (!resolved) {
+          resolved = true;
+          if (abortSignal) {
+            abortSignal.removeEventListener('abort', onAbort);
+          }
+          resolve(answer);
+        }
+      });
+    });
+
+    const answer = (response ?? '').trim().toLowerCase();
+    const shouldStop = answer === 'y' || answer === 'yes';
+
+    if (shouldStop) {
+      this.logger.log(`\nForce stopping tool call and restarting "${serverName}" server...\n`, { type: 'warning' });
+    } else if (answer === '') {
+      // User pressed Enter without input, Ctrl+C, or tool completed
+    } else {
+      this.logger.log('\nContinuing to wait for tool result...\n', { type: 'info' });
+    }
+
+    return shouldStop;
+  }
+
+  /**
    * Run a single ablation study. Handles MCP config, execution, results, and output cleanup.
    * Server connections are reused across calls when the config hasn't changed.
    * @returns true if the user aborted
@@ -2660,6 +2725,18 @@ export class AblationCLI {
     this.callbacks.resetAbort();
     this.callbacks.resetInterrupt();
     this.callbacks.startKeyboardMonitor();
+
+    // Wire up force-stop for stuck tools during ablation runs.
+    // During ablation, both Ctrl+C (signal handler abort) and Ctrl+A (keyboard interrupt)
+    // should trigger the force-stop timer for in-flight tools. The CLI's default callback
+    // only checks keyboard monitor (Ctrl+A), so we override it to also check the signal
+    // handler's abort flag (Ctrl+C in abort mode).
+    this.client.setAbortRequestedCallback(() =>
+      this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested()
+    );
+    this.client.setForceStopCallback(async (toolName, elapsedSeconds, abortSignal) => {
+      return this.askForceStopPrompt(toolName, elapsedSeconds, abortSignal);
+    });
 
     // Suspend client-side hooks during ablation runs (ablation manages its own hooks)
     const hookManager = this.client.getHookManager();
@@ -2910,6 +2987,12 @@ export class AblationCLI {
             for (let i = 0; i < phaseCommands.length && !aborted; i++) {
               if (stagedIndices.has(i)) continue; // Already pre-staged
               remainingIdx++;
+
+              // Reset interrupt flag before each command so Ctrl+A works reliably.
+              // Without this, a Ctrl+A that was consumed by cancellationCheck but
+              // never handled by a pause loop leaves _abortRequested=true, and the
+              // keyboard monitor's guard (!_abortRequested) blocks all subsequent Ctrl+A.
+              this.callbacks.resetInterrupt();
 
               // Check for abort before each command
               if (this.callbacks.isAbortRequested()) {
@@ -3293,6 +3376,9 @@ export class AblationCLI {
 
       // Disable abort mode - Ctrl+C will exit normally again
       this.callbacks.setAbortMode(false);
+
+      // Restore original abort callback (keyboard monitor only, for normal CLI mode)
+      this.client.setAbortRequestedCallback(() => this.callbacks.isInterruptRequested());
     }
 
     // Finalize run
