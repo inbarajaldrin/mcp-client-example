@@ -212,34 +212,6 @@ export class GeminiProvider implements ModelProvider {
     return processed;
   }
 
-  // Reverse the enum string coercion: convert args back to their original schema types.
-  // Because coerceEnumsToStrings forces all enums to STRING for Gemini, the model returns
-  // string values like "3" for fields that are actually integer enums. This method uses
-  // the original MCP tool schema to coerce them back before sending to the MCP server.
-  private coerceArgsToSchemaTypes(args: Record<string, any>, schema: any): Record<string, any> {
-    if (!schema?.properties || !args || typeof args !== 'object') {
-      return args;
-    }
-
-    const coerced = { ...args };
-    for (const [key, value] of Object.entries(coerced)) {
-      const propSchema = schema.properties[key];
-      if (!propSchema || value === null || value === undefined) continue;
-
-      if (propSchema.type === 'integer' && typeof value === 'string') {
-        const parsed = parseInt(value, 10);
-        if (!isNaN(parsed)) coerced[key] = parsed;
-      } else if (propSchema.type === 'number' && typeof value === 'string') {
-        const parsed = parseFloat(value);
-        if (!isNaN(parsed)) coerced[key] = parsed;
-      } else if (propSchema.type === 'boolean' && typeof value === 'string') {
-        coerced[key] = value === 'true';
-      }
-    }
-
-    return coerced;
-  }
-
   // Convert MCP tool format to Gemini function declaration format
   private convertToolsToGeminiFormat(tools: Tool[]): any {
     if (tools.length === 0) {
@@ -858,14 +830,7 @@ export class GeminiProvider implements ModelProvider {
         }
 
         try {
-          // Coerce args back to original schema types (reverses coerceEnumsToStrings).
-          // Gemini returns string values for integer enum fields because we convert
-          // all enums to STRING for the Gemini API — this converts them back.
-          const originalTool = tools.find(t => t.name === call.name);
-          const coercedArgs = originalTool
-            ? this.coerceArgsToSchemaTypes(call.args, originalTool.input_schema)
-            : call.args;
-          const result = await toolExecutor(call.name, coercedArgs);
+          const result = await toolExecutor(call.name, call.args);
 
           // Extract text content for structured response
           const textContent = result.contentBlocks
@@ -886,7 +851,7 @@ export class GeminiProvider implements ModelProvider {
             type: 'tool_use_complete',
             toolName: call.name,
             toolCallId: call.id,
-            toolInput: coercedArgs,
+            toolInput: call.args,
             result: result.displayText,
             hasImages: result.hasImages,
           };
