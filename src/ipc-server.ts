@@ -68,6 +68,16 @@ export class OrchestratorIPCServer extends EventEmitter {
       const prefixedToolName = `${server}__${tool}`;
       const args = toolArgs || {};
 
+      // Enforce tool-states.yaml: reject calls to blocked tools
+      const toolManager = this.client.getToolManager();
+      if (!toolManager.isToolEnabled(prefixedToolName)) {
+        return res.status(403).json({
+          success: false,
+          error: `Tool "${prefixedToolName}" is disabled by tool-states policy`,
+          blocked: true
+        });
+      }
+
       try {
         // Check again before emitting (abort could happen between checks)
         if (this.aborted) {
@@ -139,13 +149,13 @@ export class OrchestratorIPCServer extends EventEmitter {
       }
     });
 
-    // Tool discovery endpoint - returns all available tools from all servers.
-    // Reads directly from server connections to bypass orchestrator-mode filtering
-    // (this.tools only contains orchestrator tools when orchestrator mode is on,
-    // but the orchestrator itself needs to see ALL tools to generate the unified API).
+    // Tool discovery endpoint - returns enabled tools from all servers.
+    // Filters through tool-states.yaml so the orchestrator's unified_api
+    // only generates callable functions for tools the user has enabled.
     this.app.get('/list_tools', async (req: Request, res: Response) => {
       try {
         const servers: Map<string, any> = (this.client as any).servers || new Map();
+        const toolManager = this.client.getToolManager();
         const toolsByServer: Record<string, any[]> = {};
         let totalTools = 0;
 
@@ -153,16 +163,22 @@ export class OrchestratorIPCServer extends EventEmitter {
           const serverTools = (connection as any).tools || [];
           if (serverTools.length === 0) continue;
 
-          toolsByServer[serverName] = serverTools.map((tool: any) => {
-            // Strip the server prefix from tool name (e.g. "ros-mcp-server__move_home" -> "move_home")
-            const toolName = tool.name.replace(`${serverName}__`, '');
-            return {
-              name: toolName,
-              description: tool.description,
-              input_schema: tool.input_schema,
-            };
-          });
-          totalTools += serverTools.length;
+          // Filter to only enabled tools per tool-states.yaml
+          const enabledTools = serverTools
+            .filter((tool: any) => toolManager.isToolEnabled(tool.name))
+            .map((tool: any) => {
+              const toolName = tool.name.replace(`${serverName}__`, '');
+              return {
+                name: toolName,
+                description: tool.description,
+                input_schema: tool.input_schema,
+              };
+            });
+
+          if (enabledTools.length > 0) {
+            toolsByServer[serverName] = enabledTools;
+            totalTools += enabledTools.length;
+          }
         }
 
         res.json({

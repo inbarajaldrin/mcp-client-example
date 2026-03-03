@@ -580,18 +580,10 @@ export class MCPClient {
 
     this.servers.set(serverName, newConnection);
 
-    // Refresh tools from this server
-    const toolsResult = await client.listTools();
-    for (const tool of toolsResult.tools) {
-      const prefixedName = `${serverName}__${tool.name}`;
-      const prefixedTool = {
-        name: prefixedName,
-        description: tool.description || '',
-        input_schema: tool.inputSchema,
-      };
-      newConnection.tools.push(prefixedTool);
-      this.tools.push(prefixedTool);
-    }
+    // Re-initialize all tools through the standard path.
+    // This ensures tool-states.yaml filtering, pruning, and new-tool registration
+    // all happen correctly — rather than bypassing them with a manual push.
+    await this.initMCPTools();
 
     this.logger.log(`✓ Server "${serverName}" reconnected with ${newConnection.tools.length} tools\n`, { type: 'info' });
   }
