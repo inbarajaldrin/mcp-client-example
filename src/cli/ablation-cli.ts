@@ -2822,8 +2822,23 @@ export class AblationCLI {
 
         // Create provider instance and switch to this model once (skip in dry run)
         if (!ablation.dryRun) {
-          const provider = this.createProviderInstance(model.provider);
-          await this.client.switchProviderAndModel(provider, model.model);
+          try {
+            const provider = this.createProviderInstance(model.provider);
+            await this.client.switchProviderAndModel(provider, model.model);
+          } catch (error: any) {
+            this.logger.log(
+              `\n  ✗ Skipping ${modelKey}: failed to initialize model — ${error.message}\n`,
+              { type: 'error' },
+            );
+            // Record all phases as skipped for this model
+            for (const phase of ablation.phases) {
+              if (phase.enabled !== false) {
+                run.results.push({ phase: phase.name, model, status: 'skipped' });
+              }
+            }
+            runNumber++;
+            continue; // Skip to next model
+          }
 
           // Apply per-model thinking config (off by default unless specified)
           if (model.thinking) {
