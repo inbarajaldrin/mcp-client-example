@@ -551,6 +551,7 @@ export class GeminiProvider implements ModelProvider {
     toolExecutor: ToolExecutor,
     maxIterations: number = 10,
     cancellationCheck?: () => boolean,
+    onIterationLimit?: (iterations: number, maxIterations: number) => Promise<number | null>,
   ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
     const geminiTools = this.convertToolsToGeminiFormat(tools);
 
@@ -893,9 +894,25 @@ export class GeminiProvider implements ModelProvider {
       }
 
       if (iterations >= maxIterations) {
-        console.warn(`Gemini: Max iterations (${maxIterations}) reached`);
-        break;
+        if (onIterationLimit) {
+          const newLimit = await onIterationLimit(iterations, maxIterations);
+          if (newLimit !== null) {
+            maxIterations = newLimit;
+          } else {
+            break;
+          }
+        } else {
+          break;
+        }
       }
+    }
+
+    if (iterations >= maxIterations) {
+      yield {
+        type: 'max_iterations_reached',
+        iterations: iterations,
+        maxIterations: maxIterations,
+      } as any;
     }
   }
 

@@ -59,6 +59,8 @@ export interface AblationPhase {
 
 export interface AblationSettings {
   maxIterations: number;      // Max agent iterations per run
+  mcpTimeout?: number;        // MCP tool timeout in seconds (overrides system setting during ablation)
+  maxIpcCalls?: number;       // Max IPC calls per phase (overrides system setting during ablation)
   mcpConfigPath?: string;     // Optional path to custom MCP config file
   clearContextBetweenPhases?: boolean; // Default true; when false, conversation carries over between phases
   resetOutputsBetweenPhases?: string[]; // Output subdirs cleared between phases (e.g. ['screenshots'])

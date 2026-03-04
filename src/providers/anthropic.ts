@@ -468,6 +468,7 @@ export class AnthropicProvider implements ModelProvider {
     toolExecutor: ToolExecutor,
     maxIterations: number = 10,
     cancellationCheck?: () => boolean,
+    onIterationLimit?: (iterations: number, maxIterations: number) => Promise<number | null>,
     system?: string,
   ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
     const anthropicTools: AnthropicTool[] = tools.map((tool) => ({
@@ -757,6 +758,23 @@ export class AnthropicProvider implements ModelProvider {
         // Even if cancelled, we need one more iteration to send these to the agent
         hasPendingToolResults = true;
 
+        // Check for max iterations (after tool results are queued to send)
+        if (iterations >= maxIterations) {
+          if (onIterationLimit) {
+            // CLI mode: ask user whether to extend or stop
+            const newLimit = await onIterationLimit(iterations, maxIterations);
+            if (newLimit !== null) {
+              maxIterations = newLimit;
+              // Continue with extended limit
+            } else {
+              break;
+            }
+          } else {
+            // Ablation mode: hard stop
+            break;
+          }
+        }
+
         // Loop continues - go back to step 1 with tool results in context
       } else {
         // Unexpected stop reason, break
@@ -764,14 +782,13 @@ export class AnthropicProvider implements ModelProvider {
       }
     }
 
-    // Check if we exited due to max iterations
-    // if (iterations >= maxIterations) {
-    //   yield {
-    //     type: 'max_iterations_reached',
-    //     iterations: iterations,
-    //     maxIterations: maxIterations,
-    //   } as any;
-    // }
+    if (iterations >= maxIterations) {
+      yield {
+        type: 'max_iterations_reached',
+        iterations: iterations,
+        maxIterations: maxIterations,
+      } as any;
+    }
   }
 
   /**

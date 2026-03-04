@@ -16,14 +16,23 @@
       "additionalProperties": { "type": "boolean" }
     },
     "mcpTimeout": {
-      "type": "number",
-      "description": "MCP tool call timeout in seconds. -1 for unlimited.",
-      "default": 60
+      "type": "integer",
+      "description": "MCP tool call timeout in seconds (1-3600).",
+      "default": 60,
+      "minimum": 1,
+      "maximum": 3600
     },
     "maxIterations": {
       "type": "integer",
       "description": "Maximum iterations between agent calls. -1 for unlimited.",
       "default": -1
+    },
+    "maxIpcCalls": {
+      "type": "integer",
+      "description": "Maximum IPC tool calls per chat session (1-10000).",
+      "default": 100,
+      "minimum": 1,
+      "maximum": 10000
     },
     "hilEnabled": {
       "type": "boolean",

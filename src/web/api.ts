@@ -429,6 +429,7 @@ export function createApiRouter(client: MCPClient): Router {
     res.json({
       mcpTimeout: prefs.getMCPTimeout(),
       maxIterations: prefs.getMaxIterations(),
+      maxIpcCalls: prefs.getMaxIpcCalls(),
       hilEnabled: prefs.getHILEnabled(),
       approveAll: prefs.getApproveAll(),
       thinkingEnabled: prefs.getThinkingEnabled(),
@@ -439,10 +440,15 @@ export function createApiRouter(client: MCPClient): Router {
   // POST /api/settings — update preferences
   router.post('/settings', (req: Request, res: Response) => {
     const prefs = client.getPreferencesManager();
-    const { mcpTimeout, maxIterations, hilEnabled, approveAll, thinkingEnabled, thinkingLevel } = req.body;
+    const { mcpTimeout, maxIterations, maxIpcCalls, hilEnabled, approveAll, thinkingEnabled, thinkingLevel } = req.body;
     try {
       if (mcpTimeout !== undefined) prefs.setMCPTimeout(mcpTimeout);
       if (maxIterations !== undefined) prefs.setMaxIterations(maxIterations);
+      if (maxIpcCalls !== undefined) {
+        prefs.setMaxIpcCalls(maxIpcCalls);
+        const ipcServer = client.getOrchestratorIPCServer();
+        if (ipcServer) ipcServer.setMaxIpcCalls(prefs.getMaxIpcCalls());
+      }
       if (hilEnabled !== undefined) prefs.setHILEnabled(!!hilEnabled);
       if (approveAll !== undefined) prefs.setApproveAll(!!approveAll);
       if (thinkingEnabled !== undefined) prefs.setThinkingEnabled(!!thinkingEnabled);
@@ -450,6 +456,7 @@ export function createApiRouter(client: MCPClient): Router {
       res.json({
         mcpTimeout: prefs.getMCPTimeout(),
         maxIterations: prefs.getMaxIterations(),
+        maxIpcCalls: prefs.getMaxIpcCalls(),
         hilEnabled: prefs.getHILEnabled(),
         approveAll: prefs.getApproveAll(),
         thinkingEnabled: prefs.getThinkingEnabled(),

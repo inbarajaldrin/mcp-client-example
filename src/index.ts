@@ -119,6 +119,7 @@ export class MCPClient {
   private hookManager: HookManager;
   private forceStopCallback?: (toolName: string, elapsedSeconds: number, abortSignal?: AbortSignal) => Promise<boolean>;
   private isAbortRequestedCallback?: () => boolean;
+  private onIterationLimitCallback?: (iterations: number, maxIterations: number) => Promise<number | null>;
   private toolApprovalCallback?: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | { decision: 'reject'; message?: string }>;
   private webElicitationCallback?: (request: ElicitRequest) => Promise<import('@modelcontextprotocol/sdk/types.js').ElicitResult>;
 
@@ -1381,6 +1382,11 @@ export class MCPClient {
     // Reset token count
     this.currentTokenCount = 0;
 
+    // Reset IPC call counter for new session
+    if (this.orchestratorIPCServer) {
+      this.orchestratorIPCServer.resetIpcCallCount();
+    }
+
     // Start a new session with the same model and servers
     const serverNames = Array.from(this.servers.keys());
     const enabledTools = this.toolManager.getEnabledTools(this.tools).map(t => ({
@@ -1485,6 +1491,15 @@ export class MCPClient {
    */
   setAbortRequestedCallback(callback: () => boolean): void {
     this.isAbortRequestedCallback = callback;
+  }
+
+  /**
+   * Set callback for when iteration limit is reached during agent loop.
+   * CLI mode: prompts user to extend or stop. Returns new maxIterations or null.
+   * If not set, providers hard-stop at the limit (ablation behavior).
+   */
+  setOnIterationLimitCallback(callback: (iterations: number, maxIterations: number) => Promise<number | null>): void {
+    this.onIterationLimitCallback = callback;
   }
 
   /**
@@ -1754,6 +1769,8 @@ export class MCPClient {
           `Orchestrator IPC enabled: ${process.env.MCP_CLIENT_IPC_URL}\n`,
           { type: 'info' },
         );
+        // Sync IPC call limit from preferences
+        this.orchestratorIPCServer.setMaxIpcCalls(this.preferencesManager.getMaxIpcCalls());
         // Setup event listeners to log IPC tool calls
         this.setupIPCEventListeners();
       } catch (error) {
@@ -3005,10 +3022,10 @@ export class MCPClient {
           toolExecutor,
           (() => {
             const maxIter = this.preferencesManager.getMaxIterations();
-            // -1 means unlimited, use a very large number
             return maxIter === -1 ? 999999 : maxIter;
           })(), // maxIterations
-          cancellationCheck, // Pass cancellation check to provider
+          cancellationCheck,
+          this.onIterationLimitCallback, // CLI: pause-and-ask, ablation: undefined (hard stop)
         );
         return await this.processToolUseStream(s, cancellationCheck, tokenCountBeforeStream, observer);
       };
@@ -3290,11 +3307,11 @@ export class MCPClient {
             8192,
             toolExecutor,
             (() => {
-          const maxIter = this.preferencesManager.getMaxIterations();
-          // -1 means unlimited, use a very large number
-          return maxIter === -1 ? 999999 : maxIter;
-        })(), // maxIterations
-            cancellationCheck, // Pass cancellation check to provider
+              const maxIter = this.preferencesManager.getMaxIterations();
+              return maxIter === -1 ? 999999 : maxIter;
+            })(), // maxIterations
+            cancellationCheck,
+            this.onIterationLimitCallback,
           );
           const { pendingToolResults: continuePendingToolResults, lastTokenUsage: continueLastTokenUsage, deferredHookData: continueDeferredHookData } = await this.processToolUseStream(continueStream, cancellationCheck, continueTokenCountBeforeStream, observer);
 

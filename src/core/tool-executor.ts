@@ -411,13 +411,7 @@ export class MCPToolExecutor {
           },
           CallToolResultSchema,
           {
-            // Use preference timeout (convert seconds to milliseconds)
-            // -1 means unlimited, use a very large value (1 hour) instead of undefined
-            // to ensure long-running tools don't timeout unexpectedly
-            timeout: (() => {
-              const timeoutSeconds = preferencesManager?.getMCPTimeout() ?? 60;
-              return timeoutSeconds === -1 ? 3600000 : timeoutSeconds * 1000;
-            })(),
+            timeout: (preferencesManager?.getMCPTimeout() ?? 60) * 1000,
           },
         );
         // Wrap with force stop prompt (asks user after timeout if they want to abort)
@@ -453,13 +447,7 @@ export class MCPToolExecutor {
               },
               CallToolResultSchema,
               {
-                // Use preference timeout (convert seconds to milliseconds)
-                // -1 means unlimited, use a very large value (1 hour) instead of undefined
-                // to ensure long-running tools don't timeout unexpectedly
-                timeout: (() => {
-                  const timeoutSeconds = preferencesManager?.getMCPTimeout() ?? 60;
-                  return timeoutSeconds === -1 ? 3600000 : timeoutSeconds * 1000;
-                })(),
+                timeout: (preferencesManager?.getMCPTimeout() ?? 60) * 1000,
               },
             );
             // Wrap with force stop prompt (asks user after timeout if they want to abort)

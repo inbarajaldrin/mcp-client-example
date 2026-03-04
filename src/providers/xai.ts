@@ -431,6 +431,7 @@ export class GrokProvider implements ModelProvider {
     toolExecutor: ToolExecutor,
     maxIterations: number = 10,
     cancellationCheck?: () => boolean,
+    onIterationLimit?: (iterations: number, maxIterations: number) => Promise<number | null>,
   ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
     // Convert generic Tool[] to OpenAI function format
     const openaiTools = tools.map((tool) => ({
@@ -774,6 +775,28 @@ export class GrokProvider implements ModelProvider {
       }
 
       hasPendingToolResults = true;
+
+      // Check for max iterations (after tool results are queued to send)
+      if (iterations >= maxIterations) {
+        if (onIterationLimit) {
+          const newLimit = await onIterationLimit(iterations, maxIterations);
+          if (newLimit !== null) {
+            maxIterations = newLimit;
+          } else {
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+    }
+
+    if (iterations >= maxIterations) {
+      yield {
+        type: 'max_iterations_reached',
+        iterations: iterations,
+        maxIterations: maxIterations,
+      } as any;
     }
   }
 

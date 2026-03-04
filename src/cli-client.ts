@@ -27,7 +27,7 @@ const CLI_COMMANDS = [
   '/help', '/exit', '/clear', '/clear-context',
   '/token-status', '/tokens', '/summarize', '/summarize-now',
   '/settings', '/refresh', '/refresh-servers', '/refresh-select',
-  '/set-timeout', '/set-max-iterations', '/set-thinking',
+  '/set-timeout', '/set-max-iterations', '/set-ipc-limit', '/set-thinking',
   '/switch-model',
   '/todo-on', '/todo-off',
   '/orchestrator-on', '/orchestrator-off',
@@ -325,6 +325,19 @@ export class MCPClientCLI {
         return this.askForceStopPrompt(toolName, elapsedSeconds, abortSignal);
       });
 
+      // Set iteration limit callback to prompt user when max iterations is reached
+      this.client.setOnIterationLimitCallback(async (iterations, maxIterations) => {
+        return this.askIterationLimitExtension(iterations, maxIterations);
+      });
+
+      // Set IPC limit callback to prompt user when IPC call limit is reached
+      const ipcServer = this.client.getOrchestratorIPCServer();
+      if (ipcServer) {
+        ipcServer.setOnIpcLimitReached(async (count, max) => {
+          return this.askIpcLimitExtension(count, max);
+        });
+      }
+
       // Set human-in-the-loop approval callback
       this.client.setToolApprovalCallback(async (toolName, toolInput) => {
         return this.requestHILApproval(toolName, toolInput);
@@ -464,6 +477,60 @@ export class MCPClientCLI {
     }
 
     return shouldStop;
+  }
+
+  /**
+   * Prompt the user when the agent hits the iteration limit.
+   * Returns new maxIterations if user extends, or null to stop.
+   */
+  private async askIterationLimitExtension(iterations: number, maxIterations: number): Promise<number | null> {
+    this.keyboardMonitor.clearPendingInput();
+
+    console.log(`\n⚠️  Iteration limit reached (${iterations}/${maxIterations}).`);
+    console.log('Enter additional iterations to continue, or press Enter to stop:');
+
+    const response = await this.keyboardMonitor.collectInput('> ');
+    const answer = (response ?? '').trim();
+
+    if (answer === '') {
+      this.logger.log('\nStopping agent loop.\n', { type: 'warning' });
+      return null;
+    }
+
+    const additional = parseInt(answer, 10);
+    if (isNaN(additional) || additional < 1) {
+      this.logger.log('\nInvalid input. Stopping agent loop.\n', { type: 'warning' });
+      return null;
+    }
+
+    const newLimit = maxIterations + additional;
+    this.logger.log(`\n✓ Extended iteration limit to ${newLimit}\n`, { type: 'success' });
+    return newLimit;
+  }
+
+  private async askIpcLimitExtension(count: number, max: number): Promise<number | null> {
+    this.keyboardMonitor.clearPendingInput();
+
+    console.log(`\n⚠️  IPC call limit reached (${count}/${max}).`);
+    console.log('Enter additional calls to allow, or press Enter to stop:');
+
+    const response = await this.keyboardMonitor.collectInput('> ');
+    const answer = (response ?? '').trim();
+
+    if (answer === '') {
+      this.logger.log('\nStopping IPC calls.\n', { type: 'warning' });
+      return null;
+    }
+
+    const additional = parseInt(answer, 10);
+    if (isNaN(additional) || additional < 1) {
+      this.logger.log('\nInvalid input. Stopping IPC calls.\n', { type: 'warning' });
+      return null;
+    }
+
+    const newLimit = max + additional;
+    this.logger.log(`\n✓ Extended IPC call limit to ${newLimit}\n`, { type: 'success' });
+    return newLimit;
   }
 
   private async requestHILApproval(
@@ -659,7 +726,10 @@ export class MCPClientCLI {
     const timeout = this.preferencesManager.getMCPTimeout();
     const maxIterations = this.preferencesManager.getMaxIterations();
 
-    const timeoutDisplay = timeout === -1 ? 'unlimited' : `${timeout} seconds`;
+    const maxIpcCalls = this.preferencesManager.getMaxIpcCalls();
+    const ipcServer = this.client.getOrchestratorIPCServer();
+    const ipcCountStr = ipcServer ? ` (${ipcServer.getIpcCallCount()} used this session)` : '';
+    const timeoutDisplay = `${timeout} seconds`;
     const maxIterationsDisplay = maxIterations === -1 ? 'unlimited' : maxIterations.toString();
 
     const thinkingEnabled = this.preferencesManager.getThinkingEnabled();
@@ -672,13 +742,15 @@ export class MCPClientCLI {
     this.logger.log(
       `  MCP Tool Timeout: ${timeoutDisplay}\n` +
       `  Max Iterations: ${maxIterationsDisplay}\n` +
+      `  Max IPC Calls: ${maxIpcCalls}${ipcCountStr}\n` +
       `  Thinking Mode: ${thinkingDisplay}\n`,
       { type: 'info' },
     );
     this.logger.log(
       `\nCommands:\n` +
-      `  /set-timeout <seconds> - Change MCP tool timeout (1-3600, or "infinity"/"unlimited")\n` +
-      `  /set-max-iterations <number> - Change max iterations (1-10000, or "infinity"/"unlimited")\n` +
+      `  /set-timeout <seconds> - Change MCP tool timeout (1-3600)\n` +
+      `  /set-max-iterations <number> - Change max iterations (1-10000)\n` +
+      `  /set-ipc-limit <number> - Change max IPC calls per session (1-10000)\n` +
       `  /set-thinking on|off - Enable/disable thinking/reasoning mode\n`,
       { type: 'info' },
     );
@@ -698,8 +770,9 @@ export class MCPClientCLI {
       `  /settings - View and modify client preferences\n` +
       `  /refresh or /refresh-servers - Refresh all MCP server connections\n` +
       `  /refresh-select - Interactive selection for refreshing specific servers\n` +
-      `  /set-timeout <seconds> - Set MCP tool timeout (1-3600, or "infinity"/"unlimited")\n` +
-      `  /set-max-iterations <number> - Set max iterations between agent calls (1-10000, or "infinity"/"unlimited")\n` +
+      `  /set-timeout <seconds> - Set MCP tool timeout (1-3600)\n` +
+      `  /set-max-iterations <number> - Set max iterations between agent calls (1-10000)\n` +
+      `  /set-ipc-limit <number> - Set max IPC calls per session (1-10000)\n` +
       `  /set-thinking on|off - Enable/disable thinking/reasoning mode\n` +
       `  /switch-model [provider] [model] - Switch provider/model mid-session (preserves context)\n` +
       `  /hil - Toggle human-in-the-loop tool approval\n` +
@@ -1016,14 +1089,13 @@ export class MCPClientCLI {
       try {
         const parts = query.split(' ');
         if (parts.length < 2) {
-          this.logger.log('\nUsage: /set-timeout <seconds> or /set-timeout infinity\n', { type: 'error' });
+          this.logger.log('\nUsage: /set-timeout <seconds> (1-3600)\n', { type: 'error' });
           return true;
         }
         const timeoutValue = parts.slice(1).join(' ');
         this.preferencesManager.setMCPTimeout(timeoutValue);
         const newTimeout = this.preferencesManager.getMCPTimeout();
-        const timeoutDisplay = newTimeout === -1 ? 'unlimited' : `${newTimeout} seconds`;
-        this.logger.log(`\n✓ MCP tool timeout set to ${timeoutDisplay}\n`, { type: 'success' });
+        this.logger.log(`\n✓ MCP tool timeout set to ${newTimeout} seconds\n`, { type: 'success' });
       } catch (error) {
         this.logger.log(`\nFailed to set timeout: ${error}\n`, { type: 'error' });
       }
@@ -1044,6 +1116,26 @@ export class MCPClientCLI {
         this.logger.log(`\n✓ Max iterations set to ${maxIterationsDisplay}\n`, { type: 'success' });
       } catch (error) {
         this.logger.log(`\nFailed to set max iterations: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (baseCommand === '/set-ipc-limit') {
+      try {
+        const parts = query.split(' ');
+        if (parts.length < 2) {
+          this.logger.log('\nUsage: /set-ipc-limit <number> (1-10000)\n', { type: 'error' });
+          return true;
+        }
+        const value = parts.slice(1).join(' ');
+        this.preferencesManager.setMaxIpcCalls(value);
+        const ipcServer = this.client.getOrchestratorIPCServer();
+        if (ipcServer) {
+          ipcServer.setMaxIpcCalls(this.preferencesManager.getMaxIpcCalls());
+        }
+        this.logger.log(`\n✓ Max IPC calls per session set to ${this.preferencesManager.getMaxIpcCalls()}\n`, { type: 'success' });
+      } catch (error) {
+        this.logger.log(`\nFailed to set IPC limit: ${error}\n`, { type: 'error' });
       }
       return true;
     }

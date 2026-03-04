@@ -736,6 +736,7 @@ export class OllamaProvider implements ModelProvider {
     toolExecutor: ToolExecutor,
     maxIterations: number = 10,
     cancellationCheck?: () => boolean,
+    onIterationLimit?: (iterations: number, maxIterations: number) => Promise<number | null>,
   ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
     // Ensure context window is cached for this model
     if (!this.contextWindowCache.has(model)) {
@@ -1076,6 +1077,28 @@ export class OllamaProvider implements ModelProvider {
       }
 
       hasPendingToolResults = true;
+
+      // Check for max iterations (after tool results are queued to send)
+      if (iterations >= maxIterations) {
+        if (onIterationLimit) {
+          const newLimit = await onIterationLimit(iterations, maxIterations);
+          if (newLimit !== null) {
+            maxIterations = newLimit;
+          } else {
+            break;
+          }
+        } else {
+          break;
+        }
+      }
+    }
+
+    if (iterations >= maxIterations) {
+      yield {
+        type: 'max_iterations_reached',
+        iterations: iterations,
+        maxIterations: maxIterations,
+      } as any;
     }
   }
 

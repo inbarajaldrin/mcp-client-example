@@ -3,6 +3,7 @@ import { useState, useEffect, useCallback } from 'react';
 export interface Settings {
   mcpTimeout: number;
   maxIterations: number;
+  maxIpcCalls: number;
   hilEnabled: boolean;
 }
 

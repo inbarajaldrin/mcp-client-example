@@ -17,6 +17,7 @@ export interface ClientPreferences {
   approveAll?: boolean; // Approve all tools without prompting (persistent)
   thinkingEnabled?: boolean; // Enable thinking/reasoning mode for supported models
   thinkingLevel?: string; // Provider-specific thinking level (e.g. 'low'|'medium'|'high' for OpenAI)
+  maxIpcCalls?: number; // Maximum IPC tool calls per session (1-10000)
 }
 
 export class PreferencesManager {
@@ -36,12 +37,13 @@ export class PreferencesManager {
         const content = readFileSync(this.settingsFile, 'utf-8');
         const config = yaml.parse(content) || {};
         this.preferences = {
-          mcpTimeout: config.mcpTimeout ?? 60,
+          mcpTimeout: (config.mcpTimeout === -1 || config.mcpTimeout === 0) ? 3600 : (config.mcpTimeout ?? 60),
           maxIterations: config.maxIterations ?? 100,
           hilEnabled: config.hilEnabled ?? false,
           approveAll: config.approveAll ?? false,
           thinkingEnabled: config.thinkingEnabled ?? false,
           thinkingLevel: config.thinkingLevel,
+          maxIpcCalls: config.maxIpcCalls ?? 100,
         };
         return;
       } catch (error) {
@@ -59,6 +61,7 @@ export class PreferencesManager {
       approveAll: false,
       thinkingEnabled: false,
       thinkingLevel: undefined,
+      maxIpcCalls: 100,
     };
   }
 
@@ -86,26 +89,18 @@ export class PreferencesManager {
     let timeoutValue: number;
 
     if (typeof timeout === 'string') {
-      const lower = timeout.toLowerCase().trim();
-      if (lower === 'infinity' || lower === 'unlimited' || lower === 'inf' || lower === '-1' || lower === '0') {
-        timeoutValue = -1;
-      } else {
-        timeoutValue = parseInt(timeout, 10);
-        if (isNaN(timeoutValue)) {
-          throw new Error('Invalid timeout value. Use a number (1-3600) or "infinity"/"unlimited"');
-        }
+      timeoutValue = parseInt(timeout, 10);
+      if (isNaN(timeoutValue)) {
+        throw new Error('Invalid timeout value. Use a number between 1 and 3600.');
       }
     } else {
       timeoutValue = timeout;
     }
 
-    if (timeoutValue === -1 || timeoutValue === 0) {
-      this.preferences.mcpTimeout = -1;
-    } else if (timeoutValue < 1 || timeoutValue > 3600) {
-      throw new Error('MCP tool timeout must be between 1 and 3600 seconds, or use "infinity"/"unlimited"');
-    } else {
-      this.preferences.mcpTimeout = timeoutValue;
+    if (timeoutValue < 1 || timeoutValue > 3600) {
+      throw new Error('MCP tool timeout must be between 1 and 3600 seconds.');
     }
+    this.preferences.mcpTimeout = timeoutValue;
     this.savePreferences();
   }
 
@@ -180,6 +175,27 @@ export class PreferencesManager {
 
   setThinkingLevel(level: string | undefined): void {
     this.preferences.thinkingLevel = level;
+    this.savePreferences();
+  }
+
+  getMaxIpcCalls(): number {
+    return this.preferences.maxIpcCalls ?? 100;
+  }
+
+  setMaxIpcCalls(maxIpcCalls: number | string): void {
+    let value: number;
+    if (typeof maxIpcCalls === 'string') {
+      value = parseInt(maxIpcCalls, 10);
+      if (isNaN(value)) {
+        throw new Error('Invalid max IPC calls value. Use a number between 1 and 10000.');
+      }
+    } else {
+      value = maxIpcCalls;
+    }
+    if (value < 1 || value > 10000) {
+      throw new Error('Max IPC calls must be between 1 and 10000.');
+    }
+    this.preferences.maxIpcCalls = value;
     this.savePreferences();
   }
 }

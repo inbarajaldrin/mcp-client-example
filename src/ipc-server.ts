@@ -26,6 +26,9 @@ export class OrchestratorIPCServer extends EventEmitter {
   private client: MCPClient;
   private logger: Logger;
   private aborted: boolean = false;
+  private ipcCallCount: number = 0;
+  private maxIpcCalls: number = 100;
+  private onIpcLimitReached?: (count: number, max: number) => Promise<number | null>;
 
   constructor(client: MCPClient, logger: Logger) {
     super();
@@ -40,7 +43,7 @@ export class OrchestratorIPCServer extends EventEmitter {
   private setupRoutes() {
     // Health check endpoint
     this.app.get('/health', (req: Request, res: Response) => {
-      res.json({ status: 'ok', timestamp: new Date().toISOString() });
+      res.json({ status: 'ok', ipcCallCount: this.ipcCallCount, maxIpcCalls: this.maxIpcCalls, timestamp: new Date().toISOString() });
     });
 
     // Tool routing endpoint - called by mcp-tools-orchestrator's unified_api.py
@@ -88,6 +91,30 @@ export class OrchestratorIPCServer extends EventEmitter {
             aborted: true
           });
         }
+
+        // Check IPC call limit
+        if (this.ipcCallCount >= this.maxIpcCalls) {
+          if (this.onIpcLimitReached) {
+            const newLimit = await this.onIpcLimitReached(this.ipcCallCount, this.maxIpcCalls);
+            if (newLimit !== null) {
+              this.maxIpcCalls = newLimit;
+            } else {
+              return res.status(429).json({
+                success: false,
+                error: `Exhausted available IPC call limit (${this.ipcCallCount}/${this.maxIpcCalls}). No further IPC tool calls allowed this session.`,
+                exhausted: true,
+              });
+            }
+          } else {
+            return res.status(429).json({
+              success: false,
+              error: `Exhausted available IPC call limit (${this.ipcCallCount}/${this.maxIpcCalls}). No further IPC tool calls allowed this session.`,
+              exhausted: true,
+            });
+          }
+        }
+
+        this.ipcCallCount++;
 
         // Emit event before executing the tool
         this.emit('toolCallStart', {
@@ -271,5 +298,21 @@ export class OrchestratorIPCServer extends EventEmitter {
    */
   isAborted(): boolean {
     return this.aborted;
+  }
+
+  setMaxIpcCalls(max: number): void {
+    this.maxIpcCalls = max;
+  }
+
+  getIpcCallCount(): number {
+    return this.ipcCallCount;
+  }
+
+  resetIpcCallCount(): void {
+    this.ipcCallCount = 0;
+  }
+
+  setOnIpcLimitReached(cb: ((count: number, max: number) => Promise<number | null>) | undefined): void {
+    this.onIpcLimitReached = cb;
   }
 }

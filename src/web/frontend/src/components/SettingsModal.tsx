@@ -18,13 +18,15 @@ interface SettingsModalProps {
 export function SettingsModal({ open, onClose, settings, onSave, error, orchestratorConfigured, orchestratorEnabled, onToggleOrchestrator, todoConfigured, todoEnabled, onToggleTodo }: SettingsModalProps) {
   const [mcpTimeout, setMcpTimeout] = useState('');
   const [maxIterations, setMaxIterations] = useState('');
+  const [maxIpcCalls, setMaxIpcCalls] = useState('');
   const [hilEnabled, setHilEnabled] = useState(false);
   const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     if (settings) {
-      setMcpTimeout(settings.mcpTimeout === -1 ? 'unlimited' : String(settings.mcpTimeout));
+      setMcpTimeout(String(settings.mcpTimeout));
       setMaxIterations(settings.maxIterations === -1 ? 'unlimited' : String(settings.maxIterations));
+      setMaxIpcCalls(String(settings.maxIpcCalls));
       setHilEnabled(settings.hilEnabled);
     }
   }, [settings]);
@@ -34,18 +36,16 @@ export function SettingsModal({ open, onClose, settings, onSave, error, orchestr
   const handleSave = async () => {
     setSaving(true);
     const partial: Partial<Settings> = { hilEnabled };
-    if (mcpTimeout.toLowerCase().trim() === 'unlimited') {
-      partial.mcpTimeout = -1;
-    } else {
-      const v = parseInt(mcpTimeout, 10);
-      if (!isNaN(v)) partial.mcpTimeout = v;
-    }
+    const tv = parseInt(mcpTimeout, 10);
+    if (!isNaN(tv)) partial.mcpTimeout = tv;
     if (maxIterations.toLowerCase().trim() === 'unlimited') {
       partial.maxIterations = -1;
     } else {
       const v = parseInt(maxIterations, 10);
       if (!isNaN(v)) partial.maxIterations = v;
     }
+    const ipcVal = parseInt(maxIpcCalls, 10);
+    if (!isNaN(ipcVal)) partial.maxIpcCalls = ipcVal;
     const ok = await onSave(partial);
     setSaving(false);
     if (ok) onClose();
@@ -67,9 +67,9 @@ export function SettingsModal({ open, onClose, settings, onSave, error, orchestr
               type="text"
               value={mcpTimeout}
               onChange={e => setMcpTimeout(e.target.value)}
-              placeholder="60 or unlimited"
+              placeholder="60"
             />
-            <span className="settings-field__hint">1–3600 or "unlimited"</span>
+            <span className="settings-field__hint">1–3600 seconds</span>
           </label>
 
           <label className="settings-field">
@@ -82,6 +82,18 @@ export function SettingsModal({ open, onClose, settings, onSave, error, orchestr
               placeholder="100 or unlimited"
             />
             <span className="settings-field__hint">1–10000 or "unlimited"</span>
+          </label>
+
+          <label className="settings-field">
+            <span className="settings-field__label">Max IPC Calls</span>
+            <input
+              className="settings-field__input"
+              type="text"
+              value={maxIpcCalls}
+              onChange={e => setMaxIpcCalls(e.target.value)}
+              placeholder="100"
+            />
+            <span className="settings-field__hint">1–10000 (per session)</span>
           </label>
 
           <label className="settings-field settings-field--toggle">

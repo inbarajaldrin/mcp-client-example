@@ -596,6 +596,24 @@ export class AblationCLI {
       ? parseInt(maxIterationsStr) || defaultMaxIterations
       : defaultMaxIterations;
 
+    // MCP Timeout
+    const defaultMcpTimeout = this.preferencesManager.getMCPTimeout();
+    const mcpTimeoutStr = (
+      await rl.question(
+        `  MCP tool timeout in seconds (default ${defaultMcpTimeout}, Enter to use system default): `,
+      )
+    ).trim();
+    const mcpTimeout = mcpTimeoutStr ? parseInt(mcpTimeoutStr) || undefined : undefined;
+
+    // Max IPC Calls
+    const defaultMaxIpcCalls = this.preferencesManager.getMaxIpcCalls();
+    const maxIpcCallsStr = (
+      await rl.question(
+        `  Max IPC calls per phase (default ${defaultMaxIpcCalls}, Enter to use system default): `,
+      )
+    ).trim();
+    const maxIpcCalls = maxIpcCallsStr ? parseInt(maxIpcCallsStr) || undefined : undefined;
+
     const runsStr = (
       await rl.question('  Number of repeat runs (default 1): ')
     ).trim();
@@ -1106,6 +1124,8 @@ export class AblationCLI {
         settings: {
           mcpConfigPath,
           maxIterations,
+          ...(mcpTimeout !== undefined ? { mcpTimeout } : {}),
+          ...(maxIpcCalls !== undefined ? { maxIpcCalls } : {}),
           ...(clearContextBetweenPhases === false ? { clearContextBetweenPhases: false } : {}),
         },
         ...(runs > 1 ? { runs } : {}),
@@ -2139,6 +2159,12 @@ export class AblationCLI {
       if (ablation.settings.clearContextBetweenPhases === false) {
         this.logger.log(`  Context: Persistent across phases (not cleared between phases)\n`, { type: 'info' });
       }
+      if (ablation.settings.mcpTimeout !== undefined) {
+        this.logger.log(`  MCP Timeout: ${ablation.settings.mcpTimeout}s\n`, { type: 'info' });
+      }
+      if (ablation.settings.maxIpcCalls !== undefined) {
+        this.logger.log(`  Max IPC Calls: ${ablation.settings.maxIpcCalls} per phase\n`, { type: 'info' });
+      }
 
       if (ablation.arguments && ablation.arguments.length > 0) {
         this.logger.log(`  Arguments: ${ablation.arguments.map(a => `{{${a.name}}}`).join(', ')}\n`, { type: 'info' });
@@ -2325,11 +2351,14 @@ export class AblationCLI {
       }
     }
 
-    // Save original provider/model, thinking, and chat state to restore after all ablations
+    // Save original provider/model, thinking, limits, and chat state to restore after all ablations
     const originalProviderName = this.client.getProviderName();
     const originalModel = this.client.getModel();
     const originalThinkingEnabled = this.preferencesManager.getThinkingEnabled();
     const originalThinkingLevel = this.preferencesManager.getThinkingLevel();
+    const originalMaxIterations = this.preferencesManager.getMaxIterations();
+    const originalMcpTimeout = this.preferencesManager.getMCPTimeout();
+    const originalMaxIpcCalls = this.preferencesManager.getMaxIpcCalls();
     const savedState = this.client.saveState();
     const hasConversation = savedState.messages.length > 0;
     if (hasConversation) {
@@ -2410,6 +2439,15 @@ export class AblationCLI {
     // Restore thinking state
     this.preferencesManager.setThinkingEnabled(originalThinkingEnabled);
     this.preferencesManager.setThinkingLevel(originalThinkingLevel);
+
+    // Restore limit settings
+    this.preferencesManager.setMaxIterations(originalMaxIterations);
+    this.preferencesManager.setMCPTimeout(originalMcpTimeout);
+    this.preferencesManager.setMaxIpcCalls(originalMaxIpcCalls);
+    const ipcServer = this.client.getOrchestratorIPCServer();
+    if (ipcServer) {
+      ipcServer.setMaxIpcCalls(originalMaxIpcCalls);
+    }
   }
 
   /**
@@ -2936,6 +2974,23 @@ export class AblationCLI {
     const hookManager = this.client.getHookManager();
     hookManager.suspend();
 
+    // Apply ablation settings overrides (maxIterations, mcpTimeout, maxIpcCalls)
+    this.preferencesManager.setMaxIterations(ablation.settings.maxIterations);
+    if (ablation.settings.mcpTimeout !== undefined) {
+      this.preferencesManager.setMCPTimeout(ablation.settings.mcpTimeout);
+    }
+    const ipcServer = this.client.getOrchestratorIPCServer();
+    if (ablation.settings.maxIpcCalls !== undefined) {
+      this.preferencesManager.setMaxIpcCalls(ablation.settings.maxIpcCalls);
+      if (ipcServer) {
+        ipcServer.setMaxIpcCalls(ablation.settings.maxIpcCalls);
+      }
+    }
+    // Disable pause-and-ask for IPC limits during ablation — hard stop only
+    if (ipcServer) {
+      ipcServer.setOnIpcLimitReached(undefined);
+    }
+
     try {
     // Determine models to iterate over
     // In dry run mode, use a single placeholder model (no model switching needed)
@@ -3054,6 +3109,12 @@ export class AblationCLI {
             this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
             shouldBreak = true;
             break;
+          }
+
+          // Reset IPC call counter at start of each phase
+          const phaseIpcServer = this.client.getOrchestratorIPCServer();
+          if (phaseIpcServer) {
+            phaseIpcServer.resetIpcCallCount();
           }
 
           // Conditional context clearing between phases (not for first enabled phase)
@@ -4876,6 +4937,12 @@ export class AblationCLI {
     this.logger.log(`    Max iterations: ${ablation.settings.maxIterations}\n`, {
       type: 'info',
     });
+    this.logger.log(`    MCP timeout: ${ablation.settings.mcpTimeout !== undefined ? `${ablation.settings.mcpTimeout}s` : 'system default'}\n`, {
+      type: 'info',
+    });
+    this.logger.log(`    Max IPC calls: ${ablation.settings.maxIpcCalls !== undefined ? ablation.settings.maxIpcCalls : 'system default'}\n`, {
+      type: 'info',
+    });
     this.logger.log(`    Repeat runs: ${ablation.runs ?? 1}\n`, {
       type: 'info',
     });
@@ -4892,6 +4959,32 @@ export class AblationCLI {
     if (maxIterStr) {
       const maxIter = parseInt(maxIterStr);
       if (!isNaN(maxIter) && maxIter > 0) newSettings.maxIterations = maxIter;
+    }
+
+    const currentTimeout = ablation.settings.mcpTimeout !== undefined ? `${ablation.settings.mcpTimeout}s` : 'system default';
+    const mcpTimeoutStr = (
+      await rl.question(`  MCP timeout (Enter to keep ${currentTimeout}, 0 to clear): `)
+    ).trim();
+    if (mcpTimeoutStr) {
+      const timeout = parseInt(mcpTimeoutStr);
+      if (timeout === 0) {
+        delete newSettings.mcpTimeout;
+      } else if (!isNaN(timeout) && timeout > 0 && timeout <= 3600) {
+        newSettings.mcpTimeout = timeout;
+      }
+    }
+
+    const currentIpcCalls = ablation.settings.maxIpcCalls !== undefined ? `${ablation.settings.maxIpcCalls}` : 'system default';
+    const maxIpcCallsStr = (
+      await rl.question(`  Max IPC calls per phase (Enter to keep ${currentIpcCalls}, 0 to clear): `)
+    ).trim();
+    if (maxIpcCallsStr) {
+      const ipcCalls = parseInt(maxIpcCallsStr);
+      if (ipcCalls === 0) {
+        delete newSettings.maxIpcCalls;
+      } else if (!isNaN(ipcCalls) && ipcCalls > 0 && ipcCalls <= 10000) {
+        newSettings.maxIpcCalls = ipcCalls;
+      }
     }
 
     const runsStr = (
