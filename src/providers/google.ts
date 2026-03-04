@@ -175,38 +175,97 @@ export class GeminiProvider implements ModelProvider {
     return Object;
   }
 
-  // Recursively coerce all enum values to strings (Gemini requires enum: string[])
-  private coerceEnumsToStrings(schema: any): any {
+  // Gemini Schema supported keywords (whitelist from API docs)
+  private static GEMINI_SCHEMA_KEYWORDS = new Set([
+    'type', 'format', 'title', 'description', 'nullable',
+    'enum', 'maxItems', 'minItems', 'properties', 'required',
+    'minProperties', 'maxProperties', 'minLength', 'maxLength',
+    'pattern', 'example', 'anyOf', 'propertyOrdering',
+    'default', 'items', 'minimum', 'maximum',
+  ]);
+
+  // Sanitize a JSON Schema to be compatible with Gemini's restricted Schema type.
+  // Gemini doesn't support: const, oneOf, allOf, $ref, $defs, not, if/then/else,
+  // additionalProperties, patternProperties, etc.
+  private sanitizeSchemaForGemini(schema: any): any {
     if (!schema || typeof schema !== 'object') {
       return schema;
     }
+    if (Array.isArray(schema)) {
+      return schema.map((s: any) => this.sanitizeSchemaForGemini(s));
+    }
 
-    const processed = { ...schema };
+    let processed = { ...schema };
 
-    // Gemini only allows enum on STRING type properties
+    // Convert `const` → single-element `enum`
+    if ('const' in processed) {
+      processed.enum = [String(processed.const)];
+      processed.type = processed.type ?? 'string';
+      delete processed.const;
+    }
+
+    // Convert `oneOf` → `anyOf` (Gemini only supports anyOf)
+    if (Array.isArray(processed.oneOf) && !processed.anyOf) {
+      processed.anyOf = processed.oneOf;
+    }
+    delete processed.oneOf;
+
+    // Flatten `allOf` by merging schemas into parent
+    if (Array.isArray(processed.allOf)) {
+      for (const sub of processed.allOf) {
+        if (sub && typeof sub === 'object') {
+          const sanitized = this.sanitizeSchemaForGemini(sub);
+          if (sanitized.properties) {
+            processed.properties = { ...processed.properties, ...sanitized.properties };
+          }
+          if (sanitized.required) {
+            processed.required = [...(processed.required || []), ...sanitized.required];
+          }
+          if (sanitized.enum) {
+            processed.enum = sanitized.enum;
+          }
+          if (sanitized.anyOf && !processed.anyOf) {
+            processed.anyOf = sanitized.anyOf;
+          }
+          // Merge simple scalar keywords (first wins)
+          for (const key of ['type', 'format', 'description', 'title', 'nullable',
+                             'minimum', 'maximum', 'minLength', 'maxLength',
+                             'minItems', 'maxItems', 'pattern'] as const) {
+            if (sanitized[key] !== undefined && processed[key] === undefined) {
+              processed[key] = sanitized[key];
+            }
+          }
+        }
+      }
+      delete processed.allOf;
+    }
+
+    // Coerce all enum values to strings (Gemini only supports string enums)
     if (Array.isArray(processed.enum)) {
       processed.enum = processed.enum.map((val: any) => String(val));
       processed.type = 'string';
     }
 
+    // Recurse into schema-valued fields
     if (processed.properties && typeof processed.properties === 'object') {
       processed.properties = Object.fromEntries(
         Object.entries(processed.properties).map(
-          ([key, prop]) => [key, this.coerceEnumsToStrings(prop)]
+          ([key, prop]) => [key, this.sanitizeSchemaForGemini(prop)]
         )
       );
     }
-
     if (processed.items) {
-      processed.items = this.coerceEnumsToStrings(processed.items);
+      processed.items = this.sanitizeSchemaForGemini(processed.items);
     }
-
     if (Array.isArray(processed.anyOf)) {
-      processed.anyOf = processed.anyOf.map((s: any) => this.coerceEnumsToStrings(s));
+      processed.anyOf = processed.anyOf.map((s: any) => this.sanitizeSchemaForGemini(s));
     }
 
-    if (Array.isArray(processed.oneOf)) {
-      processed.oneOf = processed.oneOf.map((s: any) => this.coerceEnumsToStrings(s));
+    // Strip all unsupported keywords
+    for (const key of Object.keys(processed)) {
+      if (!GeminiProvider.GEMINI_SCHEMA_KEYWORDS.has(key)) {
+        delete processed[key];
+      }
     }
 
     return processed;
@@ -223,7 +282,7 @@ export class GeminiProvider implements ModelProvider {
       functionDeclarations: tools.map((tool) => ({
         name: tool.name,
         description: tool.description,
-        parameters: this.coerceEnumsToStrings(tool.input_schema),
+        parameters: this.sanitizeSchemaForGemini(tool.input_schema),
       })),
     }];
   }
