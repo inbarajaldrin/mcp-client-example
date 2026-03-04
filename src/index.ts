@@ -2808,6 +2808,19 @@ export class MCPClient {
           );
           lastTokenUsage = null; // Reset after logging
           tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
+        } else if (this.modelProvider.getProviderName() === 'google' && lastTokenUsage) {
+          // Google (Gemini): token_usage arrives after message_stop, so handle it here
+          const totalTokens = lastTokenUsage.inputTokens + lastTokenUsage.outputTokens;
+          this.chatHistoryManager.addTokenUsagePerCallback(
+            lastTokenUsage.inputTokens,
+            lastTokenUsage.outputTokens,
+            totalTokens,
+            lastTokenUsage.regularInputTokens,
+            lastTokenUsage.cacheCreationTokens,
+            lastTokenUsage.cacheReadTokens,
+          );
+          lastTokenUsage = null; // Reset after logging
+          tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
         }
 
         // Note: hooks are executed by the caller after the agent's response completes.
@@ -3508,6 +3521,8 @@ export class MCPClient {
           );
         }
       }
+
+      throw error;
     }
   }
 
