@@ -732,6 +732,27 @@ export class AblationCLI {
             }
           }
 
+          // Check if this is @insert-resource: - resolve index to server__resourceName for consistent matching
+          if (pendingCommand.toLowerCase().startsWith('@insert-resource')) {
+            const resourceIndex = parseInt(input) - 1;
+            const allResources = this.client.listResources();
+            const resourceMgr = this.client.getResourceManager();
+            const enabledResources = resourceMgr.filterResources(allResources);
+
+            if (resourceIndex >= 0 && resourceIndex < enabledResources.length) {
+              const resourceInfo = enabledResources[resourceIndex];
+              const resourceKey = `${resourceInfo.server}__${resourceInfo.resource.name}`;
+              fullCommand = `@insert-resource:${resourceKey}`;
+            } else {
+              this.logger.log(
+                `    ✗ Invalid resource index: ${input}\n`,
+                { type: 'error' },
+              );
+              pendingCommand = null;
+              continue;
+            }
+          }
+
           // Check if this is @insert-attachment: - resolve index to filename for consistent matching
           if (pendingCommand.toLowerCase().startsWith('@insert-attachment')) {
             const attachmentIndex = parseInt(input) - 1;
@@ -1570,6 +1591,87 @@ export class AblationCLI {
           },
         });
       }
+    }
+
+    // Handle @insert-resource:<server__resourceName> — read resource and inject as context
+    if (trimmedCommand.startsWith('@insert-resource:')) {
+      const suffix = trimmedCommand.slice('@insert-resource:'.length).trim();
+      if (!suffix) {
+        throw new Error('Usage: @insert-resource:server__resourceName');
+      }
+
+      const nameArg = suffix.split(/\s/)[0];
+
+      if (dryRun) {
+        this.logger.log(`    ⚠ Skipping @insert-resource in dry run (no model): ${nameArg}\n`, { type: 'warning' });
+        return {};
+      }
+
+      const allResources = this.client.listResources();
+      let resourceInfo = allResources.find(r => `${r.server}__${r.resource.name}` === nameArg);
+
+      if (!resourceInfo) {
+        // Try matching by URI as fallback
+        resourceInfo = allResources.find(r => r.resource.uri === nameArg);
+      }
+
+      if (!resourceInfo) {
+        const rl = this.callbacks.getReadline();
+        const resourceMgr = this.client.getResourceManager();
+        const enabledResources = resourceMgr.filterResources(allResources);
+        if (!rl || enabledResources.length === 0) {
+          throw new Error(`Resource not found: ${nameArg} (no resources available or no readline)`);
+        }
+
+        this.logger.log(`\n  ⚠ Stale resource reference: "${nameArg}" — select a replacement:\n`, { type: 'warning' });
+        for (let i = 0; i < enabledResources.length; i++) {
+          const r = enabledResources[i];
+          this.logger.log(`    ${i + 1}. [${r.server}] ${r.resource.name} (${r.resource.uri})\n`, { type: 'info' });
+        }
+
+        const selection = (await rl.question('  Select resource number: ')).trim();
+        const selectedIdx = parseInt(selection) - 1;
+
+        if (isNaN(selectedIdx) || selectedIdx < 0 || selectedIdx >= enabledResources.length) {
+          throw new Error(`Invalid resource selection: ${selection}`);
+        }
+
+        resourceInfo = enabledResources[selectedIdx];
+        const newKey = `${resourceInfo.server}__${resourceInfo.resource.name}`;
+
+        if (ablation && phaseName) {
+          const phase = ablation.phases.find(p => p.name === phaseName);
+          if (phase) {
+            const cmdIdx = phase.commands.indexOf(trimmedCommand);
+            if (cmdIdx !== -1) {
+              phase.commands[cmdIdx] = `@insert-resource:${newKey}`;
+              this.ablationManager.save(ablation);
+              this.logger.log(`  ✓ Updated ablation YAML: ${nameArg} → ${newKey}\n`, { type: 'success' });
+            }
+          }
+        }
+      }
+
+      // Read the resource content
+      const result = await this.client.readResource(resourceInfo.server, resourceInfo.resource.uri);
+      const messages = (this.client as any).messages as Array<{ role: string; content: string }>;
+
+      for (const content of result.contents) {
+        let contentText = '';
+        if ('text' in content && content.text) {
+          contentText = `[Resource: ${content.uri}]\n\`\`\`\n${content.text}\n\`\`\``;
+        } else if ('blob' in content && content.blob) {
+          contentText = `[Resource: ${content.uri}]\n[Binary data, ${content.blob.length} bytes base64]`;
+        } else {
+          contentText = `[Resource: ${content.uri}]\n[Empty resource]`;
+        }
+
+        messages.push({ role: 'user', content: contentText });
+        this.client.getChatHistoryManager().addUserMessage(contentText);
+      }
+
+      this.logger.log(`  ✓ Injected resource "${resourceInfo.resource.name}" (${result.contents.length} content block(s)) into context\n`, { type: 'success' });
+      return {};
     }
 
     // Handle @insert-prompt:<server__promptName> — fetch prompt and run agent session
@@ -2925,6 +3027,20 @@ export class AblationCLI {
         },
       }));
       this.ablationManager.savePromptsSnapshot(runDir, allPrompts);
+    }
+
+    // Save a snapshot of all available resources
+    const allResources = this.client.listResources();
+    if (allResources.length > 0) {
+      this.ablationManager.saveResourcesSnapshot(runDir, allResources.map(r => ({
+        server: r.server,
+        resource: {
+          name: r.resource.name,
+          uri: r.resource.uri,
+          description: r.resource.description,
+          mimeType: r.resource.mimeType,
+        },
+      })));
     }
 
     // Copy attachments to run directory (same for all runs)
@@ -5667,6 +5783,7 @@ export class AblationCLI {
     // @ directives need content after the colon
     const directivesNeedingArgs = [
       '@insert-prompt:',
+      '@insert-resource:',
       '@insert-attachment:',
     ];
 
@@ -5695,6 +5812,19 @@ export class AblationCLI {
       // Handle @ directive previews
       if (lowerCommand === '@insert-prompt' || lowerCommand === '@insert-prompt:') {
         await this.showPromptListForPreview();
+      } else if (lowerCommand === '@insert-resource' || lowerCommand === '@insert-resource:') {
+        const allResources = this.client.listResources();
+        const resourceMgr = this.client.getResourceManager();
+        const enabledResources = resourceMgr.filterResources(allResources);
+        if (enabledResources.length === 0) {
+          this.logger.log('  No enabled resources available.\n', { type: 'warning' });
+        } else {
+          this.logger.log('\n  Available Resources:\n', { type: 'info' });
+          for (let i = 0; i < enabledResources.length; i++) {
+            const r = enabledResources[i];
+            this.logger.log(`    ${i + 1}. [${r.server}] ${r.resource.name} (${r.resource.uri})\n`, { type: 'info' });
+          }
+        }
       } else if (lowerCommand === '@insert-attachment' || lowerCommand === '@insert-attachment:') {
         await this.showAttachmentListForPreview();
       } else if (

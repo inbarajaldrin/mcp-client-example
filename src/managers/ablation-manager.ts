@@ -548,6 +548,24 @@ export class AblationManager {
   }
 
   /**
+   * Save a snapshot of all available resources (grouped by server) into the run directory.
+   */
+  saveResourcesSnapshot(runDir: string, resources: Array<{ server: string; resource: { name: string; uri: string; description?: string; mimeType?: string } }>): void {
+    try {
+      const snapshotPath = join(runDir, 'resources.yaml');
+      const grouped: Record<string, Array<{ name: string; uri: string; description?: string; mimeType?: string }>> = {};
+      for (const entry of resources) {
+        if (!grouped[entry.server]) grouped[entry.server] = [];
+        grouped[entry.server].push(entry.resource);
+      }
+      const yamlContent = yaml.stringify({ servers: grouped });
+      writeFileSync(snapshotPath, yamlContent, 'utf-8');
+    } catch (error) {
+      this.logger.log(`Failed to save resources snapshot: ${error}\n`, { type: 'error' });
+    }
+  }
+
+  /**
    * Load run results
    */
   loadRunResults(runDir: string): AblationRun | null {

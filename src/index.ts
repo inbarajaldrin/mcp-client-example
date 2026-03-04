@@ -7,9 +7,13 @@ import {
   CallToolResultSchema,
   ListPromptsResultSchema,
   GetPromptResultSchema,
+  ListResourcesResultSchema,
+  ReadResourceResultSchema,
   ElicitRequestSchema,
   type Prompt,
+  type Resource,
   type GetPromptResult,
+  type ReadResourceResult,
   type ElicitRequest,
 } from '@modelcontextprotocol/sdk/types.js';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -19,6 +23,7 @@ import { TodoManager } from './managers/todo-manager.js';
 import { ROS2VideoRecordingManager } from './managers/ros2-video-recording-manager.js';
 import { ToolManager } from './managers/tool-manager.js';
 import { PromptManager } from './managers/prompt-manager.js';
+import { ResourceManager } from './managers/resource-manager.js';
 import { ChatHistoryManager, type ChatSession } from './managers/chat-history-manager.js';
 import { AttachmentManager } from './managers/attachment-manager.js';
 import { PreferencesManager } from './managers/preferences-manager.js';
@@ -84,6 +89,7 @@ type ServerConnection = {
   transport: StdioClientTransport;
   tools: Tool[];
   prompts: Prompt[];
+  resources: Resource[];
 };
 
 export class MCPClient {
@@ -106,6 +112,7 @@ export class MCPClient {
   private orchestratorModeEnabled: boolean = false; // Track if orchestrator mode is enabled
   private toolManager: ToolManager;
   private promptManager: PromptManager;
+  private resourceManager: ResourceManager;
   private chatHistoryManager: ChatHistoryManager;
   private attachmentManager: AttachmentManager;
   private preferencesManager: PreferencesManager;
@@ -214,7 +221,10 @@ export class MCPClient {
 
     // Initialize prompt manager
     this.promptManager = new PromptManager(this.logger);
-    
+
+    // Initialize resource manager
+    this.resourceManager = new ResourceManager(this.logger);
+
     // Initialize chat history manager
     this.chatHistoryManager = new ChatHistoryManager(this.logger);
     this.chatHistoryManager.setProviderName(this.modelProvider.getProviderName());
@@ -303,6 +313,7 @@ export class MCPClient {
       },
     });
     client.promptManager = new PromptManager(client.logger);
+    client.resourceManager = new ResourceManager(client.logger);
     client.chatHistoryManager = new ChatHistoryManager(client.logger);
     client.chatHistoryManager.setProviderName(client.modelProvider.getProviderName());
     client.hookManager.setChatLogger(client.chatHistoryManager);
@@ -401,6 +412,7 @@ export class MCPClient {
           transport,
           tools: [],
           prompts: [],
+          resources: [],
         };
 
         this.servers.set(serverConfig.name, connection);
@@ -449,6 +461,7 @@ export class MCPClient {
 
     // Initialize prompts from all successfully connected servers
     await this.initMCPPrompts();
+    await this.initMCPResources();
 
     // Start chat session after servers are connected
     const serverNames = Array.from(this.servers.keys());
@@ -577,6 +590,7 @@ export class MCPClient {
       transport,
       tools: [],
       prompts: [],
+      resources: [],
     };
 
     this.servers.set(serverName, newConnection);
@@ -848,6 +862,7 @@ export class MCPClient {
           transport,
           tools: [],
           prompts: [],
+          resources: [],
         };
 
         this.servers.set(serverConfig.name, connection);
@@ -890,6 +905,7 @@ export class MCPClient {
     // Reinitialize tools and prompts from all successfully connected servers
     await this.initMCPTools();
     await this.initMCPPrompts();
+    await this.initMCPResources();
 
     this.logger.log(
       `✓ Refreshed ${this.servers.size} server(s): ${Array.from(this.servers.keys()).join(', ')}\n`,
@@ -954,6 +970,7 @@ export class MCPClient {
         transport,
         tools: [],
         prompts: [],
+        resources: [],
       };
 
       this.servers.set(serverName, connection);
@@ -961,6 +978,7 @@ export class MCPClient {
       // Reinitialize tools and prompts for just this server
       await this.initMCPTools();
       await this.initMCPPrompts();
+    await this.initMCPResources();
     } catch (error) {
       throw new Error(`Failed to refresh server "${serverName}": ${error}`);
     }
@@ -1114,6 +1132,53 @@ export class MCPClient {
     }
   }
 
+  private async initMCPResources() {
+    let totalResources = 0;
+    const allResources: Array<{ server: string; resource: Resource }> = [];
+    const serversWithResources = new Set<string>();
+
+    for (const [serverName, connection] of this.servers.entries()) {
+      try {
+        const resourcesResults = await connection.client.request(
+          { method: 'resources/list' },
+          ListResourcesResultSchema,
+        );
+
+        connection.resources = resourcesResults.resources || [];
+        if (connection.resources.length > 0) {
+          serversWithResources.add(serverName);
+          totalResources += connection.resources.length;
+
+          for (const resource of connection.resources) {
+            allResources.push({ server: serverName, resource });
+          }
+        }
+      } catch (error) {
+        connection.resources = [];
+        if (!(error instanceof Error && error.message.includes('not found'))) {
+          this.logger.log(
+            `Failed to load resources from server "${serverName}": ${error}\n`,
+            { type: 'warning' },
+          );
+        }
+      }
+    }
+
+    if (allResources.length > 0) {
+      this.resourceManager.updateStateForNewResources(allResources);
+    }
+
+    const allKnownResourceKeys = new Set(allResources.map(r => `${r.server}__${r.resource.name}`));
+    this.resourceManager.pruneStaleResources(allKnownResourceKeys);
+
+    if (totalResources > 0) {
+      this.logger.log(
+        `Loaded ${totalResources} resource(s) across ${serversWithResources.size} server(s)\n`,
+        { type: 'info' },
+      );
+    }
+  }
+
   // Public method to get token usage status (for testing/debugging)
   getTokenUsage() {
     return this.tokenManager.getTokenUsage();
@@ -1179,6 +1244,7 @@ export class MCPClient {
           transport,
           tools: [],
           prompts: [],
+          resources: [],
         };
 
         this.servers.set(todoServerName, connection);
@@ -1302,6 +1368,10 @@ export class MCPClient {
    */
   getPromptManager(): PromptManager {
     return this.promptManager;
+  }
+
+  getResourceManager(): ResourceManager {
+    return this.resourceManager;
   }
 
   getPreferencesManager(): PreferencesManager {
@@ -1631,6 +1701,53 @@ export class MCPClient {
     }
   }
 
+  listResources(serverName?: string): Array<{ server: string; resource: Resource }> {
+    const allResources: Array<{ server: string; resource: Resource }> = [];
+
+    if (serverName) {
+      const connection = this.servers.get(serverName);
+      if (connection) {
+        for (const resource of connection.resources) {
+          allResources.push({ server: serverName, resource });
+        }
+      }
+    } else {
+      for (const [name, connection] of this.servers.entries()) {
+        for (const resource of connection.resources) {
+          allResources.push({ server: name, resource });
+        }
+      }
+    }
+
+    return allResources;
+  }
+
+  async readResource(
+    serverName: string,
+    uri: string,
+  ): Promise<ReadResourceResult> {
+    const connection = this.servers.get(serverName);
+    if (!connection) {
+      throw new Error(`Server "${serverName}" not found`);
+    }
+
+    try {
+      const result = await connection.client.request(
+        {
+          method: 'resources/read',
+          params: { uri },
+        },
+        ReadResourceResultSchema,
+      );
+
+      return result;
+    } catch (error) {
+      throw new Error(
+        `Failed to read resource "${uri}" from server "${serverName}": ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
   /**
    * Enable all tools from all servers
    */
@@ -1818,6 +1935,7 @@ export class MCPClient {
           transport,
           tools: [],
           prompts: [],
+          resources: [],
         };
 
         this.servers.set('mcp-tools-orchestrator', connection);

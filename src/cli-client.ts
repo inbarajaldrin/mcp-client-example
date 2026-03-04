@@ -14,6 +14,7 @@ import { ToolCLI } from './cli/tool-cli.js';
 import { AttachmentCLI } from './cli/attachment-cli.js';
 import { ChatHistoryCLI } from './cli/chat-history-cli.js';
 import { PromptCLI } from './cli/prompt-cli.js';
+import { ResourceCLI } from './cli/resource-cli.js';
 import { AblationCLI } from './cli/ablation-cli.js';
 import { ToolReplayCLI } from './cli/tool-replay-cli.js';
 import { ServerRefreshCLI } from './cli/server-refresh-cli.js';
@@ -33,6 +34,7 @@ const CLI_COMMANDS = [
   '/orchestrator-on', '/orchestrator-off',
   '/tools', '/tools-list', '/tools-manager', '/tools-select',
   '/prompts', '/prompts-list', '/prompts-manager', '/prompts-select', '/add-prompt',
+  '/resources', '/resources-list', '/resources-manager', '/resources-select', '/add-resource',
   '/attachment-upload', '/attachment-list', '/attachment-insert', '/attachment-rename', '/attachment-clear',
   '/chat-list', '/chat-search', '/chat-restore', '/chat-export', '/chat-rename', '/chat-clear',
   '/ablation-create', '/ablation-list', '/ablation-edit', '/ablation-run', '/ablation-delete', '/ablation-results', '/ablation-restore',
@@ -59,6 +61,7 @@ export class MCPClientCLI {
   private attachmentCLI: AttachmentCLI;
   private chatHistoryCLI: ChatHistoryCLI;
   private promptCLI: PromptCLI;
+  private resourceCLI: ResourceCLI;
   private ablationCLI: AblationCLI;
   private toolReplayCLI: ToolReplayCLI;
   private serverRefreshCLI: ServerRefreshCLI;
@@ -147,6 +150,18 @@ export class MCPClientCLI {
         (this.client as any).currentTokenCount = count;
       },
       onPromptsAdded: () => {
+        this.pendingContextAdded = true;
+      },
+    });
+    this.resourceCLI = new ResourceCLI(this.client, this.logger, {
+      getReadline: () => this.rl,
+      getMessages: () => (this.client as any).messages,
+      getTokenCounter: () => (this.client as any).tokenManager.getTokenCounter(),
+      getCurrentTokenCount: () => (this.client as any).currentTokenCount,
+      setCurrentTokenCount: (count) => {
+        (this.client as any).currentTokenCount = count;
+      },
+      onResourcesAdded: () => {
         this.pendingContextAdded = true;
       },
     });
@@ -794,6 +809,11 @@ export class MCPClientCLI {
       `  /prompts-manager or /prompts-select - Interactive prompt enable/disable selection\n` +
       `  /add-prompt - Add enabled prompts to conversation context\n` +
       `\n` +
+      `Resource Management:\n` +
+      `  /resources or /resources-list - List currently enabled resources\n` +
+      `  /resources-manager or /resources-select - Interactive resource enable/disable selection\n` +
+      `  /add-resource - Read a resource and add its content to conversation context\n` +
+      `\n` +
       `Attachments:\n` +
       `  /attachment-upload - Upload files by drag-and-drop\n` +
       `  /attachment-list - List available attachments\n` +
@@ -1374,6 +1394,34 @@ export class MCPClientCLI {
         await this.promptCLI.interactivePromptManager();
       } catch (error) {
         this.logger.log(`\nFailed to open prompt manager: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    // Resource commands
+    if (lowerQuery === '/add-resource') {
+      try {
+        await this.resourceCLI.addResourceToContext();
+      } catch (error) {
+        this.logger.log(`\nFailed to add resource: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/resources' || lowerQuery === '/resources-list') {
+      try {
+        await this.resourceCLI.displayResourcesList();
+      } catch (error) {
+        this.logger.log(`\nFailed to list resources: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
+    if (lowerQuery === '/resources-manager' || lowerQuery === '/resources-select') {
+      try {
+        await this.resourceCLI.interactiveResourceManager();
+      } catch (error) {
+        this.logger.log(`\nFailed to open resource manager: ${error}\n`, { type: 'error' });
       }
       return true;
     }

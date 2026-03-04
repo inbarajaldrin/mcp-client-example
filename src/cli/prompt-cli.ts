@@ -297,7 +297,7 @@ export class PromptCLI {
                 'text' in msg.content.resource
                   ? msg.content.resource.text
                   : '[Binary resource]';
-              contentText = `[Resource: ${msg.content.resource.uri}]\n${resourceText}`;
+              contentText = `[Resource: ${msg.content.resource.uri}]\n\`\`\`\n${resourceText}\n\`\`\``;
             } else {
               // Fallback for other content types
               contentText = JSON.stringify(msg.content);

@@ -596,7 +596,7 @@ export function createApiRouter(client: MCPClient): Router {
         messages: result.messages.map(m => ({
           role: m.role,
           content: m.content.type === 'text' ? m.content.text
-            : m.content.type === 'resource' ? `[Resource: ${m.content.resource.uri}]\n${'text' in m.content.resource ? m.content.resource.text : '[Binary]'}`
+            : m.content.type === 'resource' ? `[Resource: ${m.content.resource.uri}]\n\`\`\`\n${'text' in m.content.resource ? m.content.resource.text : '[Binary]'}\n\`\`\``
             : JSON.stringify(m.content),
         })),
       });
@@ -624,7 +624,7 @@ export function createApiRouter(client: MCPClient): Router {
           if (msg.content.type === 'text') {
             text = msg.content.text;
           } else if (msg.content.type === 'resource') {
-            text = `[Resource: ${msg.content.resource.uri}]\n${'text' in msg.content.resource ? msg.content.resource.text : '[Binary]'}`;
+            text = `[Resource: ${msg.content.resource.uri}]\n\`\`\`\n${'text' in msg.content.resource ? msg.content.resource.text : '[Binary]'}\n\`\`\``;
           } else {
             text = JSON.stringify(msg.content);
           }
@@ -632,6 +632,88 @@ export function createApiRouter(client: MCPClient): Router {
           historyMgr.addUserMessage(text);
           addedCount++;
         }
+      }
+
+      res.json({ ok: true, addedCount });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // ─── Resources ───
+
+  // GET /api/resources — list all resources with enabled state
+  router.get('/resources', (_req: Request, res: Response) => {
+    const allResources = client.listResources();
+    const resourceMgr = client.getResourceManager();
+    res.json(allResources.map(r => ({
+      name: r.resource.name,
+      server: r.server,
+      uri: r.resource.uri,
+      description: r.resource.description || '',
+      mimeType: r.resource.mimeType || '',
+      enabled: resourceMgr.isResourceEnabled(r.server, r.resource.name),
+    })));
+  });
+
+  // POST /api/resources/toggle — toggle a resource's enabled state
+  router.post('/resources/toggle', (req: Request, res: Response) => {
+    const { server, name, enabled } = req.body;
+    if (!server || !name || typeof enabled !== 'boolean') {
+      res.status(400).json({ error: 'server, name (strings) and enabled (boolean) are required' });
+      return;
+    }
+    client.getResourceManager().setResourceEnabled(server, name, enabled);
+    res.json({ ok: true, server, name, enabled });
+  });
+
+  // POST /api/resources/read — read a resource's content
+  router.post('/resources/read', async (req: Request, res: Response) => {
+    const { server, uri } = req.body;
+    if (!server || !uri) {
+      res.status(400).json({ error: 'server and uri are required' });
+      return;
+    }
+    try {
+      const result = await client.readResource(server, uri);
+      res.json({
+        contents: result.contents.map(c => ({
+          uri: c.uri,
+          mimeType: c.mimeType || '',
+          text: 'text' in c ? c.text : undefined,
+          blob: 'blob' in c ? c.blob : undefined,
+        })),
+      });
+    } catch (err: any) {
+      res.status(500).json({ error: err.message || String(err) });
+    }
+  });
+
+  // POST /api/resources/use — read resource and inject into conversation
+  router.post('/resources/use', async (req: Request, res: Response) => {
+    const { server, uri } = req.body;
+    if (!server || !uri) {
+      res.status(400).json({ error: 'server and uri are required' });
+      return;
+    }
+    try {
+      const result = await client.readResource(server, uri);
+      const messages = client.getMessages();
+      const historyMgr = client.getChatHistoryManager();
+      let addedCount = 0;
+
+      for (const content of result.contents) {
+        let text = '';
+        if ('text' in content && content.text) {
+          text = `[Resource: ${content.uri}]\n\`\`\`\n${content.text}\n\`\`\``;
+        } else if ('blob' in content && content.blob) {
+          text = `[Resource: ${content.uri}]\n[Binary data, ${content.blob.length} bytes base64]`;
+        } else {
+          text = `[Resource: ${content.uri}]\n[Empty resource]`;
+        }
+        messages.push({ role: 'user', content: text });
+        historyMgr.addUserMessage(text);
+        addedCount++;
       }
 
       res.json({ ok: true, addedCount });
