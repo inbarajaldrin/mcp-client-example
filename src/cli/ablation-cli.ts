@@ -2048,8 +2048,9 @@ export class AblationCLI {
       const ablation = ablations[i];
       const phaseCount = ablation.phases.length;
       const iterations = ablation.runs ?? 1;
-      const runsLabel = iterations > 1 ? `, ${iterations} runs` : '';
-      this.logger.log(`  ${i + 1}. ${ablation.name} (${phaseCount} phase${phaseCount !== 1 ? 's' : ''}${runsLabel})\n`, {
+      const modelsLabel = ablation.dryRun ? '' : `, ${ablation.models.length} model${ablation.models.length !== 1 ? 's' : ''}`;
+      const iterLabel = iterations > 1 ? `, ${iterations} iterations` : '';
+      this.logger.log(`  ${i + 1}. ${ablation.name} (${phaseCount} phase${phaseCount !== 1 ? 's' : ''}${modelsLabel}${iterLabel})\n`, {
         type: 'info',
       });
     }
@@ -2083,8 +2084,9 @@ export class AblationCLI {
       for (const a of selectedAblations) {
         const phaseCount = a.phases.length;
         const iterations = a.runs ?? 1;
-        const runsLabel = iterations > 1 ? `, ${iterations} runs` : '';
-        this.logger.log(`    - ${a.name} (${phaseCount} phase${phaseCount !== 1 ? 's' : ''}${runsLabel})\n`, { type: 'info' });
+        const modelsLabel = a.dryRun ? '' : `, ${a.models.length} model${a.models.length !== 1 ? 's' : ''}`;
+        const iterLabel = iterations > 1 ? `, ${iterations} iterations` : '';
+        this.logger.log(`    - ${a.name} (${phaseCount} phase${phaseCount !== 1 ? 's' : ''}${modelsLabel}${iterLabel})\n`, { type: 'info' });
       }
     }
 
@@ -2116,15 +2118,17 @@ export class AblationCLI {
         { type: 'info' },
       );
 
-      const iterationsMultiplier = (ablation.runs ?? 1) > 1 ? ` × ${ablation.runs} iterations` : '';
+      const iterations = ablation.runs ?? 1;
+      const totalScenariosDisplay = this.ablationManager.getTotalScenarios(ablation);
+      const iterationsMultiplier = iterations > 1 ? `${iterations} iterations × ` : '';
       if (ablation.dryRun) {
         this.logger.log(
-          `\n  Dry Run: ${ablation.phases.length} phases${iterationsMultiplier} = ${totalRuns} run${totalRuns > 1 ? 's' : ''} (no model)\n`,
+          `\n  Dry Run: ${iterationsMultiplier}${ablation.phases.length} phases = ${totalScenariosDisplay} scenario${totalScenariosDisplay !== 1 ? 's' : ''}\n`,
           { type: 'info' },
         );
       } else {
         this.logger.log(
-          `\n  Matrix: ${ablation.phases.length} phase${ablation.phases.length > 1 ? 's' : ''} × ${ablation.models.length} model${ablation.models.length > 1 ? 's' : ''}${iterationsMultiplier} = ${totalRuns} run${totalRuns > 1 ? 's' : ''}\n`,
+          `\n  Matrix: ${iterationsMultiplier}${ablation.models.length} model${ablation.models.length > 1 ? 's' : ''} × ${ablation.phases.length} phase${ablation.phases.length > 1 ? 's' : ''} = ${totalScenariosDisplay} scenario${totalScenariosDisplay !== 1 ? 's' : ''}\n`,
           { type: 'info' },
         );
       }
@@ -2459,7 +2463,7 @@ export class AblationCLI {
       this.logger.log('  ├─────────────────────┼─────────────┤\n', { type: 'info' });
       for (const phase of ablation.phases) {
         this.logger.log(
-          `  │ ${phase.name.padEnd(19).substring(0, 19)} │ ${'pending'.padEnd(12)}│\n`,
+          `  │ ${phase.name.padEnd(19).substring(0, 19)} │ ${'·'.padEnd(12)}│\n`,
           { type: 'info' },
         );
       }
@@ -2504,6 +2508,164 @@ export class AblationCLI {
       this.logger.log('┴─────────────', { type: 'info' });
     }
     this.logger.log('┘\n', { type: 'info' });
+  }
+
+  /**
+   * Format a token count with commas, or return '—' if unavailable.
+   */
+  private formatTokenCount(tokens: number | undefined): string {
+    if (tokens === undefined || tokens === 0) return '—';
+    return tokens.toLocaleString();
+  }
+
+  /**
+   * Render a phase results table for a set of results (one model, one iteration).
+   */
+  private renderPhaseTable(results: AblationRunResult[], showTokens: boolean): void {
+    const statusSymbol = (status: string): string => {
+      switch (status) {
+        case 'completed': return '✓';
+        case 'failed': return '✗';
+        case 'skipped': return '⊘';
+        case 'aborted': return '!';
+        default: return '?';
+      }
+    };
+
+    // Compute column widths
+    const phaseColWidth = Math.max(14, ...results.map(r => r.phase.length + 2));
+    const statusColWidth = 8;
+    const durationColWidth = 10;
+    const tokenColWidth = 12;
+
+    // Build header
+    let headerCells = `│ ${'Phase'.padEnd(phaseColWidth - 2)} │ ${'Status'.padEnd(statusColWidth - 2)} │ ${'Duration'.padEnd(durationColWidth - 2)} │`;
+    let topBorder = `┌${'─'.repeat(phaseColWidth)}┬${'─'.repeat(statusColWidth)}┬${'─'.repeat(durationColWidth)}┬`;
+    let midBorder = `├${'─'.repeat(phaseColWidth)}┼${'─'.repeat(statusColWidth)}┼${'─'.repeat(durationColWidth)}┼`;
+    let botBorder = `└${'─'.repeat(phaseColWidth)}┴${'─'.repeat(statusColWidth)}┴${'─'.repeat(durationColWidth)}┴`;
+
+    if (showTokens) {
+      headerCells += ` ${'Tokens'.padEnd(tokenColWidth - 2)} │`;
+      topBorder += `${'─'.repeat(tokenColWidth)}┐`;
+      midBorder += `${'─'.repeat(tokenColWidth)}┤`;
+      botBorder += `${'─'.repeat(tokenColWidth)}┘`;
+    } else {
+      // Close the last column
+      headerCells = headerCells.slice(0, -1) + '│';
+      topBorder = topBorder.slice(0, -1) + '┐';
+      midBorder = midBorder.slice(0, -1) + '┤';
+      botBorder = botBorder.slice(0, -1) + '┘';
+    }
+
+    this.logger.log(`  ${topBorder}\n`, { type: 'info' });
+    this.logger.log(`  ${headerCells}\n`, { type: 'info' });
+    this.logger.log(`  ${midBorder}\n`, { type: 'info' });
+
+    for (const r of results) {
+      const symbol = statusSymbol(r.status);
+      const duration = r.duration ? formatDuration(r.duration) : '—';
+      let row = `│ ${r.phase.padEnd(phaseColWidth - 2)} │ ${symbol.padEnd(statusColWidth - 2)} │ ${duration.padEnd(durationColWidth - 2)} │`;
+      if (showTokens) {
+        const tokens = this.formatTokenCount(r.tokens);
+        row += ` ${tokens.padEnd(tokenColWidth - 2)} │`;
+      }
+      this.logger.log(`  ${row}\n`, { type: 'info' });
+    }
+
+    this.logger.log(`  ${botBorder}\n`, { type: 'info' });
+
+    // Show errors below the table
+    const errors = results.filter(r => r.error && (r.status === 'failed' || r.status === 'aborted'));
+    for (const r of errors) {
+      this.logger.log(`    Error: ${r.phase} — ${r.error}\n`, { type: 'warning' });
+    }
+  }
+
+  /**
+   * Display the final results summary after an ablation run completes.
+   * Groups results as model → iteration → phase.
+   */
+  private displayFinalResults(run: AblationRun, ablation: AblationDefinition): void {
+    const hasMultipleIterations = (ablation.runs ?? 1) > 1;
+    const isDryRun = ablation.dryRun;
+    const showTokens = !isDryRun;
+
+    // Group results by model key
+    const modelGroups = new Map<string, { model: AblationModel; results: AblationRunResult[] }>();
+    for (const r of run.results) {
+      const key = `${r.model.provider}/${r.model.model}`;
+      if (!modelGroups.has(key)) {
+        modelGroups.set(key, { model: r.model, results: [] });
+      }
+      modelGroups.get(key)!.results.push(r);
+    }
+
+    let totalPassedIterations = 0;
+    let totalIterations = 0;
+
+    for (const [, { model, results }] of modelGroups) {
+      const modelDisplayName = isDryRun ? 'dry-run' : model.model;
+      const providerSuffix = isDryRun ? '' : ` (${model.provider})`;
+
+      if (hasMultipleIterations) {
+        // Multi-iteration: show model header, then per-iteration tables
+        this.logger.log(`\n  ${modelDisplayName}${providerSuffix}\n`, { type: 'info' });
+        this.logger.log(`  ${'─'.repeat(modelDisplayName.length + providerSuffix.length)}\n`, { type: 'info' });
+
+        // Group by iteration
+        const iterGroups = new Map<number, AblationRunResult[]>();
+        for (const r of results) {
+          const iter = r.run ?? 1;
+          if (!iterGroups.has(iter)) {
+            iterGroups.set(iter, []);
+          }
+          iterGroups.get(iter)!.push(r);
+        }
+
+        let modelPassedIterations = 0;
+        const modelTotalIterations = iterGroups.size;
+        let modelDuration = 0;
+        let modelTokens = 0;
+
+        for (const [iter, iterResults] of iterGroups) {
+          const completedPhases = iterResults.filter(r => r.status === 'completed').length;
+          const totalPhases = iterResults.length;
+          const iterDuration = iterResults.reduce((sum, r) => sum + (r.duration || 0), 0);
+          const iterPassed = completedPhases === totalPhases;
+
+          if (iterPassed) modelPassedIterations++;
+          modelDuration += iterDuration;
+          modelTokens += iterResults.reduce((sum, r) => sum + (r.tokens || 0), 0);
+
+          this.logger.log(`\n  Iteration ${iter} — ${completedPhases}/${totalPhases} phases │ ${formatDuration(iterDuration)}\n`, { type: 'info' });
+          this.renderPhaseTable(iterResults, showTokens);
+        }
+
+        totalPassedIterations += modelPassedIterations;
+        totalIterations += modelTotalIterations;
+
+        const tokenSuffix = showTokens ? ` │ ${this.formatTokenCount(modelTokens)} tokens` : '';
+        this.logger.log(`\n  Model total: ${modelPassedIterations}/${modelTotalIterations} iterations passed │ ${formatDuration(modelDuration)}${tokenSuffix}\n`, { type: 'info' });
+      } else {
+        // Single iteration: model header with inline stats, then one table
+        const completedPhases = results.filter(r => r.status === 'completed').length;
+        const totalPhases = results.length;
+        const modelDuration = results.reduce((sum, r) => sum + (r.duration || 0), 0);
+        const iterPassed = completedPhases === totalPhases;
+
+        if (iterPassed) totalPassedIterations++;
+        totalIterations++;
+
+        const tokenSuffix = showTokens ? ` │ ${this.formatTokenCount(results.reduce((sum, r) => sum + (r.tokens || 0), 0))} tokens` : '';
+        this.logger.log(`\n  ${modelDisplayName}${providerSuffix} — ${completedPhases}/${totalPhases} phases │ ${formatDuration(modelDuration)}${tokenSuffix}\n`, { type: 'info' });
+        this.renderPhaseTable(results, showTokens);
+      }
+    }
+
+    // Grand total
+    const totalLabel = hasMultipleIterations ? 'iterations' : 'models';
+    const tokenSuffix = showTokens && run.totalTokens ? ` │ ${this.formatTokenCount(run.totalTokens)} tokens` : '';
+    this.logger.log(`\n  Total: ${totalPassedIterations}/${totalIterations} ${totalLabel} passed │ ${formatDuration(run.totalDuration || 0)}${tokenSuffix}\n`, { type: 'info' });
   }
 
   /**
@@ -2853,7 +3015,7 @@ export class AblationCLI {
         let modelAborted = false;
         runNumber++;
 
-        // Display run-level header (one run = one model through all phases)
+        // Display model-level header
         const modelShortName = ablation.dryRun ? 'dry-run' : this.ablationManager.getModelShortName(model);
         const iterationSuffix = hasMultipleIterations ? ` (iteration ${iteration}/${iterations})` : '';
 
@@ -2863,7 +3025,7 @@ export class AblationCLI {
             { type: 'info' },
           );
           this.logger.log(
-            `│  RUN ${runNumber}/${totalRuns}: ${modelShortName}${iterationSuffix}\n`,
+            `│  ${modelShortName}${iterationSuffix}\n`,
             { type: 'info' },
           );
           const thinkingStatus = model.thinking ? ` │ Thinking: ${model.thinking}` : '';
@@ -3453,25 +3615,7 @@ export class AblationCLI {
       { type: 'info' },
     );
 
-    this.logger.log(`\n  Results:\n`, { type: 'info' });
-    const completedScenarios = run.results.filter(
-      (r) => r.status === 'completed',
-    ).length;
-    const failedScenarios = run.results.filter((r) => r.status === 'failed').length;
-    const abortedScenarios = run.results.filter((r) => r.status === 'aborted').length;
-    this.logger.log(`    Scenarios: ${completedScenarios}/${totalScenarios} completed\n`, {
-      type: 'info',
-    });
-    if (failedScenarios > 0) {
-      this.logger.log(`    Failed: ${failedScenarios}\n`, { type: 'warning' });
-    }
-    if (abortedScenarios > 0) {
-      this.logger.log(`    Aborted: ${abortedScenarios}\n`, { type: 'warning' });
-    }
-    this.logger.log(
-      `    Total time: ${formatDuration(run.totalDuration)}\n`,
-      { type: 'info' },
-    );
+    this.displayFinalResults(run, ablation);
     this.logger.log(`\n  Outputs saved to:\n`, { type: 'info' });
     this.logger.log(`    ${runDir}\n`, { type: 'info' });
 
