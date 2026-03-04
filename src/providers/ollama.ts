@@ -192,6 +192,10 @@ export class OllamaProvider implements ModelProvider {
     return 'ollama';
   }
 
+  supportsSystemRole(): boolean {
+    return true;
+  }
+
   getDefaultModel(): string {
     return DEFAULT_MODEL;
   }
@@ -513,6 +517,14 @@ export class OllamaProvider implements ModelProvider {
         return result;
       }
 
+      // System messages (mid-conversation client prompts) — pass through as-is
+      if (msg.role === 'system') {
+        return {
+          role: 'system',
+          content: msg.content || '',
+        };
+      }
+
       // Standard messages (user or assistant without tool_calls)
       const result: any = {
         role: msg.role,
@@ -737,6 +749,7 @@ export class OllamaProvider implements ModelProvider {
     maxIterations: number = 10,
     cancellationCheck?: () => boolean,
     onIterationLimit?: (iterations: number, maxIterations: number) => Promise<number | null>,
+    system?: string,
   ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
     // Ensure context window is cached for this model
     if (!this.contextWindowCache.has(model)) {
@@ -784,9 +797,14 @@ export class OllamaProvider implements ModelProvider {
         options.num_ctx = contextWindow;
       }
 
+      const convertedMessages = this.convertToOllamaMessages(conversationMessages);
+      // Prepend system message if provided (Ollama uses role: 'system' in messages array)
+      if (system) {
+        convertedMessages.unshift({ role: 'system', content: system });
+      }
       const chatParams: any = {
         model,
-        messages: this.convertToOllamaMessages(conversationMessages),
+        messages: convertedMessages,
         tools: ollamaTools,
         stream: true,
         options,

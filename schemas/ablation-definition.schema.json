@@ -43,6 +43,10 @@
       "type": "array",
       "description": "Global hooks that apply across all phases",
       "items": { "$ref": "#/$defs/PostToolHook" }
+    },
+    "systemPrompt": {
+      "type": "string",
+      "description": "Master system prompt — all phases inherit unless overridden. Sent via each provider's native system prompt mechanism. Supports @insert-prompt:server__promptName syntax."
     }
   },
   "$defs": {
@@ -87,6 +91,14 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Commands to run when this phase ends"
+        },
+        "systemPrompt": {
+          "type": "string",
+          "description": "Per-phase system prompt override — replaces master systemPrompt for this phase. Supports @insert-prompt:server__promptName syntax."
+        },
+        "userPrompt": {
+          "type": "string",
+          "description": "User prompt injected as a user message at phase start, before commands run. Supports @insert-prompt:server__promptName syntax."
         }
       }
     },
@@ -149,6 +161,10 @@
           "type": "array",
           "items": { "type": "string" },
           "description": "Commands to run if gate condition fails"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "Client prompt injected after gate commands execute (as system role on supported providers)"
         }
       }
     },
@@ -160,7 +176,8 @@
         "whenInput": { "type": "object", "additionalProperties": true, "description": "Condition match on tool input arguments only. Use \"*\" as a wildcard value to match any value (key must be present)." },
         "whenOutput": { "type": "object", "additionalProperties": true, "description": "Condition match on tool output JSON only. Use \"*\" as a wildcard value to match any value (key must be present)." },
         "run": { "type": "string", "description": "Command to execute (ignored when gate is present)" },
-        "gate": { "$ref": "#/$defs/ConditionalGate", "description": "Conditional gate: evaluate tool, branch on pass/fail. When present, run is ignored." }
+        "gate": { "$ref": "#/$defs/ConditionalGate", "description": "Conditional gate: evaluate tool, branch on pass/fail. When present, run is ignored." },
+        "prompt": { "type": "string", "description": "Client prompt injected after hook execution (as system role on supported providers)" }
       },
       "oneOf": [
         { "required": ["run"] },

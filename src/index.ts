@@ -129,6 +129,7 @@ export class MCPClient {
   private onIterationLimitCallback?: (iterations: number, maxIterations: number) => Promise<number | null>;
   private toolApprovalCallback?: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | { decision: 'reject'; message?: string }>;
   private webElicitationCallback?: (request: ElicitRequest) => Promise<import('@modelcontextprotocol/sdk/types.js').ElicitResult>;
+  private systemPrompt: string | null = null;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -1514,9 +1515,11 @@ export class MCPClient {
     // Reinitialize token counter for new model's context window
     await this.tokenManager.reinitializeTokenCounter();
 
-    // Record the switch as a client event in the conversation (no context clear)
-    this.chatHistoryManager.addClientMessage(
-      `[Model switched from ${prevProvider}/${prevModel} to ${provider.getProviderName()}/${model}]`
+    // Record the switch as a client event in chat history (logging only, not injected into conversation)
+    this.chatHistoryManager.addClientPrompt(
+      `[Model switched from ${prevProvider}/${prevModel} to ${provider.getProviderName()}/${model}]`,
+      'hook',
+      'model-switch',
     );
 
     this.logger.log(`Switched to ${provider.getProviderName()}/${model}\n`, { type: 'info' });
@@ -2115,15 +2118,50 @@ export class MCPClient {
       }
     }
     
-    // Log the system prompt to chat history (as client message) BEFORE user message
-    this.chatHistoryManager.addClientMessage(systemPrompt);
-    
+    // Inject the todo mode prompt as a proper client prompt (system role on supported providers)
+    this.injectClientPrompt(systemPrompt, 'todo-mode');
+
     // Mark as initialized
     this.todoModeInitialized = true;
     this.todosLeftAsIs = false; // Reset after first message
     this.todosWereSkipped = false; // Reset after first message
-    
+
     return systemPrompt;
+  }
+
+  /**
+   * Set the system prompt for subsequent API calls.
+   * Pass null to clear the system prompt.
+   */
+  setSystemPrompt(prompt: string | null): void {
+    this.systemPrompt = prompt;
+    if (prompt) {
+      this.chatHistoryManager.addClientPrompt(prompt, 'master');
+    }
+  }
+
+  /**
+   * Get the current system prompt.
+   */
+  getSystemPrompt(): string | null {
+    return this.systemPrompt;
+  }
+
+  /**
+   * Inject a client prompt into the conversation.
+   * On OpenAI/xAI/Ollama this becomes role:'system' (mid-conversation instruction).
+   * On Anthropic/Gemini this becomes role:'user' (their APIs don't support mid-conversation system).
+   * @param text - The prompt text to inject
+   * @param source - Optional source identifier for chat log rendering (e.g. 'todo-mode', 'hook: after verify_assembly')
+   */
+  injectClientPrompt(text: string, source?: string): void {
+    const message: Message = {
+      role: this.modelProvider.supportsSystemRole() ? 'system' : 'user',
+      content: text,
+    };
+    this.messages.push(message);
+    this.currentTokenCount += this.tokenManager.getTokenCounter()!.countMessageTokens(message);
+    this.chatHistoryManager.addClientPrompt(text, 'hook', source);
   }
 
   /**
@@ -3144,6 +3182,7 @@ export class MCPClient {
           })(), // maxIterations
           cancellationCheck,
           this.onIterationLimitCallback, // CLI: pause-and-ask, ablation: undefined (hard stop)
+          this.systemPrompt ?? undefined,
         );
         return await this.processToolUseStream(s, cancellationCheck, tokenCountBeforeStream, observer);
       };
@@ -3351,6 +3390,8 @@ export class MCPClient {
             return maxIter === -1 ? 999999 : maxIter;
           })(),
           cancellationCheck,
+          undefined, // onIterationLimit
+          this.systemPrompt ?? undefined,
         );
         const followUpResult = await this.processToolUseStream(hookFollowUpStream, cancellationCheck, this.currentTokenCount, observer);
         currentDeferredData = followUpResult.deferredHookData;
@@ -3397,16 +3438,11 @@ export class MCPClient {
             break;
           }
           
-          // Agent is trying to exit but has incomplete todos
-          const reminderMessage: Message = {
-            role: 'user',
-            content: `You have ${todoStatus.activeCount} incomplete todo(s). Please complete them using complete-todo. Only skip them using skip-todo if you cannot perform these tasks. Before executing the next action, first update the previous action you completed (mark it as complete using complete-todo), then read the next todo using read-next-todo.\n\nActive todos:\n${todoStatus.todosList}\n\nYou cannot exit until all todos are completed or skipped.`,
-          };
-          this.messages.push(reminderMessage);
-          this.currentTokenCount += this.tokenManager.getTokenCounter()!.countMessageTokens(reminderMessage);
-          
-          // Log the reminder message to chat history (as client message)
-          this.chatHistoryManager.addClientMessage(reminderMessage.content);
+          // Agent is trying to exit but has incomplete todos — inject reminder as client prompt
+          this.injectClientPrompt(
+            `You have ${todoStatus.activeCount} incomplete todo(s). Please complete them using complete-todo. Only skip them using skip-todo if you cannot perform these tasks. Before executing the next action, first update the previous action you completed (mark it as complete using complete-todo), then read the next todo using read-next-todo.\n\nActive todos:\n${todoStatus.todosList}\n\nYou cannot exit until all todos are completed or skipped.`,
+            'todo-reminder',
+          );
           
           this.logger.log(
             `\n⚠️ Agent attempted to exit with ${todoStatus.activeCount} incomplete todo(s). Prompting to complete or skip.\n`,
@@ -3430,6 +3466,7 @@ export class MCPClient {
             })(), // maxIterations
             cancellationCheck,
             this.onIterationLimitCallback,
+            this.systemPrompt ?? undefined,
           );
           const { pendingToolResults: continuePendingToolResults, lastTokenUsage: continueLastTokenUsage, deferredHookData: continueDeferredHookData } = await this.processToolUseStream(continueStream, cancellationCheck, continueTokenCountBeforeStream, observer);
 
@@ -3538,6 +3575,8 @@ export class MCPClient {
                 return maxIter === -1 ? 999999 : maxIter;
               })(),
               cancellationCheck,
+              undefined, // onIterationLimit
+              this.systemPrompt ?? undefined,
             );
             const contFollowUpResult = await this.processToolUseStream(hookFollowUpStream, cancellationCheck, this.currentTokenCount, observer);
             contDeferredData = contFollowUpResult.deferredHookData;

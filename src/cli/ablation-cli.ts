@@ -23,6 +23,7 @@ import {
   type AblationArgumentType,
 } from '../managers/ablation-manager.js';
 import { sanitizeFolderName } from '../utils/path-utils.js';
+import type { Message } from '../model-provider.js';
 
 // ==================== Tool Schema Types ====================
 
@@ -1455,6 +1456,91 @@ export class AblationCLI {
   }
 
   /**
+   * Resolve a prompt reference: if value starts with @insert-prompt:, fetch the prompt content.
+   * Otherwise return the literal string. Supports argument substitution.
+   */
+  private async resolvePromptReference(
+    value: string,
+    resolvedArguments?: Record<string, string>,
+  ): Promise<string> {
+    // Substitute argument placeholders first
+    let resolved = value;
+    if (resolvedArguments) {
+      resolved = this.ablationManager.substituteArguments([resolved], resolvedArguments)[0];
+    }
+
+    const trimmed = resolved.trim();
+    if (!trimmed.startsWith('@insert-prompt:')) {
+      return resolved;
+    }
+
+    // Parse the @insert-prompt: reference and fetch the prompt content
+    const suffix = trimmed.slice('@insert-prompt:'.length).trim();
+    if (!suffix) {
+      throw new Error('Empty @insert-prompt: reference in systemPrompt/userPrompt');
+    }
+
+    // Parse prompt name and optional arguments (same logic as executeAblationCommand)
+    let nameArg: string;
+    let promptArgs: Record<string, string> | undefined;
+
+    const pythonMatch = suffix.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*\((.*)\)\s*$/);
+    const jsonMatch = suffix.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s+(\{.*\})\s*$/);
+    const simpleMatch = suffix.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*$/);
+
+    if (pythonMatch) {
+      nameArg = pythonMatch[1];
+      const argsStr = pythonMatch[2].trim();
+      if (argsStr) {
+        promptArgs = parsePythonArgs(argsStr) as Record<string, string>;
+      }
+    } else if (jsonMatch) {
+      nameArg = jsonMatch[1];
+      try {
+        promptArgs = JSON.parse(jsonMatch[2]);
+      } catch {
+        throw new Error(`Invalid JSON arguments in @insert-prompt: ${jsonMatch[2]}`);
+      }
+    } else if (simpleMatch) {
+      nameArg = simpleMatch[1];
+    } else {
+      nameArg = suffix.split(/[\s(]/)[0];
+    }
+
+    const prompts = this.client.listPrompts();
+    const promptInfo = prompts.find(p => `${p.server}__${p.prompt.name}` === nameArg);
+    if (!promptInfo) {
+      throw new Error(`Prompt not found: ${nameArg}`);
+    }
+
+    const promptResult = await this.client.getPrompt(
+      promptInfo.server,
+      promptInfo.prompt.name,
+      promptArgs,
+    );
+
+    if (!promptResult?.messages?.length) {
+      throw new Error(`Prompt returned no messages: ${nameArg}`);
+    }
+
+    // Concatenate all text content from prompt messages
+    return promptResult.messages
+      .map((m: any) => {
+        if (typeof m.content === 'string') return m.content;
+        if (m.content?.type === 'text') return m.content.text;
+        if (Array.isArray(m.content)) {
+          return m.content
+            .filter((c: any) => c.type === 'text')
+            .map((c: any) => c.text)
+            .join('\n');
+        }
+        return '';
+      })
+      .filter(Boolean)
+      .join('\n');
+  }
+
+  /**
    * Execute a command during ablation run
    * Handles slash commands, direct tool calls (@tool:), and regular queries to the model
    */
@@ -2120,6 +2206,14 @@ export class AblationCLI {
         this.logger.log(`    Hook: executing ${cmd}\n`, { type: 'info' });
         await this.executeAblationCommand(cmd, maxIterations, false, ablation, phaseName);
       }
+    }
+
+    // Process pending client prompt from hook/gate prompt: field
+    const pendingClientPrompt = hookMgr.getPendingClientPrompt();
+    if (pendingClientPrompt) {
+      hookMgr.resetPendingClientPrompt();
+      this.client.injectClientPrompt(pendingClientPrompt.text, pendingClientPrompt.source);
+      this.logger.log(`    Hook: client prompt injected (${pendingClientPrompt.source})\n`, { type: 'info' });
     }
 
     // Process @insert-prompt: directive (spawns a new agent session)
@@ -3303,6 +3397,30 @@ export class AblationCLI {
             // Log phase-start event to chat history
             this.client.getChatHistoryManager().addPhaseEvent('phase-start', phase.name);
 
+            // Set system prompt for this phase (phase override > ablation master > null)
+            const phaseSystemPrompt = phase.systemPrompt ?? ablation.systemPrompt ?? null;
+            if (phaseSystemPrompt !== null) {
+              const resolvedSystemPrompt = await this.resolvePromptReference(phaseSystemPrompt, resolvedArguments);
+              this.client.setSystemPrompt(resolvedSystemPrompt);
+              this.logger.log(`  System prompt: ${resolvedSystemPrompt.slice(0, 80)}${resolvedSystemPrompt.length > 80 ? '...' : ''}\n`, { type: 'info' });
+            } else if (ablation.settings.clearContextBetweenPhases !== false) {
+              // Clear system prompt when switching phases with no prompt defined
+              this.client.setSystemPrompt(null);
+            }
+
+            // Inject userPrompt as user message at phase start (if defined)
+            // This becomes the first user message the model sees for this phase
+            if (phase.userPrompt) {
+              const resolvedUserPrompt = await this.resolvePromptReference(phase.userPrompt, resolvedArguments);
+              const userMsg: Message = {
+                role: 'user',
+                content: resolvedUserPrompt,
+              };
+              this.client.getMessages().push(userMsg);
+              this.client.getChatHistoryManager().addUserMessage(resolvedUserPrompt);
+              this.logger.log(`  User prompt: ${resolvedUserPrompt.slice(0, 80)}${resolvedUserPrompt.length > 80 ? '...' : ''}\n`, { type: 'info' });
+            }
+
             // Execute onStart lifecycle hooks
             if (phaseOnStart && phaseOnStart.length > 0) {
               this.logger.log(`  ⤷ Phase onStart hooks...\n`, { type: 'info' });
@@ -3516,6 +3634,16 @@ export class AblationCLI {
                       ablation,
                       phase.name,
                     );
+
+                    // Inject hookPrompt as client prompt after hook execution
+                    // Only for context-injecting hooks (@tool:, @insert-prompt:) — not @tool-exec:
+                    if (hook.prompt && !hookCmd.trim().startsWith('@tool-exec:')) {
+                      const resolvedPrompt = resolvedArguments
+                        ? this.ablationManager.substituteArguments([hook.prompt], resolvedArguments)[0]
+                        : hook.prompt;
+                      this.client.injectClientPrompt(resolvedPrompt, `hook: after ${hook.after}`);
+                      this.logger.log(`  ↳ Hook prompt injected\n`, { type: 'info' });
+                    }
 
                     // @abort hook — skip remaining phases for this model
                     if (hookResult.abortRun) {
@@ -3766,6 +3894,9 @@ export class AblationCLI {
       // Restore original abort callback (keyboard monitor only, for normal CLI mode)
       this.client.setAbortRequestedCallback(() => this.callbacks.isInterruptRequested());
     }
+
+    // Clean up system prompt so it doesn't leak into regular chat
+    this.client.setSystemPrompt(null);
 
     // Finalize run
     run.completedAt = new Date().toISOString();

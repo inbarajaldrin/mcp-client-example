@@ -9,7 +9,7 @@ export interface ToolCall {
 }
 
 export interface Message {
-  role: 'user' | 'assistant' | 'tool';
+  role: 'user' | 'assistant' | 'tool' | 'system';
   content: string;
   thinking?: string; // Accumulated thinking/reasoning content from model
   tool_call_id?: string; // For OpenAI tool result messages
@@ -102,18 +102,14 @@ export interface ModelInfo {
 
 // Abstract ModelProvider interface
 // Supports LLMs, VLMs, and other AI model types
-// TODO: Add system prompt support to the interface and all provider implementations.
-//   Currently only Anthropic has a `system` param (in createMessageStreamWithToolUse) but it's
-//   never called with a value. All providers' APIs support system prompts:
-//     - Anthropic: `system` param (top-level, separate from messages)
-//     - OpenAI/xAI: `system` role message (prepended to messages array)
-//     - Google Gemini: `systemInstruction` param (top-level)
-//     - Ollama: `system` role message (prepended to messages array)
-//   Research shows system prompts improve rule-following for OpenAI/xAI/Google/Ollama,
-//   but Claude actually prioritizes user messages over system prompts.
-//   For ablation phases with clearContextBetweenPhases=false, system prompt should be
-//   replaced (not stacked) on each phase. Consider adding a `systemPrompt` field to the
-//   ablation definition schema and threading it through processQuery -> provider calls.
+// System prompt support:
+//   Each provider's createMessageStreamWithToolUse accepts an optional `system` parameter
+//   and converts it to the provider's native format:
+//     - Anthropic: top-level `system` field with cache_control
+//     - OpenAI/xAI: `{ role: 'system' }` message prepended to messages array
+//     - Google Gemini: `systemInstruction` in generation config
+//     - Ollama: `{ role: 'system' }` message prepended to messages array
+//   MCPClient.systemPrompt threads through processQuery to all call sites.
 export interface ModelProvider {
   // Create a streaming message completion
   createMessageStream(
@@ -144,6 +140,10 @@ export interface ModelProvider {
 
   // List available models from the provider API
   listAvailableModels(): Promise<ModelInfo[]>;
+
+  // Whether this provider supports role:'system' messages mid-conversation.
+  // OpenAI/xAI/Ollama do; Anthropic/Gemini don't (they only have a top-level system field).
+  supportsSystemRole(): boolean;
 
   // Set thinking/reasoning configuration for subsequent API calls
   setThinkingConfig?(config: ThinkingConfig): void;

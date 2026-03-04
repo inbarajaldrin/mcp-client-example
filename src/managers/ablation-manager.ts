@@ -27,6 +27,7 @@ export interface ConditionalGate {
   whenOutput: Record<string, unknown>;   // Condition on gate tool result
   onPass: string[];                      // Commands if gate passes
   onFail: string[];                      // Commands if gate fails
+  prompt?: string;                       // Client prompt injected after gate commands execute
 }
 
 export interface PostToolHook {
@@ -36,6 +37,7 @@ export interface PostToolHook {
   whenOutput?: Record<string, unknown>;  // Match against tool output JSON only
   run?: string;      // Command to execute (ignored when gate is present; either run or gate required)
   gate?: ConditionalGate;  // Conditional gate: evaluate tool, branch on result
+  prompt?: string;   // Client prompt injected after hook execution (as system role on supported providers)
 }
 
 export type AblationArgumentType = 'string' | 'attachment';
@@ -55,6 +57,8 @@ export interface AblationPhase {
   hooks?: PostToolHook[];   // Post-tool hooks for this phase only (in addition to top-level)
   onStart?: string[];       // Commands to run before phase commands
   onEnd?: string[];         // Commands to run after phase commands
+  systemPrompt?: string;    // Per-phase system prompt override (replaces master for this phase)
+  userPrompt?: string;      // User prompt injected as user message at phase start
 }
 
 export interface AblationSettings {
@@ -78,6 +82,7 @@ export interface AblationDefinition {
   models: AblationModel[];
   settings: AblationSettings;
   hooks?: PostToolHook[];  // Post-tool hooks applied to all phases
+  systemPrompt?: string;   // Master system prompt — all phases inherit unless overridden
 }
 
 export interface AblationRunResult {

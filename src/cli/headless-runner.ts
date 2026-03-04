@@ -65,8 +65,9 @@ export async function runHeadless(scriptPath: string, ctx: HeadlessContext): Pro
         }
       } else {
         // Regular message — process through the model
-        const systemPrompt = await (ctx.client as any).prepareAndLogSystemPrompt();
-        const finalQuery = systemPrompt ? `${systemPrompt}\n\nUser: ${line}` : line;
+        // Inject todo-mode prompt into conversation if needed (before user message)
+        await (ctx.client as any).prepareAndLogSystemPrompt();
+        const finalQuery = line;
 
         // Log user message to chat history (same as chat_loop does)
         ctx.client.getChatHistoryManager().addUserMessage(line);

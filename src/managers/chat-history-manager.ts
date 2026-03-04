@@ -72,7 +72,7 @@ export interface ChatSession {
   };
   messages: Array<{
     timestamp: string;
-    role: 'user' | 'assistant' | 'tool' | 'client';
+    role: 'user' | 'assistant' | 'tool' | 'system';
     content: string;
     // For assistant messages: thinking/reasoning text produced by the model
     thinking?: string;
@@ -93,6 +93,8 @@ export interface ChatSession {
     toolInputTime?: string; // ISO timestamp when tool input was sent
     toolOutputTime?: string; // ISO timestamp when tool output was received
     clientFixedArgs?: string[]; // Args coerced by client (e.g. string→int), original in toolInput
+    systemPromptType?: 'master' | 'hook'; // 'master' = top-level system prompt, 'hook' = mid-conversation injection
+    clientPromptSource?: string; // Source annotation for system prompts (e.g. 'todo-mode', 'hook: after verify_assembly')
     orchestratorMode?: boolean; // Track if tool was called in orchestrator mode
     isIPCCall?: boolean; // Track if this was an IPC call (automatic, not by agent)
     isHookCall?: boolean; // Track if this was triggered by a hook (@tool-exec:, @tool:, or onStart)
@@ -283,9 +285,13 @@ export class ChatHistoryManager {
   }
 
   /**
-   * Add a client message to current session (for automatic client-generated messages)
+   * Log a system prompt to the current session.
+   * Single logger for all system prompts — promptType distinguishes origin.
+   * @param content - The prompt text
+   * @param promptType - 'master' (top-level, set once per phase) or 'hook' (mid-conversation injection)
+   * @param source - Source identifier (e.g. 'phase: Disassembly', 'todo-mode', 'hook: after verify_assembly')
    */
-  addClientMessage(content: string): void {
+  addClientPrompt(content: string, promptType: 'master' | 'hook', source?: string): void {
     if (!this.currentSession) {
       this.logger.log('No active session. Call startSession() first.\n', {
         type: 'warning',
@@ -293,11 +299,16 @@ export class ChatHistoryManager {
       return;
     }
 
-    this.currentSession.messages.push({
+    const msg: any = {
       timestamp: new Date().toISOString(),
-      role: 'client',
+      role: 'system',
       content,
-    });
+      systemPromptType: promptType,
+    };
+    if (source) {
+      msg.clientPromptSource = source;
+    }
+    this.currentSession.messages.push(msg);
 
     this.currentSession.metadata.messageCount++;
   }
@@ -453,7 +464,7 @@ export class ChatHistoryManager {
 
     const message: any = {
       timestamp: new Date().toISOString(),
-      role: 'client',
+      role: 'system',
       content: `Phase ${type.replace('phase-', '')}: ${phaseName}`,
       phaseEvent: { type, phaseName },
     };
@@ -485,7 +496,7 @@ export class ChatHistoryManager {
 
     const msg: any = {
       timestamp: new Date().toISOString(),
-      role: 'client',
+      role: 'system',
       content: `Elicitation ${actionLabels[action]}${reason ? `: ${reason}` : ''}`,
       elicitationEvent: { action },
     };
@@ -947,7 +958,7 @@ export class ChatHistoryManager {
           md += `\n`;
         }
         md += `${msg.content}\n\n`;
-      } else if (msg.role === 'client') {
+      } else if (msg.role === 'system') {
         if (msg.phaseEvent) {
           const pe = msg.phaseEvent;
           const icon = pe.type === 'phase-start' ? '▶' : pe.type === 'phase-complete' ? '✓' : '✗';
@@ -971,7 +982,9 @@ export class ChatHistoryManager {
           }
           md += '\n';
         } else {
-          md += `### Client (${time})\n\n${msg.content}\n\n`;
+          const sourceLabel = msg.clientPromptSource ? ` (${msg.clientPromptSource})` : '';
+          const typeLabel = msg.systemPromptType === 'master' ? 'Master System Prompt' : 'Hook System Prompt';
+          md += `### ${typeLabel}${sourceLabel} (${time})\n\n${msg.content}\n\n`;
         }
       } else if (msg.role === 'assistant') {
         md += `### Assistant (${time})\n\n`;

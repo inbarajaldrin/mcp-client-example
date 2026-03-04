@@ -1775,9 +1775,9 @@ export class MCPClientCLI {
           if (handled) continue;
         }
 
-        // Check if system prompt needs to be logged and log it FIRST (before user message)
-        const systemPrompt = await (this.client as any).prepareAndLogSystemPrompt();
-        const finalQuery = systemPrompt ? `${systemPrompt}\n\nUser: ${query}` : query;
+        // Inject todo-mode prompt into conversation if needed (before user message)
+        await (this.client as any).prepareAndLogSystemPrompt();
+        const finalQuery = query;
 
         // Reset abort flag and start keyboard monitoring
         this.keyboardMonitor.abortRequested = false;

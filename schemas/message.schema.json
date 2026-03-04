@@ -8,8 +8,8 @@
   "properties": {
     "role": {
       "type": "string",
-      "enum": ["user", "assistant", "tool"],
-      "description": "Message role for LLM API"
+      "enum": ["user", "assistant", "tool", "system"],
+      "description": "Message role for LLM API. 'system' is used for mid-conversation client prompts on providers that support it (OpenAI/xAI/Ollama); mapped to 'user' on Anthropic/Gemini."
     },
     "content": {
       "type": "string",

@@ -207,6 +207,10 @@ export class AnthropicProvider implements ModelProvider {
     return 'anthropic';
   }
 
+  supportsSystemRole(): boolean {
+    return false;
+  }
+
   getDefaultModel(): string {
     return 'claude-haiku-4-5-20251001';
   }
@@ -891,8 +895,9 @@ export class AnthropicProvider implements ModelProvider {
       }
 
       // Standard text messages
+      // Map 'tool' and 'system' to 'user' — Anthropic only supports 'user' | 'assistant'
       return {
-        role: (msg.role === 'tool' ? 'user' : msg.role) as 'user' | 'assistant',
+        role: (msg.role === 'tool' || msg.role === 'system' ? 'user' : msg.role) as 'user' | 'assistant',
         content: msg.content || '',
       };
     });

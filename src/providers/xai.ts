@@ -173,6 +173,10 @@ export class GrokProvider implements ModelProvider {
     return 'xai';
   }
 
+  supportsSystemRole(): boolean {
+    return true;
+  }
+
   getDefaultModel(): string {
     return 'grok-4-fast';
   }
@@ -432,6 +436,7 @@ export class GrokProvider implements ModelProvider {
     maxIterations: number = 10,
     cancellationCheck?: () => boolean,
     onIterationLimit?: (iterations: number, maxIterations: number) => Promise<number | null>,
+    system?: string,
   ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
     // Convert generic Tool[] to OpenAI function format
     const openaiTools = tools.map((tool) => ({
@@ -459,9 +464,14 @@ export class GrokProvider implements ModelProvider {
 
       // Stream request to Grok API
       const reasoningParams = this.resolveReasoningParams(model);
+      const convertedMessages = this.convertToOpenAIMessages(conversationMessages, model);
+      // Prepend system message if provided (xAI/Grok uses role: 'system' in messages array)
+      if (system) {
+        convertedMessages.unshift({ role: 'system', content: system });
+      }
       const streamParams: any = {
         model: model,
-        messages: this.convertToOpenAIMessages(conversationMessages, model),
+        messages: convertedMessages,
         max_completion_tokens: maxTokens,
         tools: openaiTools.length > 0 ? openaiTools : undefined,
         stream: true,
@@ -866,6 +876,14 @@ export class GrokProvider implements ModelProvider {
           role: 'tool' as const,
           tool_call_id: tr.tool_use_id,
           content: typeof tr.content === 'string' ? tr.content : JSON.stringify(tr.content),
+        };
+      }
+
+      // Handle system messages (mid-conversation client prompts)
+      if (msg.role === 'system') {
+        return {
+          role: 'system' as const,
+          content: msg.content || '',
         };
       }
 

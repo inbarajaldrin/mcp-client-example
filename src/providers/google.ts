@@ -167,6 +167,10 @@ export class GeminiProvider implements ModelProvider {
     return 'google';
   }
 
+  supportsSystemRole(): boolean {
+    return false;
+  }
+
   getDefaultModel(): string {
     return 'gemini-2.5-flash';
   }
@@ -475,6 +479,14 @@ export class GeminiProvider implements ModelProvider {
             parts,
           });
         }
+      } else if (msg.role === 'system') {
+        // Gemini doesn't support mid-conversation system messages — map to user role
+        if (msg.content) {
+          contents.push({
+            role: 'user',
+            parts: [{ text: msg.content }],
+          });
+        }
       }
     }
 
@@ -611,6 +623,7 @@ export class GeminiProvider implements ModelProvider {
     maxIterations: number = 10,
     cancellationCheck?: () => boolean,
     onIterationLimit?: (iterations: number, maxIterations: number) => Promise<number | null>,
+    system?: string,
   ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
     const geminiTools = this.convertToolsToGeminiFormat(tools);
 
@@ -645,6 +658,7 @@ export class GeminiProvider implements ModelProvider {
           maxOutputTokens: maxTokens,
           temperature: 0.7,
           ...(geminiThinkingConfig && { thinkingConfig: geminiThinkingConfig }),
+          ...(system && { systemInstruction: system }),
         },
       };
 

@@ -75,6 +75,8 @@ export class HookManager {
   private pendingPromptInsertion: string | null = null;
   private pendingAttachmentInsertions: string[] = [];
   private pendingClearAttachments: boolean = false;
+  // Pending client prompt from hook/gate prompt: field — consumed by ablation-cli
+  private pendingClientPrompt: { text: string; source: string } | null = null;
 
   constructor(logger?: Logger) {
     this.logger = logger || new Logger({ mode: 'verbose' });
@@ -197,6 +199,7 @@ export class HookManager {
     this.pendingPromptInsertion = null;
     this.pendingAttachmentInsertions = [];
     this.pendingClearAttachments = false;
+    this.pendingClientPrompt = null;
   }
 
   /** Set the current phase name for @complete-phase:name matching */
@@ -255,11 +258,18 @@ export class HookManager {
   /** Reset pending clear attachments flag */
   resetPendingClearAttachments(): void { this.pendingClearAttachments = false; }
 
+  /** Get pending client prompt from hook/gate prompt: field */
+  getPendingClientPrompt(): { text: string; source: string } | null { return this.pendingClientPrompt; }
+
+  /** Reset pending client prompt after it's been consumed */
+  resetPendingClientPrompt(): void { this.pendingClientPrompt = null; }
+
   /** Check if any pending directives need to be consumed */
   hasPendingDirectives(): boolean {
     return this.pendingPromptInsertion !== null
       || this.pendingAttachmentInsertions.length > 0
-      || this.pendingClearAttachments;
+      || this.pendingClearAttachments
+      || this.pendingClientPrompt !== null;
   }
 
   // ==================== Runtime Hook Execution ====================
@@ -601,6 +611,11 @@ export class HookManager {
 
     // 3. Execute the chosen command list
     await this.executeGateCommands(commands, triggerTool, executeTool);
+
+    // 4. Queue gate prompt for injection by ablation-cli (if present)
+    if (gate.prompt) {
+      this.pendingClientPrompt = { text: gate.prompt, source: `gate: ${gateParsed.toolName}` };
+    }
   }
 
   /**
