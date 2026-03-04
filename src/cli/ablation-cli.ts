@@ -1456,8 +1456,9 @@ export class AblationCLI {
   }
 
   /**
-   * Resolve a prompt reference: if value starts with @insert-prompt:, fetch the prompt content.
-   * Otherwise return the literal string. Supports argument substitution.
+   * Resolve a prompt or resource reference: if value starts with @insert-prompt: or
+   * @insert-resource:, fetch the content. Otherwise return the literal string.
+   * Supports argument substitution.
    */
   private async resolvePromptReference(
     value: string,
@@ -1470,6 +1471,12 @@ export class AblationCLI {
     }
 
     const trimmed = resolved.trim();
+
+    // Handle @insert-resource: references
+    if (trimmed.startsWith('@insert-resource:')) {
+      return this.resolveResourceReference(trimmed);
+    }
+
     if (!trimmed.startsWith('@insert-prompt:')) {
       return resolved;
     }
@@ -1538,6 +1545,65 @@ export class AblationCLI {
       })
       .filter(Boolean)
       .join('\n');
+  }
+
+  /**
+   * Look up a resource by server__name key or URI, searching both concrete resources
+   * and resource templates. Returns the server name and URI to pass to readResource().
+   */
+  private findResourceOrTemplate(nameArg: string): { server: string; uri: string } | null {
+    // Search concrete resources first
+    const allResources = this.client.listResources();
+    let match = allResources.find(r => `${r.server}__${r.resource.name}` === nameArg);
+    if (match) return { server: match.server, uri: match.resource.uri };
+
+    match = allResources.find(r => r.resource.uri === nameArg);
+    if (match) return { server: match.server, uri: match.resource.uri };
+
+    // Search resource templates — match by server__name key or uriTemplate
+    const allTemplates = this.client.listResourceTemplates();
+    let tmatch = allTemplates.find(t => `${t.server}__${t.template.name}` === nameArg);
+    if (tmatch) return { server: tmatch.server, uri: tmatch.template.uriTemplate };
+
+    tmatch = allTemplates.find(t => t.template.uriTemplate === nameArg);
+    if (tmatch) return { server: tmatch.server, uri: tmatch.template.uriTemplate };
+
+    return null;
+  }
+
+  /**
+   * Resolve an @insert-resource: reference by reading the resource content.
+   * Searches both concrete resources and resource templates.
+   */
+  private async resolveResourceReference(reference: string): Promise<string> {
+    const suffix = reference.slice('@insert-resource:'.length).trim();
+    if (!suffix) {
+      throw new Error('Empty @insert-resource: reference in systemPrompt/userPrompt');
+    }
+
+    const nameArg = suffix.split(/\s/)[0];
+    const resolved = this.findResourceOrTemplate(nameArg);
+
+    if (!resolved) {
+      throw new Error(`Resource not found: ${nameArg}`);
+    }
+
+    const result = await this.client.readResource(resolved.server, resolved.uri);
+
+    const parts: string[] = [];
+    for (const content of result.contents) {
+      if ('text' in content && content.text) {
+        parts.push(content.text);
+      } else if ('blob' in content && content.blob) {
+        parts.push(`[Binary data, ${(content as any).blob.length} bytes base64]`);
+      }
+    }
+
+    if (parts.length === 0) {
+      throw new Error(`Resource returned no text content: ${nameArg}`);
+    }
+
+    return parts.join('\n');
   }
 
   /**
@@ -1693,15 +1759,11 @@ export class AblationCLI {
         return {};
       }
 
-      const allResources = this.client.listResources();
-      let resourceInfo = allResources.find(r => `${r.server}__${r.resource.name}` === nameArg);
+      let resolved = this.findResourceOrTemplate(nameArg);
 
-      if (!resourceInfo) {
-        // Try matching by URI as fallback
-        resourceInfo = allResources.find(r => r.resource.uri === nameArg);
-      }
-
-      if (!resourceInfo) {
+      if (!resolved) {
+        // Stale reference — prompt user to select a replacement from concrete resources
+        const allResources = this.client.listResources();
         const rl = this.callbacks.getReadline();
         const resourceMgr = this.client.getResourceManager();
         const enabledResources = resourceMgr.filterResources(allResources);
@@ -1722,8 +1784,9 @@ export class AblationCLI {
           throw new Error(`Invalid resource selection: ${selection}`);
         }
 
-        resourceInfo = enabledResources[selectedIdx];
-        const newKey = `${resourceInfo.server}__${resourceInfo.resource.name}`;
+        const selected = enabledResources[selectedIdx];
+        resolved = { server: selected.server, uri: selected.resource.uri };
+        const newKey = `${selected.server}__${selected.resource.name}`;
 
         if (ablation && phaseName) {
           const phase = ablation.phases.find(p => p.name === phaseName);
@@ -1739,24 +1802,22 @@ export class AblationCLI {
       }
 
       // Read the resource content
-      const result = await this.client.readResource(resourceInfo.server, resourceInfo.resource.uri);
-      const messages = (this.client as any).messages as Array<{ role: string; content: string }>;
+      const result = await this.client.readResource(resolved.server, resolved.uri);
 
       for (const content of result.contents) {
         let contentText = '';
         if ('text' in content && content.text) {
           contentText = `[Resource: ${content.uri}]\n\`\`\`\n${content.text}\n\`\`\``;
         } else if ('blob' in content && content.blob) {
-          contentText = `[Resource: ${content.uri}]\n[Binary data, ${content.blob.length} bytes base64]`;
+          contentText = `[Resource: ${content.uri}]\n[Binary data, ${(content as any).blob.length} bytes base64]`;
         } else {
           contentText = `[Resource: ${content.uri}]\n[Empty resource]`;
         }
 
-        messages.push({ role: 'user', content: contentText });
-        this.client.getChatHistoryManager().addUserMessage(contentText);
+        this.client.injectClientPrompt(contentText, `resource: ${nameArg}`);
       }
 
-      this.logger.log(`  ✓ Injected resource "${resourceInfo.resource.name}" (${result.contents.length} content block(s)) into context\n`, { type: 'success' });
+      this.logger.log(`  ✓ Injected resource "${nameArg}" (${result.contents.length} content block(s)) into context\n`, { type: 'success' });
       return {};
     }
 
@@ -3397,15 +3458,40 @@ export class AblationCLI {
             // Log phase-start event to chat history
             this.client.getChatHistoryManager().addPhaseEvent('phase-start', phase.name);
 
-            // Set system prompt for this phase (phase override > ablation master > null)
-            const phaseSystemPrompt = phase.systemPrompt ?? ablation.systemPrompt ?? null;
-            if (phaseSystemPrompt !== null) {
-              const resolvedSystemPrompt = await this.resolvePromptReference(phaseSystemPrompt, resolvedArguments);
-              this.client.setSystemPrompt(resolvedSystemPrompt);
-              this.logger.log(`  System prompt: ${resolvedSystemPrompt.slice(0, 80)}${resolvedSystemPrompt.length > 80 ? '...' : ''}\n`, { type: 'info' });
-            } else if (ablation.settings.clearContextBetweenPhases !== false) {
-              // Clear system prompt when switching phases with no prompt defined
-              this.client.setSystemPrompt(null);
+            // Set system prompt for this phase
+            // With persistent context: phase prompt appends to master (master framing persists)
+            // With clear context: phase prompt replaces master (fresh start each phase)
+            const masterPrompt = ablation.systemPrompt ?? null;
+            const phasePrompt = phase.systemPrompt ?? null;
+            const persistentContext = ablation.settings.clearContextBetweenPhases === false;
+
+            if (persistentContext) {
+              // Persistent context: master is set once (first phase), phase prompts append
+              if (isFirstEnabledPhase && masterPrompt !== null) {
+                const resolvedMaster = await this.resolvePromptReference(masterPrompt, resolvedArguments);
+                this.client.setSystemPrompt(resolvedMaster);
+                this.logger.log(`  System prompt (master): ${resolvedMaster.slice(0, 80)}${resolvedMaster.length > 80 ? '...' : ''}\n`, { type: 'info' });
+              }
+              if (phasePrompt !== null) {
+                const resolvedPhase = await this.resolvePromptReference(phasePrompt, resolvedArguments);
+                const existing = this.client.getSystemPrompt();
+                if (existing) {
+                  this.client.setSystemPrompt(existing + '\n\n' + resolvedPhase);
+                } else {
+                  this.client.setSystemPrompt(resolvedPhase);
+                }
+                this.logger.log(`  System prompt (phase): ${resolvedPhase.slice(0, 80)}${resolvedPhase.length > 80 ? '...' : ''}\n`, { type: 'info' });
+              }
+            } else {
+              // Clear context: phase override > master > null
+              const effectivePrompt = phasePrompt ?? masterPrompt ?? null;
+              if (effectivePrompt !== null) {
+                const resolvedPrompt = await this.resolvePromptReference(effectivePrompt, resolvedArguments);
+                this.client.setSystemPrompt(resolvedPrompt);
+                this.logger.log(`  System prompt: ${resolvedPrompt.slice(0, 80)}${resolvedPrompt.length > 80 ? '...' : ''}\n`, { type: 'info' });
+              } else {
+                this.client.setSystemPrompt(null);
+              }
             }
 
             // Inject userPrompt as user message at phase start (if defined)

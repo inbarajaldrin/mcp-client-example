@@ -8,10 +8,12 @@ import {
   ListPromptsResultSchema,
   GetPromptResultSchema,
   ListResourcesResultSchema,
+  ListResourceTemplatesResultSchema,
   ReadResourceResultSchema,
   ElicitRequestSchema,
   type Prompt,
   type Resource,
+  type ResourceTemplate,
   type GetPromptResult,
   type ReadResourceResult,
   type ElicitRequest,
@@ -90,6 +92,7 @@ type ServerConnection = {
   tools: Tool[];
   prompts: Prompt[];
   resources: Resource[];
+  resourceTemplates: ResourceTemplate[];
 };
 
 export class MCPClient {
@@ -414,6 +417,7 @@ export class MCPClient {
           tools: [],
           prompts: [],
           resources: [],
+          resourceTemplates: [],
         };
 
         this.servers.set(serverConfig.name, connection);
@@ -592,6 +596,7 @@ export class MCPClient {
       tools: [],
       prompts: [],
       resources: [],
+      resourceTemplates: [],
     };
 
     this.servers.set(serverName, newConnection);
@@ -677,15 +682,9 @@ export class MCPClient {
       .join('\n') || result.displayText;
 
     const argsStr = Object.keys(toolInput).length > 0 ? ` with args ${JSON.stringify(toolInput)}` : '';
-    const message: Message = {
-      role: 'user',
-      content: `[Client hook executed ${toolName}${argsStr}]\nResult: ${textContent}`,
-    };
+    const promptText = `[Client hook executed ${toolName}${argsStr}]\nResult: ${textContent}`;
 
-    this.messages.push(message);
-
-    // Log injected hook result to chat history
-    this.chatHistoryManager.addUserMessage(message.content as string);
+    this.injectClientPrompt(promptText, `tool-result: ${toolName}`);
   }
 
   /**
@@ -864,6 +863,7 @@ export class MCPClient {
           tools: [],
           prompts: [],
           resources: [],
+          resourceTemplates: [],
         };
 
         this.servers.set(serverConfig.name, connection);
@@ -972,6 +972,7 @@ export class MCPClient {
         tools: [],
         prompts: [],
         resources: [],
+        resourceTemplates: [],
       };
 
       this.servers.set(serverName, connection);
@@ -1135,6 +1136,7 @@ export class MCPClient {
 
   private async initMCPResources() {
     let totalResources = 0;
+    let totalTemplates = 0;
     const allResources: Array<{ server: string; resource: Resource }> = [];
     const serversWithResources = new Set<string>();
 
@@ -1163,6 +1165,27 @@ export class MCPClient {
           );
         }
       }
+
+      try {
+        const templatesResult = await connection.client.request(
+          { method: 'resources/templates/list' },
+          ListResourceTemplatesResultSchema,
+        );
+
+        connection.resourceTemplates = templatesResult.resourceTemplates || [];
+        if (connection.resourceTemplates.length > 0) {
+          serversWithResources.add(serverName);
+          totalTemplates += connection.resourceTemplates.length;
+        }
+      } catch (error) {
+        connection.resourceTemplates = [];
+        if (!(error instanceof Error && error.message.includes('not found'))) {
+          this.logger.log(
+            `Failed to load resource templates from server "${serverName}": ${error}\n`,
+            { type: 'warning' },
+          );
+        }
+      }
     }
 
     if (allResources.length > 0) {
@@ -1172,9 +1195,13 @@ export class MCPClient {
     const allKnownResourceKeys = new Set(allResources.map(r => `${r.server}__${r.resource.name}`));
     this.resourceManager.pruneStaleResources(allKnownResourceKeys);
 
-    if (totalResources > 0) {
+    const totalDiscovered = totalResources + totalTemplates;
+    if (totalDiscovered > 0) {
+      const parts: string[] = [];
+      if (totalResources > 0) parts.push(`${totalResources} resource(s)`);
+      if (totalTemplates > 0) parts.push(`${totalTemplates} template(s)`);
       this.logger.log(
-        `Loaded ${totalResources} resource(s) across ${serversWithResources.size} server(s)\n`,
+        `Loaded ${parts.join(' and ')} across ${serversWithResources.size} server(s)\n`,
         { type: 'info' },
       );
     }
@@ -1246,6 +1273,7 @@ export class MCPClient {
           tools: [],
           prompts: [],
           resources: [],
+          resourceTemplates: [],
         };
 
         this.servers.set(todoServerName, connection);
@@ -1725,6 +1753,27 @@ export class MCPClient {
     return allResources;
   }
 
+  listResourceTemplates(serverName?: string): Array<{ server: string; template: ResourceTemplate }> {
+    const allTemplates: Array<{ server: string; template: ResourceTemplate }> = [];
+
+    if (serverName) {
+      const connection = this.servers.get(serverName);
+      if (connection) {
+        for (const template of connection.resourceTemplates) {
+          allTemplates.push({ server: serverName, template });
+        }
+      }
+    } else {
+      for (const [name, connection] of this.servers.entries()) {
+        for (const template of connection.resourceTemplates) {
+          allTemplates.push({ server: name, template });
+        }
+      }
+    }
+
+    return allTemplates;
+  }
+
   async readResource(
     serverName: string,
     uri: string,
@@ -1939,6 +1988,7 @@ export class MCPClient {
           tools: [],
           prompts: [],
           resources: [],
+          resourceTemplates: [],
         };
 
         this.servers.set('mcp-tools-orchestrator', connection);

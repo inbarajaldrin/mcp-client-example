@@ -50,7 +50,11 @@
         },
         "run": {
           "type": "string",
-          "description": "Command to execute. Supported formats: @tool-exec:server__tool(arg='val'), @complete-phase:name, @abort"
+          "description": "Command to execute. Supported formats: @tool-exec:server__tool(arg='val'), @tool:server__tool(arg='val'), @complete-phase:name, @abort"
+        },
+        "prompt": {
+          "type": "string",
+          "description": "Client prompt to inject into conversation after hook execution. Sent as 'system' role on providers that support it (OpenAI/xAI/Ollama), or 'user' role on Anthropic/Gemini. Only used for context-injecting hooks (@tool:, @insert-prompt:), not @tool-exec:."
         }
       },
       "oneOf": [

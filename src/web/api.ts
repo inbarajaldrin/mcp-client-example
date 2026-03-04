@@ -614,8 +614,6 @@ export function createApiRouter(client: MCPClient): Router {
     }
     try {
       const result = await client.getPrompt(server, name, args);
-      const messages = client.getMessages();
-      const historyMgr = client.getChatHistoryManager();
       let addedCount = 0;
 
       for (const msg of result.messages) {
@@ -628,8 +626,7 @@ export function createApiRouter(client: MCPClient): Router {
           } else {
             text = JSON.stringify(msg.content);
           }
-          messages.push({ role: 'user', content: text });
-          historyMgr.addUserMessage(text);
+          client.injectClientPrompt(text, `prompt: ${name}`);
           addedCount++;
         }
       }
@@ -698,8 +695,6 @@ export function createApiRouter(client: MCPClient): Router {
     }
     try {
       const result = await client.readResource(server, uri);
-      const messages = client.getMessages();
-      const historyMgr = client.getChatHistoryManager();
       let addedCount = 0;
 
       for (const content of result.contents) {
@@ -711,8 +706,7 @@ export function createApiRouter(client: MCPClient): Router {
         } else {
           text = `[Resource: ${content.uri}]\n[Empty resource]`;
         }
-        messages.push({ role: 'user', content: text });
-        historyMgr.addUserMessage(text);
+        client.injectClientPrompt(text, `resource: ${uri}`);
         addedCount++;
       }
 
