@@ -192,14 +192,21 @@ export class AnthropicProvider implements ModelProvider {
 
   /**
    * Resolve Anthropic thinking parameter.
-   * Anthropic thinking is opt-in — omit when disabled.
+   * Supports three modes: adaptive (model decides), enabled (fixed budget), or omit (disabled).
    */
-  private resolveThinkingParam(): { type: 'enabled'; budget_tokens: number } | undefined {
+  private resolveThinkingParam():
+    | { type: 'enabled'; budget_tokens: number }
+    | { type: 'adaptive' }
+    | undefined
+  {
     if (!this.thinkingConfig?.enabled) {
       return undefined; // Anthropic default is already off
     }
-    const level = (this.thinkingConfig.level || 'medium') as AnthropicThinkingLevel;
-    const budgetTokens = ANTHROPIC_BUDGET_TOKENS[level] || ANTHROPIC_BUDGET_TOKENS.medium;
+    const level = (this.thinkingConfig.level || 'adaptive') as AnthropicThinkingLevel;
+    if (level === 'adaptive') {
+      return { type: 'adaptive' };
+    }
+    const budgetTokens = ANTHROPIC_BUDGET_TOKENS[level] ?? ANTHROPIC_BUDGET_TOKENS.medium ?? 10000;
     return { type: 'enabled', budget_tokens: budgetTokens };
   }
 

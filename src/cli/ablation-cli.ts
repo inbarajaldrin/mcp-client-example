@@ -51,7 +51,7 @@ import type { ModelProvider } from '../model-provider.js';
 import type { ToolCLI } from './tool-cli.js';
 import type { PromptCLI } from './prompt-cli.js';
 import type { AttachmentCLI } from './attachment-cli.js';
-import { isReasoningModel, getThinkingLevelsForProvider } from '../utils/model-capabilities.js';
+import { isReasoningModel, getThinkingLevelsForProvider, getDefaultThinkingLevel } from '../utils/model-capabilities.js';
 
 /**
  * Format milliseconds as human-readable duration (e.g. "4m 5s", "1h 23m 45s")
@@ -3513,13 +3513,28 @@ export class AblationCLI {
             continue; // Skip to next model
           }
 
-          // Apply per-model thinking config (off by default unless specified)
-          if (model.thinking) {
+          // Apply per-model thinking config
+          // If thinking is explicitly set, use that level.
+          // If omitted but model supports reasoning, apply provider default.
+          // If explicitly set to 'off', disable thinking.
+          if (model.thinking === 'off') {
+            this.preferencesManager.setThinkingEnabled(false);
+            this.preferencesManager.setThinkingLevel(undefined);
+          } else if (model.thinking) {
             this.preferencesManager.setThinkingEnabled(true);
             this.preferencesManager.setThinkingLevel(model.thinking);
           } else {
-            this.preferencesManager.setThinkingEnabled(false);
-            this.preferencesManager.setThinkingLevel(undefined);
+            // No thinking field — apply provider default if model supports reasoning
+            const defaultLevel = isReasoningModel(model.model, model.provider)
+              ? getDefaultThinkingLevel(model.provider)
+              : undefined;
+            if (defaultLevel) {
+              this.preferencesManager.setThinkingEnabled(true);
+              this.preferencesManager.setThinkingLevel(defaultLevel);
+            } else {
+              this.preferencesManager.setThinkingEnabled(false);
+              this.preferencesManager.setThinkingLevel(undefined);
+            }
           }
         }
 
@@ -3539,7 +3554,8 @@ export class AblationCLI {
             `│  ${modelShortName}${iterationSuffix}\n`,
             { type: 'info' },
           );
-          const thinkingStatus = model.thinking ? ` │ Thinking: ${model.thinking}` : '';
+          const effectiveThinking = model.thinking || (isReasoningModel(model.model, model.provider) ? getDefaultThinkingLevel(model.provider) : undefined);
+          const thinkingStatus = effectiveThinking ? ` │ Thinking: ${effectiveThinking}${!model.thinking ? ' (default)' : ''}` : '';
           this.logger.log(
             `│  Provider: ${model.provider} │ Model: ${model.model}${thinkingStatus}\n`,
             { type: 'info' },
@@ -5270,18 +5286,24 @@ export class AblationCLI {
       model.thinking = levels[0].value;
       this.logger.log(`    ✓ Thinking: ${levels[0].value}\n`, { type: 'success' });
     } else {
+      const defaultLevel = getDefaultThinkingLevel(model.provider);
       this.logger.log(`    Select thinking level:\n`, { type: 'info' });
       for (let i = 0; i < levels.length; i++) {
         this.logger.log(`      ${i + 1}. ${levels[i].label}\n`, { type: 'info' });
       }
 
-      const answer = (await rl.question('    Enter selection: ')).trim();
-      const selection = parseInt(answer, 10);
-      if (selection >= 1 && selection <= levels.length) {
-        model.thinking = levels[selection - 1].value;
-        this.logger.log(`    ✓ Thinking: ${levels[selection - 1].value}\n`, { type: 'success' });
+      const answer = (await rl.question('    Enter selection (or Enter for default): ')).trim();
+      if (answer === '' && defaultLevel) {
+        model.thinking = defaultLevel;
+        this.logger.log(`    ✓ Thinking: ${defaultLevel}\n`, { type: 'success' });
       } else {
-        this.logger.log('    Invalid selection. Thinking disabled for this model.\n', { type: 'warning' });
+        const selection = parseInt(answer, 10);
+        if (selection >= 1 && selection <= levels.length) {
+          model.thinking = levels[selection - 1].value;
+          this.logger.log(`    ✓ Thinking: ${levels[selection - 1].value}\n`, { type: 'success' });
+        } else {
+          this.logger.log('    Invalid selection. Thinking disabled for this model.\n', { type: 'warning' });
+        }
       }
     }
   }
@@ -5450,18 +5472,24 @@ export class AblationCLI {
       this.logger.log(`    ${i + 1}. ${levels[i].label}\n`, { type: 'info' });
     }
 
-    const answer = (await rl.question('\n  Enter selection: ')).trim();
-    const levelIdx = parseInt(answer, 10);
+    const defaultLevel = getDefaultThinkingLevel(model.provider);
+    const answer = (await rl.question('\n  Enter selection (or Enter for default): ')).trim();
 
-    if (levelIdx === 0) {
-      delete model.thinking;
-      this.logger.log('\n  ✓ Thinking disabled for this model.\n', { type: 'success' });
-    } else if (levelIdx >= 1 && levelIdx <= levels.length) {
-      model.thinking = levels[levelIdx - 1].value;
-      this.logger.log(`\n  ✓ Thinking set to: ${model.thinking}\n`, { type: 'success' });
+    if (answer === '' && defaultLevel) {
+      model.thinking = defaultLevel;
+      this.logger.log(`\n  ✓ Thinking set to: ${defaultLevel}\n`, { type: 'success' });
     } else {
-      this.logger.log('\n  Invalid selection.\n', { type: 'error' });
-      return;
+      const levelIdx = parseInt(answer, 10);
+      if (levelIdx === 0) {
+        delete model.thinking;
+        this.logger.log('\n  ✓ Thinking disabled for this model.\n', { type: 'success' });
+      } else if (levelIdx >= 1 && levelIdx <= levels.length) {
+        model.thinking = levels[levelIdx - 1].value;
+        this.logger.log(`\n  ✓ Thinking set to: ${model.thinking}\n`, { type: 'success' });
+      } else {
+        this.logger.log('\n  Invalid selection.\n', { type: 'error' });
+        return;
+      }
     }
 
     ablation.updated = new Date().toISOString();

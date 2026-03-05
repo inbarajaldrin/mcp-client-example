@@ -174,16 +174,17 @@ export class OpenAIProvider implements ModelProvider {
 
   /**
    * Resolve reasoning params for the API call (Chat Completions API).
-   * OpenAI gpt-5 family defaults to 'medium' reasoning. 'low' is the minimum (can't use 'none').
+   * GPT-5.2 supports none|low|medium|high reasoning_effort. Default is 'none'.
    * Note: reasoning_summary and include are Responses API only — not supported in Chat Completions.
    * The reasoning_content field streams automatically when reasoning_effort is set.
    */
   private resolveReasoningParams(): Record<string, any> | undefined {
     if (!this.thinkingConfig?.enabled) {
-      return { reasoning_effort: 'low' }; // Minimize reasoning cost when thinking is off
+      return { reasoning_effort: 'none' }; // No reasoning when thinking is off
     }
     const level = this.thinkingConfig.level || 'medium';
-    const effort = (level === 'low' || level === 'medium' || level === 'high') ? level : 'medium';
+    const validLevels = ['none', 'low', 'medium', 'high'];
+    const effort = validLevels.includes(level) ? level : 'medium';
     return { reasoning_effort: effort };
   }
 

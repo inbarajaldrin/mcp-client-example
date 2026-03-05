@@ -73,8 +73,9 @@ export interface TokenCounter {
 export interface ThinkingConfig {
   enabled: boolean;
   model: string;
-  level?: string; // Thinking level: 'small'|'medium'|'large' for Anthropic budget_tokens,
-                  // 'low'|'medium'|'high' for OpenAI/xAI reasoning_effort
+  level?: string; // Thinking level: 'adaptive'|'small'|'medium'|'large' for Anthropic,
+                  // 'none'|'low'|'medium'|'high' for OpenAI, 'low'|'high' for xAI,
+                  // 'minimal'|'dynamic'|'generous' for Google, 'on' for Ollama
 }
 
 // Thinking content block from model responses (Anthropic extended thinking)

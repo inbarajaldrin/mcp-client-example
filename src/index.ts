@@ -55,7 +55,7 @@ export type WebStreamEvent =
 
 export type StreamObserver = (event: WebStreamEvent) => void;
 import { AnthropicProvider, type ToolExecutor } from './providers/anthropic.js';
-import { isReasoningModel } from './utils/model-capabilities.js';
+import { isReasoningModel, getDefaultThinkingLevel } from './utils/model-capabilities.js';
 import { initModelsDevCache, startModelsDevRefresh } from './utils/models-dev.js';
 import { OrchestratorIPCServer } from './ipc-server.js';
 import { ElicitationHandler } from './handlers/elicitation-handler.js';
@@ -489,6 +489,19 @@ export class MCPClient {
       `Using model: ${this.model}\n`,
       { type: 'info' },
     );
+
+    // Show thinking default for reasoning models
+    const providerName = this.modelProvider.getProviderName();
+    if (isReasoningModel(this.model, providerName)) {
+      const thinkingEnabled = this.preferencesManager.getThinkingEnabled();
+      const thinkingLevel = this.preferencesManager.getThinkingLevel();
+      const defaultLevel = getDefaultThinkingLevel(providerName);
+      if (thinkingEnabled && thinkingLevel) {
+        this.logger.log(`Thinking: ${thinkingLevel}\n`, { type: 'info' });
+      } else if (defaultLevel) {
+        this.logger.log(`Thinking: ${defaultLevel} (default)\n`, { type: 'info' });
+      }
+    }
   }
 
   /**
@@ -1518,6 +1531,15 @@ export class MCPClient {
     this.clearContext();
 
     this.logger.log(`Switched to ${provider.getProviderName()}/${model}\n`, { type: 'info' });
+
+    // Show thinking status for the new model
+    const switchProviderName = provider.getProviderName();
+    if (isReasoningModel(model, switchProviderName)) {
+      const defaultLevel = getDefaultThinkingLevel(switchProviderName);
+      if (defaultLevel) {
+        this.logger.log(`Thinking: ${defaultLevel} (default)\n`, { type: 'info' });
+      }
+    }
   }
 
   /**
@@ -1551,6 +1573,19 @@ export class MCPClient {
     );
 
     this.logger.log(`Switched to ${provider.getProviderName()}/${model}\n`, { type: 'info' });
+
+    // Show thinking status for the new model
+    const newProviderName = provider.getProviderName();
+    if (isReasoningModel(model, newProviderName)) {
+      const thinkingEnabled = this.preferencesManager.getThinkingEnabled();
+      const thinkingLevel = this.preferencesManager.getThinkingLevel();
+      const defaultLevel = getDefaultThinkingLevel(newProviderName);
+      if (thinkingEnabled && thinkingLevel) {
+        this.logger.log(`Thinking: ${thinkingLevel}\n`, { type: 'info' });
+      } else if (defaultLevel) {
+        this.logger.log(`Thinking: ${defaultLevel} (default)\n`, { type: 'info' });
+      }
+    }
   }
 
   /**
@@ -3220,10 +3255,15 @@ export class MCPClient {
         const providerName = this.modelProvider.getProviderName();
         if (providerName === 'anthropic' && this.preferencesManager.getThinkingEnabled()) {
           const level = this.preferencesManager.getThinkingLevel() as string;
-          const budgetMap: Record<string, number> = { small: 5000, medium: 10000, large: 25000 };
-          const budget = budgetMap[level] || budgetMap.medium;
-          if (maxTokens <= budget) {
-            maxTokens = budget + 4096; // Ensure room for the actual response
+          if (level === 'adaptive' || !level) {
+            // Adaptive: model manages its own budget within max_tokens; give it room
+            maxTokens = Math.max(maxTokens, 16384);
+          } else {
+            const budgetMap: Record<string, number> = { small: 5000, medium: 10000, large: 25000 };
+            const budget = budgetMap[level] || budgetMap.medium;
+            if (maxTokens <= budget) {
+              maxTokens = budget + 4096; // Ensure room for the actual response
+            }
           }
         }
 

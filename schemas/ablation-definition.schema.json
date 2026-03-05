@@ -107,7 +107,12 @@
       "required": ["provider", "model"],
       "properties": {
         "provider": { "type": "string", "description": "Provider name (anthropic, openai, google, ollama, xai)" },
-        "model": { "type": "string", "description": "Model identifier (e.g. claude-sonnet-4-20250514)" }
+        "model": { "type": "string", "description": "Model identifier (e.g. claude-sonnet-4-20250514)" },
+        "thinking": {
+          "type": "string",
+          "description": "Thinking level. Omit to use provider default for reasoning models. Set 'off' to explicitly disable. Anthropic: adaptive|small|medium|large. OpenAI: none|low|medium|high. Google: minimal|dynamic|generous. xAI: low|high. Ollama: on.",
+          "enum": ["off", "adaptive", "small", "medium", "large", "none", "low", "high", "minimal", "dynamic", "generous", "on"]
+        }
       }
     },
     "AblationSettings": {

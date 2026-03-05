@@ -20,7 +20,7 @@ import { ToolReplayCLI } from './cli/tool-replay-cli.js';
 import { ServerRefreshCLI } from './cli/server-refresh-cli.js';
 import { HooksCLI } from './cli/hooks-cli.js';
 import { HumanInTheLoopManager } from './managers/hil-manager.js';
-import { isReasoningModel, getThinkingLevelsForProvider } from './utils/model-capabilities.js';
+import { isReasoningModel, getThinkingLevelsForProvider, getDefaultThinkingLevel } from './utils/model-capabilities.js';
 import { createProvider, validateProviderEnv, PROVIDERS } from './bin.js';
 
 // Command list for tab autocomplete
@@ -1207,20 +1207,32 @@ export class MCPClientCLI {
               this.logger.log(`  ${i + 1}. ${levels[i].label}\n`, { type: 'info' });
             }
 
-            const answer = (await this.rl!.question('\nEnter selection (number): ')).trim();
+            const defaultLevel = getDefaultThinkingLevel(providerName);
+            const answer = (await this.rl!.question('\nEnter selection (number, or Enter for default): ')).trim();
 
-            const selection = parseInt(answer, 10);
-            if (selection >= 1 && selection <= levels.length) {
-              const selectedLevel = levels[selection - 1];
+            if (answer === '' && defaultLevel) {
+              // Empty input — apply provider default
               this.preferencesManager.setThinkingEnabled(true);
-              this.preferencesManager.setThinkingLevel(selectedLevel.value);
-              this.client.getChatHistoryManager().updateThinkingConfig({ enabled: true, level: selectedLevel.value, provider: providerName });
+              this.preferencesManager.setThinkingLevel(defaultLevel);
+              this.client.getChatHistoryManager().updateThinkingConfig({ enabled: true, level: defaultLevel, provider: providerName });
               this.logger.log(
-                `\nThinking/reasoning mode enabled (level: ${selectedLevel.value})\n`,
+                `\nThinking/reasoning mode enabled (level: ${defaultLevel})\n`,
                 { type: 'success' },
               );
             } else {
-              this.logger.log('\nInvalid selection. Thinking mode not changed.\n', { type: 'error' });
+              const selection = parseInt(answer, 10);
+              if (selection >= 1 && selection <= levels.length) {
+                const selectedLevel = levels[selection - 1];
+                this.preferencesManager.setThinkingEnabled(true);
+                this.preferencesManager.setThinkingLevel(selectedLevel.value);
+                this.client.getChatHistoryManager().updateThinkingConfig({ enabled: true, level: selectedLevel.value, provider: providerName });
+                this.logger.log(
+                  `\nThinking/reasoning mode enabled (level: ${selectedLevel.value})\n`,
+                  { type: 'success' },
+                );
+              } else {
+                this.logger.log('\nInvalid selection. Thinking mode not changed.\n', { type: 'error' });
+              }
             }
           }
         } else {

@@ -51,8 +51,8 @@
     },
     "thinkingLevel": {
       "type": "string",
-      "description": "Thinking budget level. Anthropic: 'small' (~5K tokens), 'medium' (~10K), 'large' (~25K). OpenAI/xAI: 'low', 'medium', 'high' reasoning_effort. Ollama: not applicable.",
-      "enum": ["small", "medium", "large", "low", "high"]
+      "description": "Thinking level. Anthropic: adaptive|small|medium|large. OpenAI: none|low|medium|high. Google: minimal|dynamic|generous. xAI: low|high. Ollama: on.",
+      "enum": ["adaptive", "small", "medium", "large", "none", "low", "high", "minimal", "dynamic", "generous", "on"]
     }
   }
 }
