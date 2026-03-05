@@ -1551,7 +1551,7 @@ export class AblationCLI {
    * Look up a resource by server__name key or URI, searching both concrete resources
    * and resource templates. Returns the server name and URI to pass to readResource().
    */
-  private findResourceOrTemplate(nameArg: string): { server: string; uri: string } | null {
+  private findResourceOrTemplate(nameArg: string, args?: Record<string, string>): { server: string; uri: string } | null {
     // Search concrete resources first
     const allResources = this.client.listResources();
     let match = allResources.find(r => `${r.server}__${r.resource.name}` === nameArg);
@@ -1563,7 +1563,15 @@ export class AblationCLI {
     // Search resource templates — match by server__name key or uriTemplate
     const allTemplates = this.client.listResourceTemplates();
     let tmatch = allTemplates.find(t => `${t.server}__${t.template.name}` === nameArg);
-    if (tmatch) return { server: tmatch.server, uri: tmatch.template.uriTemplate };
+    if (tmatch) {
+      let uri = tmatch.template.uriTemplate;
+      if (args) {
+        for (const [key, value] of Object.entries(args)) {
+          uri = uri.replace(`{${key}}`, value);
+        }
+      }
+      return { server: tmatch.server, uri };
+    }
 
     tmatch = allTemplates.find(t => t.template.uriTemplate === nameArg);
     if (tmatch) return { server: tmatch.server, uri: tmatch.template.uriTemplate };
@@ -1581,8 +1589,30 @@ export class AblationCLI {
       throw new Error('Empty @insert-resource: reference in systemPrompt/userPrompt');
     }
 
-    const nameArg = suffix.split(/\s/)[0];
-    const resolved = this.findResourceOrTemplate(nameArg);
+    let nameArg: string;
+    let resourceArgs: Record<string, string> | undefined;
+
+    const pythonMatch = suffix.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*\((.*)\)\s*$/);
+    const jsonMatch = suffix.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s+(\{.*\})\s*$/);
+
+    if (pythonMatch) {
+      nameArg = pythonMatch[1];
+      const argsStr = pythonMatch[2].trim();
+      if (argsStr) {
+        resourceArgs = parsePythonArgs(argsStr) as Record<string, string>;
+      }
+    } else if (jsonMatch) {
+      nameArg = jsonMatch[1];
+      try {
+        resourceArgs = JSON.parse(jsonMatch[2]);
+      } catch {
+        throw new Error(`Invalid JSON arguments in @insert-resource: ${jsonMatch[2]}`);
+      }
+    } else {
+      nameArg = suffix.split(/[\s(]/)[0];
+    }
+
+    const resolved = this.findResourceOrTemplate(nameArg, resourceArgs);
 
     if (!resolved) {
       throw new Error(`Resource not found: ${nameArg}`);
@@ -1746,20 +1776,45 @@ export class AblationCLI {
     }
 
     // Handle @insert-resource:<server__resourceName> — read resource and inject as context
+    // Supports: server__name, server__name(arg='val'), server__name {"arg":"val"}
     if (trimmedCommand.startsWith('@insert-resource:')) {
       const suffix = trimmedCommand.slice('@insert-resource:'.length).trim();
       if (!suffix) {
-        throw new Error('Usage: @insert-resource:server__resourceName');
+        throw new Error('Usage: @insert-resource:server__resourceName or @insert-resource:server__resourceName(arg=val)');
       }
 
-      const nameArg = suffix.split(/\s/)[0];
+      let nameArg: string;
+      let resourceArgs: Record<string, string> | undefined;
+
+      const pythonMatch = suffix.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*\((.*)\)\s*$/);
+      const jsonMatch = suffix.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s+(\{.*\})\s*$/);
+      const simpleMatch = suffix.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*$/);
+
+      if (pythonMatch) {
+        nameArg = pythonMatch[1];
+        const argsStr = pythonMatch[2].trim();
+        if (argsStr) {
+          resourceArgs = parsePythonArgs(argsStr) as Record<string, string>;
+        }
+      } else if (jsonMatch) {
+        nameArg = jsonMatch[1];
+        try {
+          resourceArgs = JSON.parse(jsonMatch[2]);
+        } catch {
+          throw new Error(`Invalid JSON arguments in @insert-resource: ${jsonMatch[2]}`);
+        }
+      } else if (simpleMatch) {
+        nameArg = simpleMatch[1];
+      } else {
+        nameArg = suffix.split(/[\s(]/)[0];
+      }
 
       if (dryRun) {
         this.logger.log(`    ⚠ Skipping @insert-resource in dry run (no model): ${nameArg}\n`, { type: 'warning' });
         return {};
       }
 
-      let resolved = this.findResourceOrTemplate(nameArg);
+      let resolved = this.findResourceOrTemplate(nameArg, resourceArgs);
 
       if (!resolved) {
         // Stale reference — prompt user to select a replacement from concrete resources
@@ -1815,6 +1870,16 @@ export class AblationCLI {
         }
 
         this.client.injectClientPrompt(contentText, `resource: ${nameArg}`);
+
+        // Preview resource content in CLI
+        if ('text' in content && content.text) {
+          const preview = content.text.length > 500
+            ? content.text.substring(0, 500) + '...'
+            : content.text;
+          this.logger.log(`    ${preview}\n`, { type: 'info' });
+        } else if ('blob' in content && content.blob) {
+          this.logger.log(`    [Binary data, ${(content as any).blob.length} bytes base64]\n`, { type: 'info' });
+        }
       }
 
       this.logger.log(`  ✓ Injected resource "${nameArg}" (${result.contents.length} content block(s)) into context\n`, { type: 'success' });

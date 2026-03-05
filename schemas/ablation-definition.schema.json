@@ -46,7 +46,7 @@
     },
     "systemPrompt": {
       "type": "string",
-      "description": "Master system prompt — all phases inherit unless overridden. Sent via each provider's native system prompt mechanism. Supports @insert-prompt:server__promptName syntax."
+      "description": "Master system prompt — all phases inherit unless overridden. Sent via each provider's native system prompt mechanism. Supports @insert-prompt:server__promptName(arg='val') and @insert-resource:server__templateName(param='val') syntax."
     }
   },
   "$defs": {
@@ -75,7 +75,7 @@
         "commands": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Ordered commands: @tool-exec:server__tool(args), @tool:server__tool(args), @insert-prompt:server__promptName, @insert-attachment:filename, @clear-attachments, @wait:N, @complete-phase, @abort, or plain text (user prompt to LLM)"
+          "description": "Ordered commands: @tool-exec:server__tool(args), @tool:server__tool(args), @insert-prompt:server__promptName(arg='val'), @insert-resource:server__resourceName, @insert-resource:server__templateName(param='val'), @insert-attachment:filename, @clear-attachments, @wait:N, @complete-phase, @abort, or plain text (user prompt to LLM)"
         },
         "hooks": {
           "type": "array",
@@ -85,20 +85,20 @@
         "onStart": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Commands to run when this phase starts"
+          "description": "Commands to run when this phase starts. Supports the same directives as commands (@tool-exec, @insert-resource, @insert-prompt, etc.)."
         },
         "onEnd": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Commands to run when this phase ends"
+          "description": "Commands to run when this phase ends. Supports the same directives as commands (@tool-exec, @insert-resource, @insert-prompt, etc.)."
         },
         "systemPrompt": {
           "type": "string",
-          "description": "Per-phase system prompt override — replaces master systemPrompt for this phase. Supports @insert-prompt:server__promptName syntax."
+          "description": "Per-phase system prompt override — replaces master systemPrompt for this phase. Supports @insert-prompt:server__promptName(arg='val') and @insert-resource:server__templateName(param='val') syntax."
         },
         "userPrompt": {
           "type": "string",
-          "description": "User prompt injected as a user message at phase start, before commands run. Supports @insert-prompt:server__promptName syntax."
+          "description": "User prompt injected as a user message at phase start, before commands run. Supports @insert-prompt:server__promptName(arg='val') and @insert-resource:server__templateName(param='val') syntax."
         }
       }
     },
