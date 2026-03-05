@@ -522,7 +522,7 @@ export class AblationManager {
    * Save a snapshot of all available tools (grouped by server) into the run directory.
    * This is constant for the whole ablation since tools come from connected MCP servers.
    */
-  saveToolsSnapshot(runDir: string, serversInfo: Array<{ name: string; tools: Array<{ name: string; description: string }> }>): void {
+  saveToolsSnapshot(runDir: string, serversInfo: Array<{ name: string; tools: Array<{ name: string; description: string; input_schema?: Record<string, unknown> }> }>): void {
     try {
       const snapshotPath = join(runDir, 'tools.yaml');
       const yamlContent = yaml.stringify({ servers: serversInfo });
@@ -536,14 +536,23 @@ export class AblationManager {
    * Save a snapshot of all available prompts (grouped by server) into the run directory.
    * This is constant for the whole ablation since prompts come from connected MCP servers.
    */
-  savePromptsSnapshot(runDir: string, prompts: Array<{ server: string; prompt: { name: string; description?: string; arguments?: Array<{ name: string; description?: string; required?: boolean }> } }>): void {
+  savePromptsSnapshot(
+    runDir: string,
+    prompts: Array<{ server: string; prompt: { name: string; description?: string; arguments?: Array<{ name: string; description?: string; required?: boolean }> } }>,
+    resolvedContent?: Record<string, string>,
+  ): void {
     try {
       const snapshotPath = join(runDir, 'prompts.yaml');
-      // Group prompts by server
-      const grouped: Record<string, Array<{ name: string; description?: string; arguments?: Array<{ name: string; description?: string; required?: boolean }> }>> = {};
+      // Group prompts by server, attaching resolved content where available
+      const grouped: Record<string, Array<{ name: string; description?: string; arguments?: Array<{ name: string; description?: string; required?: boolean }>; resolved_content?: string }>> = {};
       for (const entry of prompts) {
         if (!grouped[entry.server]) grouped[entry.server] = [];
-        grouped[entry.server].push(entry.prompt);
+        const key = `${entry.server}__${entry.prompt.name}`;
+        const promptEntry: { name: string; description?: string; arguments?: Array<{ name: string; description?: string; required?: boolean }>; resolved_content?: string } = { ...entry.prompt };
+        if (resolvedContent?.[key]) {
+          promptEntry.resolved_content = resolvedContent[key];
+        }
+        grouped[entry.server].push(promptEntry);
       }
       const yamlContent = yaml.stringify({ servers: grouped });
       writeFileSync(snapshotPath, yamlContent, 'utf-8');
@@ -555,13 +564,23 @@ export class AblationManager {
   /**
    * Save a snapshot of all available resources (grouped by server) into the run directory.
    */
-  saveResourcesSnapshot(runDir: string, resources: Array<{ server: string; resource: { name: string; uri: string; description?: string; mimeType?: string } }>): void {
+  saveResourcesSnapshot(
+    runDir: string,
+    resources: Array<{ server: string; resource: { name: string; uri: string; description?: string; mimeType?: string } }>,
+    templates: Array<{ server: string; template: { name: string; uriTemplate: string; description?: string; mimeType?: string } }> = [],
+  ): void {
     try {
       const snapshotPath = join(runDir, 'resources.yaml');
-      const grouped: Record<string, Array<{ name: string; uri: string; description?: string; mimeType?: string }>> = {};
+      const grouped: Record<string, { resources?: Array<{ name: string; uri: string; description?: string; mimeType?: string }>; templates?: Array<{ name: string; uriTemplate: string; description?: string; mimeType?: string }> }> = {};
       for (const entry of resources) {
-        if (!grouped[entry.server]) grouped[entry.server] = [];
-        grouped[entry.server].push(entry.resource);
+        if (!grouped[entry.server]) grouped[entry.server] = {};
+        if (!grouped[entry.server].resources) grouped[entry.server].resources = [];
+        grouped[entry.server].resources!.push(entry.resource);
+      }
+      for (const entry of templates) {
+        if (!grouped[entry.server]) grouped[entry.server] = {};
+        if (!grouped[entry.server].templates) grouped[entry.server].templates = [];
+        grouped[entry.server].templates!.push(entry.template);
       }
       const yamlContent = yaml.stringify({ servers: grouped });
       writeFileSync(snapshotPath, yamlContent, 'utf-8');

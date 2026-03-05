@@ -386,6 +386,18 @@ export class AblationCLI {
   }
 
   /**
+   * Check if user input is an exit command and exit the process if so.
+   * Allows "exit" or "/exit" at any ablation prompt to quit cleanly.
+   */
+  private checkExitCommand(input: string): void {
+    const trimmed = input.trim().toLowerCase();
+    if (trimmed === 'exit' || trimmed === '/exit') {
+      this.logger.log('\nGoodbye!\n', { type: 'warning' });
+      process.exit(0);
+    }
+  }
+
+  /**
    * Handle /ablation-create command - Interactive wizard to create ablation study
    */
   async handleAblationCreate(): Promise<void> {
@@ -1339,9 +1351,10 @@ export class AblationCLI {
     }
 
     const selection = (
-      await rl.question('\nSelect ablation to edit (or "q" to cancel): ')
+      await rl.question('\nSelect ablation to edit (or "q" to cancel, "exit" to quit): ')
     ).trim();
 
+    this.checkExitCommand(selection);
     if (selection.toLowerCase() === 'q') {
       this.logger.log('\nCancelled.\n', { type: 'info' });
       return;
@@ -1385,7 +1398,8 @@ export class AblationCLI {
       this.logger.log('   11. Edit model thinking\n', { type: 'info' });
       this.logger.log('   12. Done\n', { type: 'info' });
 
-      const choice = (await rl.question('\n  Select option: ')).trim();
+      const choice = (await rl.question('\n  Select option (or "exit" to quit): ')).trim();
+      this.checkExitCommand(choice);
 
       switch (choice) {
         case '1': // Add phase
@@ -1423,6 +1437,8 @@ export class AblationCLI {
           break;
         case '12': // Done
         case 'q':
+        case 'exit':
+        case '/exit':
           const updated = this.ablationManager.load(ablation.name);
           if (updated) {
             this.logger.log(`\n  Updated ablation:\n`, { type: 'info' });
@@ -2400,13 +2416,14 @@ export class AblationCLI {
     let selectedAblations: AblationDefinition[] = [];
     while (selectedAblations.length === 0) {
       const selection = (
-        await rl.question('\nSelect ablation(s) to run (e.g. 1, 1,3, 1-3, all, or "q" to cancel): ')
+        await rl.question('\nSelect ablation(s) to run (e.g. 1, 1,3, 1-3, all, "q" to cancel, "exit" to quit): ')
       ).trim();
 
       if (selection.toLowerCase() === 'q') {
         this.logger.log('\nCancelled.\n', { type: 'info' });
         return;
       }
+      this.checkExitCommand(selection);
 
       selectedAblations = this.parseAblationSelection(selection, ablations);
       if (selectedAblations.length === 0) {
@@ -3233,10 +3250,19 @@ export class AblationCLI {
     // Save a snapshot of all available tools and their descriptions (constant for the whole ablation)
     this.ablationManager.saveToolsSnapshot(runDir, this.client.getServersInfo());
 
-    // Save a snapshot of all available prompts (only if any phase uses @insert-prompt:)
-    const usesPrompts = ablation.phases.some(p =>
-      p.commands.some(c => c.trim().startsWith('@insert-prompt:')),
-    );
+    // Save a snapshot of all available prompts with resolved content for referenced ones
+    const promptRefSources = [
+      ablation.systemPrompt,
+      ...ablation.phases.flatMap(p => [
+        p.systemPrompt,
+        p.userPrompt,
+        ...p.commands,
+        ...(p.onStart ?? []),
+        ...(p.onEnd ?? []),
+      ]),
+    ].filter((s): s is string => typeof s === 'string');
+
+    const usesPrompts = promptRefSources.some(s => s.trim().startsWith('@insert-prompt:'));
     if (usesPrompts) {
       const allPrompts = this.client.listPrompts().map(p => ({
         server: p.server,
@@ -3246,21 +3272,52 @@ export class AblationCLI {
           arguments: p.prompt.arguments,
         },
       }));
-      this.ablationManager.savePromptsSnapshot(runDir, allPrompts);
+
+      // Resolve each unique @insert-prompt: reference used in this ablation
+      const resolvedContent: Record<string, string> = {};
+      const seen = new Set<string>();
+      for (const src of promptRefSources) {
+        const trimmed = src.trim();
+        if (!trimmed.startsWith('@insert-prompt:')) continue;
+        const nameArg = trimmed.slice('@insert-prompt:'.length).split(/[\s(]/)[0].trim();
+        if (seen.has(nameArg)) continue;
+        seen.add(nameArg);
+        try {
+          const resolved = await this.resolvePromptReference(trimmed, resolvedArguments);
+          resolvedContent[nameArg] = resolved;
+        } catch {
+          // Skip prompts that fail to resolve (missing args, server down, etc.)
+        }
+      }
+
+      this.ablationManager.savePromptsSnapshot(runDir, allPrompts, resolvedContent);
     }
 
-    // Save a snapshot of all available resources
+    // Save a snapshot of all available resources and resource templates
     const allResources = this.client.listResources();
-    if (allResources.length > 0) {
-      this.ablationManager.saveResourcesSnapshot(runDir, allResources.map(r => ({
-        server: r.server,
-        resource: {
-          name: r.resource.name,
-          uri: r.resource.uri,
-          description: r.resource.description,
-          mimeType: r.resource.mimeType,
-        },
-      })));
+    const allResourceTemplates = this.client.listResourceTemplates();
+    if (allResources.length > 0 || allResourceTemplates.length > 0) {
+      this.ablationManager.saveResourcesSnapshot(
+        runDir,
+        allResources.map(r => ({
+          server: r.server,
+          resource: {
+            name: r.resource.name,
+            uri: r.resource.uri,
+            description: r.resource.description,
+            mimeType: r.resource.mimeType,
+          },
+        })),
+        allResourceTemplates.map(t => ({
+          server: t.server,
+          template: {
+            name: t.template.name,
+            uriTemplate: t.template.uriTemplate,
+            description: t.template.description,
+            mimeType: t.template.mimeType,
+          },
+        })),
+      );
     }
 
     // Copy attachments to run directory (same for all runs)
@@ -4113,7 +4170,7 @@ export class AblationCLI {
     }
 
     const selection = (
-      await rl.question('\nSelect ablation (or "q" to cancel): ')
+      await rl.question('\nSelect ablation (or "q" to cancel, "exit" to quit): ')
     ).trim();
 
     if (selection.toLowerCase() === 'q') {
@@ -4293,9 +4350,10 @@ export class AblationCLI {
     }
 
     const selection = (
-      await rl.question('\nSelect ablation (or "q" to cancel): ')
+      await rl.question('\nSelect ablation (or "q" to cancel, "exit" to quit): ')
     ).trim();
 
+    this.checkExitCommand(selection);
     if (selection.toLowerCase() === 'q') {
       this.logger.log('\nCancelled.\n', { type: 'info' });
       return;
@@ -4634,9 +4692,10 @@ export class AblationCLI {
     }
 
     const ablationSelection = (
-      await rl.question('\nSelect ablation (or "q" to cancel): ')
+      await rl.question('\nSelect ablation (or "q" to cancel, "exit" to quit): ')
     ).trim();
 
+    this.checkExitCommand(ablationSelection);
     if (ablationSelection.toLowerCase() === 'q') {
       this.logger.log('\nCancelled.\n', { type: 'info' });
       return;
@@ -4711,9 +4770,10 @@ export class AblationCLI {
       }
 
       const modelSelection = (
-        await rl.question('\nSelect model (or "q" to cancel): ')
+        await rl.question('\nSelect model (or "q" to cancel, "exit" to quit): ')
       ).trim();
 
+      this.checkExitCommand(modelSelection);
       if (modelSelection.toLowerCase() === 'q') {
         this.logger.log('\nCancelled.\n', { type: 'info' });
         return;
@@ -4750,9 +4810,10 @@ export class AblationCLI {
     }
 
     const phaseSelection = (
-      await rl.question('\nSelect phase (or "q" to cancel): ')
+      await rl.question('\nSelect phase (or "q" to cancel, "exit" to quit): ')
     ).trim().toLowerCase();
 
+    this.checkExitCommand(phaseSelection);
     if (phaseSelection === 'q') {
       this.logger.log('\nCancelled.\n', { type: 'info' });
       return;

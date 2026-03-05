@@ -3761,14 +3761,15 @@ export class MCPClient {
    * Get info about connected servers and their enabled tools (for web UI)
    * Only includes servers that have at least one enabled tool.
    */
-  getServersInfo(): Array<{ name: string; tools: Array<{ name: string; description: string }> }> {
-    const result: Array<{ name: string; tools: Array<{ name: string; description: string }> }> = [];
+  getServersInfo(): Array<{ name: string; tools: Array<{ name: string; description: string; input_schema?: Record<string, unknown> }> }> {
+    const result: Array<{ name: string; tools: Array<{ name: string; description: string; input_schema?: Record<string, unknown> }> }> = [];
     for (const [name, connection] of this.servers) {
       const enabledTools = connection.tools
         .filter(t => this.toolManager.isToolEnabled(t.name))
         .map(t => ({
           name: t.name,
           description: t.description || '',
+          input_schema: t.input_schema,
         }));
       if (enabledTools.length > 0) {
         result.push({ name, tools: enabledTools });
