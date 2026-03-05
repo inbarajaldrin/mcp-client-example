@@ -130,6 +130,11 @@ export class ToolManager {
   pruneStaleTools(knownToolNames: Set<string>, skipPrefixes?: Set<string>): void {
     const staleKeys = Object.keys(this.toolStates).filter(name => {
       if (knownToolNames.has(name)) return false;
+      // Never prune tools the user explicitly disabled — a false entry is a
+      // deliberate user decision that must survive server disconnects, restarts,
+      // config swaps, and force-closes.  Only prune stale *enabled* entries,
+      // which are harmless to recreate via updateStateForNewTools.
+      if (this.toolStates[name] === false) return false;
       if (skipPrefixes) {
         for (const prefix of skipPrefixes) {
           if (name.startsWith(prefix)) return false;

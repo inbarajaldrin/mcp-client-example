@@ -1632,7 +1632,7 @@ export class MCPClient {
    * Save current chat state (messages and session) for later restoration
    * Used by ablation to preserve the original chat while running tests
    */
-  saveState(): { messages: Message[]; tokenCount: number; chatSession: { session: ChatSession; startTime: Date; toolUseCount: number } | null } {
+  saveState(): { messages: Message[]; tokenCount: number; chatSession: { session: ChatSession; startTime: Date; toolUseCount: number } | null; toolStates: Record<string, boolean> } {
     // Pause the chat history session (preserves state in memory without saving to disk)
     const chatSession = this.chatHistoryManager.pauseSession();
 
@@ -1640,6 +1640,7 @@ export class MCPClient {
       messages: [...this.messages],
       tokenCount: this.currentTokenCount,
       chatSession,
+      toolStates: this.toolManager.getToolStates(),
     };
   }
 
@@ -1648,7 +1649,7 @@ export class MCPClient {
    * Optionally accepts provider/model to restore to original configuration
    */
   async restoreState(
-    state: { messages: Message[]; tokenCount: number; chatSession: { session: ChatSession; startTime: Date; toolUseCount: number } | null },
+    state: { messages: Message[]; tokenCount: number; chatSession: { session: ChatSession; startTime: Date; toolUseCount: number } | null; toolStates?: Record<string, boolean> },
     provider?: ModelProvider,
     model?: string
   ): Promise<void> {
@@ -1668,6 +1669,12 @@ export class MCPClient {
     // Resume the original chat history session (preserves all pre-ablation messages)
     if (state.chatSession) {
       this.chatHistoryManager.resumeSession(state.chatSession);
+    }
+
+    // Restore tool enabled/disabled states and persist to disk
+    if (state.toolStates) {
+      this.toolManager.restoreState(state.toolStates);
+      this.toolManager.saveState();
     }
 
     if (this.messages.length > 0) {
