@@ -568,19 +568,30 @@ export class AblationManager {
     runDir: string,
     resources: Array<{ server: string; resource: { name: string; uri: string; description?: string; mimeType?: string } }>,
     templates: Array<{ server: string; template: { name: string; uriTemplate: string; description?: string; mimeType?: string } }> = [],
+    resolvedContent?: Record<string, string>,
   ): void {
     try {
       const snapshotPath = join(runDir, 'resources.yaml');
-      const grouped: Record<string, { resources?: Array<{ name: string; uri: string; description?: string; mimeType?: string }>; templates?: Array<{ name: string; uriTemplate: string; description?: string; mimeType?: string }> }> = {};
+      const grouped: Record<string, { resources?: Array<{ name: string; uri: string; description?: string; mimeType?: string; resolved_content?: string }>; templates?: Array<{ name: string; uriTemplate: string; description?: string; mimeType?: string; resolved_content?: string }> }> = {};
       for (const entry of resources) {
         if (!grouped[entry.server]) grouped[entry.server] = {};
         if (!grouped[entry.server].resources) grouped[entry.server].resources = [];
-        grouped[entry.server].resources!.push(entry.resource);
+        const key = `${entry.server}__${entry.resource.name}`;
+        const resourceEntry: { name: string; uri: string; description?: string; mimeType?: string; resolved_content?: string } = { ...entry.resource };
+        if (resolvedContent?.[key]) {
+          resourceEntry.resolved_content = resolvedContent[key];
+        }
+        grouped[entry.server].resources!.push(resourceEntry);
       }
       for (const entry of templates) {
         if (!grouped[entry.server]) grouped[entry.server] = {};
         if (!grouped[entry.server].templates) grouped[entry.server].templates = [];
-        grouped[entry.server].templates!.push(entry.template);
+        const key = `${entry.server}__${entry.template.name}`;
+        const templateEntry: { name: string; uriTemplate: string; description?: string; mimeType?: string; resolved_content?: string } = { ...entry.template };
+        if (resolvedContent?.[key]) {
+          templateEntry.resolved_content = resolvedContent[key];
+        }
+        grouped[entry.server].templates!.push(templateEntry);
       }
       const yamlContent = yaml.stringify({ servers: grouped });
       writeFileSync(snapshotPath, yamlContent, 'utf-8');

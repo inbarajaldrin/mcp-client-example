@@ -194,6 +194,12 @@ export class AblationCLI {
     const trimmed = input.trim();
     if (!trimmed) return 'resume';
 
+    // Exit during active run → graceful abort (callers also check, this is a safety net)
+    if (this.isExitCommand(trimmed)) {
+      process.emit('SIGINT', 'SIGINT');
+      return 'abort';
+    }
+
     // Route slash commands through the main CLI's full command handler
     if (trimmed.startsWith('/')) {
       const handled = await this.callbacks.routeSlashCommand(trimmed);
@@ -386,12 +392,19 @@ export class AblationCLI {
   }
 
   /**
+   * Check if input is an exit/quit command.
+   */
+  private isExitCommand(input: string): boolean {
+    const trimmed = input.trim().toLowerCase();
+    return trimmed === 'exit' || trimmed === '/exit';
+  }
+
+  /**
    * Check if user input is an exit command and exit the process if so.
-   * Allows "exit" or "/exit" at any ablation prompt to quit cleanly.
+   * Used at selection prompts (not during active runs — those use isExitCommand + abort).
    */
   private checkExitCommand(input: string): void {
-    const trimmed = input.trim().toLowerCase();
-    if (trimmed === 'exit' || trimmed === '/exit') {
+    if (this.isExitCommand(input)) {
       this.logger.log('\nGoodbye!\n', { type: 'warning' });
       process.exit(0);
     }
@@ -2058,6 +2071,14 @@ export class AblationCLI {
                       const rl = this.callbacks.getReadline()!;
                       const userInput = (await rl.question('  You: ')).trim();
 
+                      // Check for exit — trigger graceful abort (same as Ctrl+C)
+                      if (this.isExitCommand(userInput)) {
+                        this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+                        process.emit('SIGINT', 'SIGINT');
+                        paused = false;
+                        break;
+                      }
+
                       const stopCond = () => hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || hookMgr.hasPendingInjection() || hookMgr.hasPendingDirectives() || this.callbacks.isAbortRequested() || this.callbacks.isInterruptRequested();
 
                       // Re-enable keyboard monitor during processQuery so Ctrl+A works,
@@ -2248,6 +2269,14 @@ export class AblationCLI {
 
               // null means Ctrl+C was pressed — treat as abort
               if (userInput === null) {
+                paused = false;
+                break;
+              }
+
+              // Check for exit — trigger graceful abort (same as Ctrl+C)
+              if (this.isExitCommand(userInput)) {
+                this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+                process.emit('SIGINT', 'SIGINT');
                 paused = false;
                 break;
               }
@@ -3293,10 +3322,43 @@ export class AblationCLI {
       this.ablationManager.savePromptsSnapshot(runDir, allPrompts, resolvedContent);
     }
 
-    // Save a snapshot of all available resources and resource templates
+    // Save a snapshot of all available resources and resource templates with resolved content
     const allResources = this.client.listResources();
     const allResourceTemplates = this.client.listResourceTemplates();
     if (allResources.length > 0 || allResourceTemplates.length > 0) {
+      // Resolve each unique @insert-resource: reference used in this ablation
+      const resolvedResourceContent: Record<string, string> = {};
+      const resourceRefSources = [
+        ablation.systemPrompt,
+        ...ablation.phases.flatMap(p => [
+          p.systemPrompt,
+          p.userPrompt,
+          ...p.commands,
+          ...(p.onStart ?? []),
+          ...(p.onEnd ?? []),
+        ]),
+      ].filter((s): s is string => typeof s === 'string');
+
+      const seenResources = new Set<string>();
+      for (const src of resourceRefSources) {
+        // Substitute argument placeholders first
+        let resolved = src;
+        if (resolvedArguments) {
+          resolved = this.ablationManager.substituteArguments([resolved], resolvedArguments)[0];
+        }
+        const trimmed = resolved.trim();
+        if (!trimmed.startsWith('@insert-resource:')) continue;
+        const nameArg = trimmed.slice('@insert-resource:'.length).split(/[\s(]/)[0].trim();
+        if (seenResources.has(nameArg)) continue;
+        seenResources.add(nameArg);
+        try {
+          const resolvedText = await this.resolveResourceReference(trimmed);
+          resolvedResourceContent[nameArg] = resolvedText;
+        } catch {
+          // Skip resources that fail to resolve (missing args, server down, etc.)
+        }
+      }
+
       this.ablationManager.saveResourcesSnapshot(
         runDir,
         allResources.map(r => ({
@@ -3317,6 +3379,7 @@ export class AblationCLI {
             mimeType: t.template.mimeType,
           },
         })),
+        resolvedResourceContent,
       );
     }
 
@@ -3931,6 +3994,12 @@ export class AblationCLI {
               result.duration = Date.now() - startTime;
               result.durationFormatted = formatDuration(result.duration);
 
+              // Capture token usage before breaking out (agent still consumed tokens)
+              if (!ablation.dryRun) {
+                const tokenUsage = this.client.getTokenUsage();
+                result.tokens = tokenUsage.current;
+              }
+
               // Capture any outputs produced before abort (for diagnostics)
               this.ablationManager.captureRunOutputs(runDir, phase.name, model, getRunIter(iteration));
               if (ablation.settings.resetOutputsBetweenPhases?.length) {
@@ -3956,6 +4025,12 @@ export class AblationCLI {
               result.status = 'aborted';
               result.duration = Date.now() - startTime;
               result.durationFormatted = formatDuration(result.duration);
+
+              // Capture token usage before breaking out (agent still consumed tokens)
+              if (!ablation.dryRun) {
+                const tokenUsage = this.client.getTokenUsage();
+                result.tokens = tokenUsage.current;
+              }
 
               // Capture any outputs produced before @abort (for diagnostics)
               this.ablationManager.captureRunOutputs(runDir, phase.name, model, getRunIter(iteration));
@@ -4017,6 +4092,14 @@ export class AblationCLI {
             result.error = error.message;
             result.duration = Date.now() - startTime;
             result.durationFormatted = formatDuration(result.duration);
+
+            // Capture token usage on failure (agent still consumed tokens)
+            if (!ablation.dryRun) {
+              try {
+                const tokenUsage = this.client.getTokenUsage();
+                result.tokens = tokenUsage.current;
+              } catch { /* ignore if token tracking unavailable */ }
+            }
 
             // Stop any active video recording so the file is finalized before capture
             await this.client.cleanupVideoRecording();
