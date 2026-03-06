@@ -9,7 +9,7 @@ import type { MCPClient, WebStreamEvent } from '../index.js';
 import type { AttachmentInfo } from '../managers/attachment-manager.js';
 import { createProvider, PROVIDERS } from '../bin.js';
 import { AblationManager } from '../managers/ablation-manager.js';
-import { isReasoningModel, getThinkingLevelsForProvider } from '../utils/model-capabilities.js';
+import { isReasoningModel, getThinkingLevelsForProvider, isValidThinkingLevel, getDefaultThinkingLevel } from '../utils/model-capabilities.js';
 
 const upload = multer({ dest: path.join(tmpdir(), 'mcp-client-uploads') });
 
@@ -432,15 +432,14 @@ export function createApiRouter(client: MCPClient): Router {
       maxIpcCalls: prefs.getMaxIpcCalls(),
       hilEnabled: prefs.getHILEnabled(),
       approveAll: prefs.getApproveAll(),
-      thinkingEnabled: prefs.getThinkingEnabled(),
-      thinkingLevel: prefs.getThinkingLevel(),
+      thinkingLevels: prefs.getThinkingLevels(),
     });
   });
 
   // POST /api/settings — update preferences
   router.post('/settings', (req: Request, res: Response) => {
     const prefs = client.getPreferencesManager();
-    const { mcpTimeout, maxIterations, maxIpcCalls, hilEnabled, approveAll, thinkingEnabled, thinkingLevel } = req.body;
+    const { mcpTimeout, maxIterations, maxIpcCalls, hilEnabled, approveAll, thinkingLevels } = req.body;
     try {
       if (mcpTimeout !== undefined) prefs.setMCPTimeout(mcpTimeout);
       if (maxIterations !== undefined) prefs.setMaxIterations(maxIterations);
@@ -451,16 +450,20 @@ export function createApiRouter(client: MCPClient): Router {
       }
       if (hilEnabled !== undefined) prefs.setHILEnabled(!!hilEnabled);
       if (approveAll !== undefined) prefs.setApproveAll(!!approveAll);
-      if (thinkingEnabled !== undefined) prefs.setThinkingEnabled(!!thinkingEnabled);
-      if (thinkingLevel !== undefined) prefs.setThinkingLevel(thinkingLevel);
+      if (thinkingLevels && typeof thinkingLevels === 'object') {
+        for (const [provider, level] of Object.entries(thinkingLevels)) {
+          if (typeof level === 'string') {
+            prefs.setThinkingLevel(provider, level);
+          }
+        }
+      }
       res.json({
         mcpTimeout: prefs.getMCPTimeout(),
         maxIterations: prefs.getMaxIterations(),
         maxIpcCalls: prefs.getMaxIpcCalls(),
         hilEnabled: prefs.getHILEnabled(),
         approveAll: prefs.getApproveAll(),
-        thinkingEnabled: prefs.getThinkingEnabled(),
-        thinkingLevel: prefs.getThinkingLevel(),
+        thinkingLevels: prefs.getThinkingLevels(),
       });
     } catch (err: any) {
       res.status(400).json({ error: err.message || String(err) });
@@ -477,9 +480,10 @@ export function createApiRouter(client: MCPClient): Router {
     const modelSupports = isReasoningModel(model, providerName);
     const levels = getThinkingLevelsForProvider(providerName);
 
+    const currentLevel = prefs.getThinkingLevel(providerName)
+      || getDefaultThinkingLevel(providerName);
     res.json({
-      enabled: prefs.getThinkingEnabled(),
-      level: prefs.getThinkingLevel(),
+      level: currentLevel,
       modelSupportsThinking: modelSupports,
       model,
       provider: providerName,
@@ -490,17 +494,18 @@ export function createApiRouter(client: MCPClient): Router {
   // POST /api/thinking — set thinking preference
   router.post('/thinking', (req: Request, res: Response) => {
     const prefs = client.getPreferencesManager();
-    const { enabled, level } = req.body;
+    const providerName = client.getProviderName();
+    const { level } = req.body;
     try {
-      if (typeof enabled === 'boolean') {
-        prefs.setThinkingEnabled(enabled);
-      }
-      if (level !== undefined) {
-        prefs.setThinkingLevel(level);
+      if (level !== undefined && typeof level === 'string') {
+        if (!isValidThinkingLevel(providerName, level)) {
+          res.status(400).json({ error: `Invalid level '${level}' for provider '${providerName}'` });
+          return;
+        }
+        prefs.setThinkingLevel(providerName, level);
       }
       res.json({
-        enabled: prefs.getThinkingEnabled(),
-        level: prefs.getThinkingLevel(),
+        level: prefs.getThinkingLevel(providerName) || getDefaultThinkingLevel(providerName),
       });
     } catch (err: any) {
       res.status(400).json({ error: err.message || String(err) });
@@ -1343,8 +1348,7 @@ export function createApiRouter(client: MCPClient): Router {
       const originalProviderName = client.getProviderName();
       const originalModel = client.getModel();
       const prefs = client.getPreferencesManager();
-      const originalThinkingEnabled = prefs.getThinkingEnabled();
-      const originalThinkingLevel = prefs.getThinkingLevel();
+      const originalThinkingLevels = prefs.getThinkingLevels();
       const savedState = client.saveState();
 
       // Create run directory and save definition snapshot for provenance
@@ -1387,12 +1391,8 @@ export function createApiRouter(client: MCPClient): Router {
             await client.switchProviderAndModel(provider, model.model);
 
             // Apply per-model thinking config (off by default unless specified)
-            if ((model as any).thinking) {
-              prefs.setThinkingEnabled(true);
-              prefs.setThinkingLevel((model as any).thinking);
-            } else {
-              prefs.setThinkingEnabled(false);
-              prefs.setThinkingLevel(undefined);
+            if ((model as any).thinking && (model as any).thinking !== 'off') {
+              prefs.setThinkingLevel(model.provider, (model as any).thinking);
             }
           }
 
@@ -1541,8 +1541,9 @@ export function createApiRouter(client: MCPClient): Router {
       try {
         const originalProvider = createProvider(originalProviderName);
         await client.restoreState(savedState, originalProvider, originalModel);
-        prefs.setThinkingEnabled(originalThinkingEnabled);
-        prefs.setThinkingLevel(originalThinkingLevel);
+        for (const [provider, level] of Object.entries(originalThinkingLevels)) {
+          prefs.setThinkingLevel(provider, level);
+        }
       } catch { /* best effort */ }
 
       send({ type: 'done', summary: run });

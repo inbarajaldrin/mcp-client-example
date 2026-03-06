@@ -10,7 +10,7 @@ export interface ThinkingSupport {
 }
 
 // Provider-specific thinking level options
-export type OpenAIThinkingLevel = 'none' | 'low' | 'medium' | 'high';
+export type OpenAIThinkingLevel = 'low' | 'medium' | 'high';
 export type AnthropicThinkingLevel = 'adaptive' | 'small' | 'medium' | 'large';
 export type GeminiThinkingLevel = 'minimal' | 'dynamic' | 'generous';
 export type OllamaThinkingLevel = 'on';
@@ -57,7 +57,6 @@ export function getThinkingLevelsForProvider(providerName: string): { value: Thi
   switch (providerName) {
     case 'openai':
       return [
-        { value: 'none', label: 'None (no reasoning)' },
         { value: 'low', label: 'Low (minimal reasoning)' },
         { value: 'medium', label: 'Medium (balanced) [default]' },
         { value: 'high', label: 'High (maximum reasoning)' },
@@ -104,4 +103,12 @@ export function getDefaultThinkingLevel(providerName: string): ThinkingLevel | u
     case 'ollama': return 'on';
     default: return undefined;
   }
+}
+
+/**
+ * Check if a thinking level is valid for a given provider.
+ */
+export function isValidThinkingLevel(providerName: string, level: string): boolean {
+  const levels = getThinkingLevelsForProvider(providerName);
+  return levels.some(l => l.value === level);
 }

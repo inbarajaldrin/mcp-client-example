@@ -176,7 +176,7 @@ export class OllamaProvider implements ModelProvider {
     }
   }
 
-  setThinkingConfig(config: ThinkingConfig): void {
+  setThinkingConfig(config: ThinkingConfig | null): void {
     this.thinkingConfig = config;
   }
 
@@ -277,7 +277,7 @@ export class OllamaProvider implements ModelProvider {
    * route thinking properly for capable models.
    */
   private shouldEnableThinkParam(model: string): boolean {
-    if (this.thinkingConfig?.enabled) return true;
+    if (this.thinkingConfig) return true;
     return this.modelHasThinkingCapability(model);
   }
 

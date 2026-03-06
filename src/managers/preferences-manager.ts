@@ -15,8 +15,7 @@ export interface ClientPreferences {
   maxIterations?: number; // Maximum iterations between agent calls
   hilEnabled?: boolean; // Human-in-the-loop confirmations (persistent per-tool prompts)
   approveAll?: boolean; // Approve all tools without prompting (persistent)
-  thinkingEnabled?: boolean; // Enable thinking/reasoning mode for supported models
-  thinkingLevel?: string; // Provider-specific thinking level (e.g. 'low'|'medium'|'high' for OpenAI)
+  thinkingLevels?: Record<string, string>; // Per-provider thinking levels
   maxIpcCalls?: number; // Maximum IPC tool calls per session (1-10000)
 }
 
@@ -41,10 +40,12 @@ export class PreferencesManager {
           maxIterations: config.maxIterations ?? 100,
           hilEnabled: config.hilEnabled ?? false,
           approveAll: config.approveAll ?? false,
-          thinkingEnabled: config.thinkingEnabled ?? false,
-          thinkingLevel: config.thinkingLevel,
+          thinkingLevels: config.thinkingLevels ?? {},
           maxIpcCalls: config.maxIpcCalls ?? 100,
         };
+        if (config.thinkingEnabled !== undefined || config.thinkingLevel !== undefined) {
+          this.savePreferences();
+        }
         return;
       } catch (error) {
         this.logger.log(
@@ -59,8 +60,7 @@ export class PreferencesManager {
       maxIterations: 100,
       hilEnabled: false,
       approveAll: false,
-      thinkingEnabled: false,
-      thinkingLevel: undefined,
+      thinkingLevels: {},
       maxIpcCalls: 100,
     };
   }
@@ -157,25 +157,20 @@ export class PreferencesManager {
     this.savePreferences();
   }
 
-  getThinkingEnabled(): boolean {
-    return this.preferences.thinkingEnabled ?? false;
+  getThinkingLevel(providerName: string): string | undefined {
+    return this.preferences.thinkingLevels?.[providerName];
   }
 
-  setThinkingEnabled(enabled: boolean): void {
-    this.preferences.thinkingEnabled = enabled;
-    if (!enabled) {
-      this.preferences.thinkingLevel = undefined;
+  setThinkingLevel(providerName: string, level: string): void {
+    if (!this.preferences.thinkingLevels) {
+      this.preferences.thinkingLevels = {};
     }
+    this.preferences.thinkingLevels[providerName] = level;
     this.savePreferences();
   }
 
-  getThinkingLevel(): string | undefined {
-    return this.preferences.thinkingLevel;
-  }
-
-  setThinkingLevel(level: string | undefined): void {
-    this.preferences.thinkingLevel = level;
-    this.savePreferences();
+  getThinkingLevels(): Record<string, string> {
+    return { ...(this.preferences.thinkingLevels || {}) };
   }
 
   getMaxIpcCalls(): number {

@@ -45,8 +45,8 @@ export interface ChatMetadata {
   filePath: string;
   mdFilePath: string;
   // Whether thinking/reasoning was enabled during this session
-  thinkingEnabled?: boolean;
   thinkingLevel?: string; // Thinking level used (provider-specific)
+  thinkingProvider?: string;
 }
 
 export interface ChatSession {
@@ -766,9 +766,9 @@ export class ChatHistoryManager {
         // summary,
         filePath: jsonPath,
         mdFilePath: mdPath,
-        ...(sessionToSave.thinkingConfig?.enabled && {
-          thinkingEnabled: true,
+        ...(sessionToSave.thinkingConfig?.level && {
           thinkingLevel: sessionToSave.thinkingConfig.level,
+          thinkingProvider: sessionToSave.thinkingConfig.provider,
         }),
       };
 

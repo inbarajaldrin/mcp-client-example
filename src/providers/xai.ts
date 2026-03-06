@@ -151,7 +151,7 @@ export class GrokProvider implements ModelProvider {
     });
   }
 
-  setThinkingConfig(config: ThinkingConfig): void {
+  setThinkingConfig(config: ThinkingConfig | null): void {
     this.thinkingConfig = config;
   }
 
@@ -161,10 +161,10 @@ export class GrokProvider implements ModelProvider {
   // reasoning_content streams automatically when reasoning_effort is set.
   private resolveReasoningParams(model: string): Record<string, any> | undefined {
     if (!model.startsWith('grok-3-mini')) return undefined;
-    if (!this.thinkingConfig?.enabled) {
+    if (!this.thinkingConfig) {
       return { reasoning_effort: 'low' };
     }
-    const level = this.thinkingConfig.level || 'high';
+    const level = this.thinkingConfig.level;
     const effort = (level === 'low' || level === 'high') ? level : 'high';
     return { reasoning_effort: effort };
   }

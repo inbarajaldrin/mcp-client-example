@@ -186,7 +186,7 @@ export class AnthropicProvider implements ModelProvider {
     });
   }
 
-  setThinkingConfig(config: ThinkingConfig): void {
+  setThinkingConfig(config: ThinkingConfig | null): void {
     this.thinkingConfig = config;
   }
 
@@ -199,10 +199,10 @@ export class AnthropicProvider implements ModelProvider {
     | { type: 'adaptive' }
     | undefined
   {
-    if (!this.thinkingConfig?.enabled) {
+    if (!this.thinkingConfig) {
       return undefined; // Anthropic default is already off
     }
-    const level = (this.thinkingConfig.level || 'adaptive') as AnthropicThinkingLevel;
+    const level = this.thinkingConfig.level as AnthropicThinkingLevel;
     if (level === 'adaptive') {
       return { type: 'adaptive' };
     }
@@ -885,13 +885,13 @@ export class AnthropicProvider implements ModelProvider {
         // Filter out thinking blocks with empty thinking text — the API rejects them
         // with "each thinking block must contain thinking". Also strip thinking blocks
         // when thinking is disabled to avoid invalid turn structure.
-        const thinkingEnabled = this.thinkingConfig?.enabled;
+        const thinkingActive = !!this.thinkingConfig;
         const filteredBlocks = msg.content_blocks.filter((block: any) => {
           if (block.type === 'thinking') {
-            return thinkingEnabled && block.thinking;
+            return thinkingActive && block.thinking;
           }
           if (block.type === 'redacted_thinking') {
-            return thinkingEnabled;
+            return thinkingActive;
           }
           return true;
         });

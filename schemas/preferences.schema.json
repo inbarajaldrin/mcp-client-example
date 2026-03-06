@@ -44,15 +44,10 @@
       "description": "Auto-approve all tools without prompting. Persists across sessions.",
       "default": false
     },
-    "thinkingEnabled": {
-      "type": "boolean",
-      "description": "Enable thinking/reasoning mode for supported models. When enabled, models produce visible chain-of-thought before responding.",
-      "default": false
-    },
-    "thinkingLevel": {
-      "type": "string",
-      "description": "Thinking level. Anthropic: adaptive|small|medium|large. OpenAI: none|low|medium|high. Google: minimal|dynamic|generous. xAI: low|high. Ollama: on.",
-      "enum": ["adaptive", "small", "medium", "large", "none", "low", "high", "minimal", "dynamic", "generous", "on"]
+    "thinkingLevels": {
+      "type": "object",
+      "description": "Per-provider thinking levels. Keys are provider names (openai, google, anthropic, xai, ollama), values are level strings valid for that provider.",
+      "additionalProperties": { "type": "string" }
     }
   }
 }

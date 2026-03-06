@@ -168,7 +168,7 @@ export class OpenAIProvider implements ModelProvider {
     });
   }
 
-  setThinkingConfig(config: ThinkingConfig): void {
+  setThinkingConfig(config: ThinkingConfig | null): void {
     this.thinkingConfig = config;
   }
 
@@ -179,13 +179,15 @@ export class OpenAIProvider implements ModelProvider {
    * The reasoning_content field streams automatically when reasoning_effort is set.
    */
   private resolveReasoningParams(): Record<string, any> | undefined {
-    if (!this.thinkingConfig?.enabled) {
+    if (!this.thinkingConfig) {
       return { reasoning_effort: 'none' }; // No reasoning when thinking is off
     }
-    const level = this.thinkingConfig.level || 'medium';
-    const validLevels = ['none', 'low', 'medium', 'high'];
-    const effort = validLevels.includes(level) ? level : 'medium';
-    return { reasoning_effort: effort };
+    const level = this.thinkingConfig.level;
+    const validLevels = ['low', 'medium', 'high'];
+    if (!validLevels.includes(level)) {
+      return { reasoning_effort: 'medium' };
+    }
+    return { reasoning_effort: level };
   }
 
   getProviderName(): string {
@@ -323,6 +325,7 @@ export class OpenAIProvider implements ModelProvider {
       prompt_tokens: number;
       completion_tokens: number;
       prompt_tokens_details?: { cached_tokens?: number };
+      completion_tokens_details?: { reasoning_tokens?: number };
     } | null = null;
 
     for await (const chunk of stream) {
@@ -332,6 +335,7 @@ export class OpenAIProvider implements ModelProvider {
           prompt_tokens: chunk.usage.prompt_tokens || 0,
           completion_tokens: chunk.usage.completion_tokens || 0,
           prompt_tokens_details: (chunk.usage as any).prompt_tokens_details || undefined,
+          completion_tokens_details: (chunk.usage as any).completion_tokens_details || undefined,
         };
       }
 
@@ -347,13 +351,10 @@ export class OpenAIProvider implements ModelProvider {
 
       const delta = choice.delta;
 
-      // Reasoning/thinking content (e.g. from gpt-5 family)
-      if ((delta as any).reasoning_content) {
-        yield {
-          type: 'content_block_delta',
-          delta: { type: 'thinking_delta', thinking: (delta as any).reasoning_content },
-        } as MessageStreamEvent;
-      }
+      // TODO: OpenAI Chat Completions API does not expose reasoning text in streaming deltas.
+      // To display reasoning, switch reasoning models to the Responses API (openai.responses.create())
+      // which streams reasoning via 'response.reasoning_summary_text.delta' events.
+      // See: https://platform.openai.com/docs/guides/reasoning
 
       if (delta.content) {
         yield {
@@ -445,6 +446,7 @@ export class OpenAIProvider implements ModelProvider {
           cache_creation_input_tokens: 0,
           cache_read_input_tokens: cachedTokens,
         },
+        reasoning_tokens: finalUsage.completion_tokens_details?.reasoning_tokens || 0,
       } as MessageStreamEvent;
     }
   }
@@ -524,11 +526,11 @@ export class OpenAIProvider implements ModelProvider {
       const toolCallTracker = new Map<number, { name?: string; id?: string; arguments: string }>();
       let messageStarted = false;
       let assistantContent = '';
-      let thinkingContent = '';
       let finalUsage: {
         prompt_tokens: number;
         completion_tokens: number;
         prompt_tokens_details?: { cached_tokens?: number };
+        completion_tokens_details?: { reasoning_tokens?: number };
       } | null = null;
 
       // Stream events to user while collecting response
@@ -539,6 +541,7 @@ export class OpenAIProvider implements ModelProvider {
             prompt_tokens: chunk.usage.prompt_tokens || 0,
             completion_tokens: chunk.usage.completion_tokens || 0,
             prompt_tokens_details: (chunk.usage as any).prompt_tokens_details || undefined,
+            completion_tokens_details: (chunk.usage as any).completion_tokens_details || undefined,
           };
         }
 
@@ -552,14 +555,10 @@ export class OpenAIProvider implements ModelProvider {
 
         const delta = choice.delta;
 
-        // Reasoning/thinking content (e.g. from gpt-5 family)
-        if ((delta as any).reasoning_content) {
-          thinkingContent += (delta as any).reasoning_content;
-          yield {
-            type: 'content_block_delta',
-            delta: { type: 'thinking_delta', thinking: (delta as any).reasoning_content },
-          } as MessageStreamEvent;
-        }
+        // TODO: OpenAI Chat Completions API does not expose reasoning text in streaming deltas.
+        // To display reasoning, switch reasoning models to the Responses API (openai.responses.create())
+        // which streams reasoning via 'response.reasoning_summary_text.delta' events.
+        // See: https://platform.openai.com/docs/guides/reasoning
 
         // Text content - stream to user
         if (delta.content) {
@@ -655,7 +654,6 @@ export class OpenAIProvider implements ModelProvider {
       conversationMessages.push({
         role: 'assistant',
         content: assistantMessage.content || '',
-        ...(thinkingContent && { thinking: thinkingContent }),
         tool_calls: assistantMessage.tool_calls
           ? assistantMessage.tool_calls.map((tc) => {
               // Handle both function and custom tool call types
@@ -704,6 +702,7 @@ export class OpenAIProvider implements ModelProvider {
             cache_creation_input_tokens: 0, // OpenAI doesn't track cache creation separately
             cache_read_input_tokens: cachedTokens,
           },
+          reasoning_tokens: (usageToYield as any).completion_tokens_details?.reasoning_tokens || 0,
         } as MessageStreamEvent;
       }
 

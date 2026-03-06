@@ -94,8 +94,6 @@ export class MCPClientCLI {
     // Share the MCPClient's preferences manager so /set-thinking changes
     // are visible in processQuery (avoids stale in-memory copies)
     this.preferencesManager = this.client.getPreferencesManager();
-    // Always start with thinking off — user must explicitly /set-thinking on each session
-    this.preferencesManager.setThinkingEnabled(false);
     this.hilManager = new HumanInTheLoopManager(this.logger, {
       approveAll: this.preferencesManager.getApproveAll(),
       hilEnabled: this.preferencesManager.getHILEnabled(),
@@ -752,11 +750,10 @@ export class MCPClientCLI {
     const timeoutDisplay = `${timeout} seconds`;
     const maxIterationsDisplay = maxIterations === -1 ? 'unlimited' : maxIterations.toString();
 
-    const thinkingEnabled = this.preferencesManager.getThinkingEnabled();
-    const thinkingLevel = this.preferencesManager.getThinkingLevel();
-    const thinkingDisplay = thinkingEnabled
-      ? `on${thinkingLevel ? ` (level: ${thinkingLevel})` : ''}`
-      : 'off';
+    const currentProviderName = this.client.getProviderName();
+    const thinkingLevel = this.preferencesManager.getThinkingLevel(currentProviderName)
+      || getDefaultThinkingLevel(currentProviderName);
+    const thinkingDisplay = thinkingLevel || 'n/a';
 
     this.logger.log('\n⚙️  Client Settings:\n', { type: 'info' });
     this.logger.log(
@@ -771,7 +768,7 @@ export class MCPClientCLI {
       `  /set-timeout <seconds> - Change MCP tool timeout (1-3600)\n` +
       `  /set-max-iterations <number> - Change max iterations (1-10000)\n` +
       `  /set-ipc-limit <number> - Change max IPC calls per session (1-10000)\n` +
-      `  /set-thinking on|off - Enable/disable thinking/reasoning mode\n`,
+      `  /set-thinking - Change thinking/reasoning level\n`,
       { type: 'info' },
     );
   }
@@ -793,7 +790,7 @@ export class MCPClientCLI {
       `  /set-timeout <seconds> - Set MCP tool timeout (1-3600)\n` +
       `  /set-max-iterations <number> - Set max iterations between agent calls (1-10000)\n` +
       `  /set-ipc-limit <number> - Set max IPC calls per session (1-10000)\n` +
-      `  /set-thinking on|off - Enable/disable thinking/reasoning mode\n` +
+      `  /set-thinking - Change thinking/reasoning level\n` +
       `  /switch-model [provider] [model] - Switch provider/model mid-session (preserves context)\n` +
       `  /hil - Toggle human-in-the-loop tool approval\n` +
       `\n` +
@@ -1167,84 +1164,61 @@ export class MCPClientCLI {
 
     if (baseCommand === '/set-thinking') {
       try {
-        const parts = query.split(' ');
-        if (parts.length < 2) {
-          const currentStatus = this.preferencesManager.getThinkingEnabled() ? 'on' : 'off';
-          const currentLevel = this.preferencesManager.getThinkingLevel();
+        const providerName = this.client.getProviderName();
+        const model = this.client.getModel();
+        const modelSupports = isReasoningModel(model, providerName);
+
+        if (!modelSupports) {
           this.logger.log(
-            `\nThinking mode: ${currentStatus}${currentLevel ? ` (level: ${currentLevel})` : ''}\n` +
-            `Usage: /set-thinking on|off\n`,
-            { type: 'info' },
+            `\nModel ${model} does not support thinking/reasoning\n`,
+            { type: 'warning' },
           );
           return true;
         }
-        const value = parts[1].toLowerCase().trim();
-        if (value === 'off') {
-          this.preferencesManager.setThinkingEnabled(false);
-          this.client.getChatHistoryManager().updateThinkingConfig({ enabled: false });
-          this.logger.log('\nThinking/reasoning mode disabled\n', { type: 'success' });
-        } else if (value === 'on') {
-          const providerName = this.client.getProviderName();
-          const model = this.client.getModel();
-          const modelSupports = isReasoningModel(model, providerName);
 
-          if (!modelSupports) {
-            this.logger.log(
-              `\nModel ${model} does not support thinking/reasoning mode\n`,
-              { type: 'warning' },
-            );
-            return true;
-          }
+        const levels = getThinkingLevelsForProvider(providerName);
+        if (levels.length === 0) {
+          this.logger.log('\nNo thinking levels available for this provider.\n', { type: 'warning' });
+          return true;
+        }
 
-          // Get available levels for this provider
-          const levels = getThinkingLevelsForProvider(providerName);
+        const currentLevel = this.preferencesManager.getThinkingLevel(providerName)
+          || getDefaultThinkingLevel(providerName);
 
-          if (levels.length <= 1) {
-            // Ollama or providers with no level choices — just turn on
-            this.preferencesManager.setThinkingEnabled(true);
-            this.preferencesManager.setThinkingLevel(levels[0]?.value);
-            this.client.getChatHistoryManager().updateThinkingConfig({ enabled: true, level: levels[0]?.value, provider: providerName });
-            this.logger.log('\nThinking/reasoning mode enabled\n', { type: 'success' });
-          } else {
-            // Prompt user for level selection
-            this.logger.log(`\nSelect thinking level for ${providerName}:\n`, { type: 'info' });
-            for (let i = 0; i < levels.length; i++) {
-              this.logger.log(`  ${i + 1}. ${levels[i].label}\n`, { type: 'info' });
-            }
+        if (levels.length === 1) {
+          this.logger.log(`\nThinking: ${levels[0].value} (${providerName})\n`, { type: 'info' });
+          return true;
+        }
 
-            const defaultLevel = getDefaultThinkingLevel(providerName);
-            const answer = (await this.rl!.question('\nEnter selection (number, or Enter for default): ')).trim();
+        this.logger.log(`\nCurrent thinking: ${currentLevel} (${providerName})\n`, { type: 'info' });
+        this.logger.log(`Select thinking level:\n`, { type: 'info' });
+        for (let i = 0; i < levels.length; i++) {
+          const marker = levels[i].value === currentLevel ? ' [current]' : '';
+          this.logger.log(`  ${i + 1}. ${levels[i].label}${marker}\n`, { type: 'info' });
+        }
 
-            if (answer === '' && defaultLevel) {
-              // Empty input — apply provider default
-              this.preferencesManager.setThinkingEnabled(true);
-              this.preferencesManager.setThinkingLevel(defaultLevel);
-              this.client.getChatHistoryManager().updateThinkingConfig({ enabled: true, level: defaultLevel, provider: providerName });
-              this.logger.log(
-                `\nThinking/reasoning mode enabled (level: ${defaultLevel})\n`,
-                { type: 'success' },
-              );
-            } else {
-              const selection = parseInt(answer, 10);
-              if (selection >= 1 && selection <= levels.length) {
-                const selectedLevel = levels[selection - 1];
-                this.preferencesManager.setThinkingEnabled(true);
-                this.preferencesManager.setThinkingLevel(selectedLevel.value);
-                this.client.getChatHistoryManager().updateThinkingConfig({ enabled: true, level: selectedLevel.value, provider: providerName });
-                this.logger.log(
-                  `\nThinking/reasoning mode enabled (level: ${selectedLevel.value})\n`,
-                  { type: 'success' },
-                );
-              } else {
-                this.logger.log('\nInvalid selection. Thinking mode not changed.\n', { type: 'error' });
-              }
-            }
-          }
+        const answer = (await this.rl!.question('\nChoice (Enter to keep current): ')).trim();
+
+        if (answer === '') {
+          this.logger.log(`\nThinking level unchanged: ${currentLevel}\n`, { type: 'info' });
         } else {
-          this.logger.log('\nUsage: /set-thinking on|off\n', { type: 'error' });
+          const selection = parseInt(answer, 10);
+          if (selection >= 1 && selection <= levels.length) {
+            const selectedLevel = levels[selection - 1];
+            this.preferencesManager.setThinkingLevel(providerName, selectedLevel.value);
+            this.client.getChatHistoryManager().updateThinkingConfig({
+              enabled: true, level: selectedLevel.value, provider: providerName,
+            });
+            this.logger.log(
+              `\nThinking level set to: ${selectedLevel.value}\n`,
+              { type: 'success' },
+            );
+          } else {
+            this.logger.log('\nInvalid selection. Level unchanged.\n', { type: 'error' });
+          }
         }
       } catch (error) {
-        this.logger.log(`\nFailed to set thinking mode: ${error}\n`, { type: 'error' });
+        this.logger.log(`\nFailed to set thinking level: ${error}\n`, { type: 'error' });
       }
       return true;
     }

@@ -55,7 +55,7 @@ export type WebStreamEvent =
 
 export type StreamObserver = (event: WebStreamEvent) => void;
 import { AnthropicProvider, type ToolExecutor } from './providers/anthropic.js';
-import { isReasoningModel, getDefaultThinkingLevel } from './utils/model-capabilities.js';
+import { isReasoningModel, getDefaultThinkingLevel, isValidThinkingLevel } from './utils/model-capabilities.js';
 import { initModelsDevCache, startModelsDevRefresh } from './utils/models-dev.js';
 import { OrchestratorIPCServer } from './ipc-server.js';
 import { ElicitationHandler } from './handlers/elicitation-handler.js';
@@ -493,13 +493,10 @@ export class MCPClient {
     // Show thinking default for reasoning models
     const providerName = this.modelProvider.getProviderName();
     if (isReasoningModel(this.model, providerName)) {
-      const thinkingEnabled = this.preferencesManager.getThinkingEnabled();
-      const thinkingLevel = this.preferencesManager.getThinkingLevel();
-      const defaultLevel = getDefaultThinkingLevel(providerName);
-      if (thinkingEnabled && thinkingLevel) {
-        this.logger.log(`Thinking: ${thinkingLevel}\n`, { type: 'info' });
-      } else if (defaultLevel) {
-        this.logger.log(`Thinking: ${defaultLevel} (default)\n`, { type: 'info' });
+      const level = this.preferencesManager.getThinkingLevel(providerName)
+        || getDefaultThinkingLevel(providerName);
+      if (level) {
+        this.logger.log(`Thinking: ${level}\n`, { type: 'info' });
       }
     }
   }
@@ -1535,9 +1532,10 @@ export class MCPClient {
     // Show thinking status for the new model
     const switchProviderName = provider.getProviderName();
     if (isReasoningModel(model, switchProviderName)) {
-      const defaultLevel = getDefaultThinkingLevel(switchProviderName);
-      if (defaultLevel) {
-        this.logger.log(`Thinking: ${defaultLevel} (default)\n`, { type: 'info' });
+      const level = this.preferencesManager.getThinkingLevel(switchProviderName)
+        || getDefaultThinkingLevel(switchProviderName);
+      if (level) {
+        this.logger.log(`Thinking: ${level}\n`, { type: 'info' });
       }
     }
   }
@@ -1577,13 +1575,10 @@ export class MCPClient {
     // Show thinking status for the new model
     const newProviderName = provider.getProviderName();
     if (isReasoningModel(model, newProviderName)) {
-      const thinkingEnabled = this.preferencesManager.getThinkingEnabled();
-      const thinkingLevel = this.preferencesManager.getThinkingLevel();
-      const defaultLevel = getDefaultThinkingLevel(newProviderName);
-      if (thinkingEnabled && thinkingLevel) {
-        this.logger.log(`Thinking: ${thinkingLevel}\n`, { type: 'info' });
-      } else if (defaultLevel) {
-        this.logger.log(`Thinking: ${defaultLevel} (default)\n`, { type: 'info' });
+      const level = this.preferencesManager.getThinkingLevel(newProviderName)
+        || getDefaultThinkingLevel(newProviderName);
+      if (level) {
+        this.logger.log(`Thinking: ${level}\n`, { type: 'info' });
       }
     }
   }
@@ -2441,6 +2436,7 @@ export class MCPClient {
       regularInputTokens?: number;
       cacheCreationTokens?: number;
       cacheReadTokens?: number;
+      reasoningTokens?: number;
       // Ollama-specific metrics
       ollamaMetrics?: {
         totalDuration?: number;
@@ -2718,6 +2714,15 @@ export class MCPClient {
           lastTokenUsage.regularInputTokens = chunk.input_tokens;
           lastTokenUsage.cacheCreationTokens = 0;
           lastTokenUsage.cacheReadTokens = 0;
+        }
+
+        // Extract OpenAI reasoning token count if available
+        if ((chunk as any).reasoning_tokens) {
+          lastTokenUsage.reasoningTokens = (chunk as any).reasoning_tokens;
+          // Display reasoning token count immediately (token_usage arrives after message_stop)
+          if (lastTokenUsage.reasoningTokens! > 0) {
+            this.logger.log(chalk.dim(`  [reasoning: ${lastTokenUsage.reasoningTokens!.toLocaleString()} tokens]`));
+          }
         }
 
         // Extract Ollama-specific metrics if available
@@ -3044,6 +3049,10 @@ export class MCPClient {
             lastTokenUsage.cacheCreationTokens,
             lastTokenUsage.cacheReadTokens
           );
+          // Display reasoning token count when OpenAI used reasoning
+          if (lastTokenUsage.reasoningTokens && lastTokenUsage.reasoningTokens > 0) {
+            this.logger.log(chalk.dim(`  [reasoning: ${lastTokenUsage.reasoningTokens.toLocaleString()} tokens]`));
+          }
           lastTokenUsage = null; // Reset after logging
           tokenCountBeforeCallback = this.currentTokenCount; // Update for next callback
         } else if (this.modelProvider.getProviderName() === 'anthropic' && lastTokenUsage) {
@@ -3238,14 +3247,14 @@ export class MCPClient {
 
       // Set thinking config on provider before streaming
       if (this.modelProvider.setThinkingConfig) {
-        const thinkingEnabled = this.preferencesManager.getThinkingEnabled();
-        const modelSupportsThinking = isReasoningModel(this.model, this.modelProvider.getProviderName());
-        const thinkingLevel = this.preferencesManager.getThinkingLevel();
-        this.modelProvider.setThinkingConfig({
-          enabled: thinkingEnabled && modelSupportsThinking,
-          model: this.model,
-          level: thinkingLevel,
-        });
+        const providerName = this.modelProvider.getProviderName();
+        if (isReasoningModel(this.model, providerName)) {
+          const level = this.preferencesManager.getThinkingLevel(providerName)
+            || getDefaultThinkingLevel(providerName);
+          this.modelProvider.setThinkingConfig(level ? { model: this.model, level } : null);
+        } else {
+          this.modelProvider.setThinkingConfig(null);
+        }
       }
 
       // Helper: create stream and process it
@@ -3253,8 +3262,11 @@ export class MCPClient {
         // Ensure max_tokens exceeds thinking budget (Anthropic requires budget_tokens < max_tokens)
         let maxTokens = 8192;
         const providerName = this.modelProvider.getProviderName();
-        if (providerName === 'anthropic' && this.preferencesManager.getThinkingEnabled()) {
-          const level = this.preferencesManager.getThinkingLevel() as string;
+        const thinkingLevel = isReasoningModel(this.model, providerName)
+          ? (this.preferencesManager.getThinkingLevel(providerName) || getDefaultThinkingLevel(providerName))
+          : undefined;
+        if (providerName === 'anthropic' && thinkingLevel) {
+          const level = thinkingLevel;
           if (level === 'adaptive' || !level) {
             // Adaptive: model manages its own budget within max_tokens; give it room
             maxTokens = Math.max(maxTokens, 16384);
@@ -3298,16 +3310,16 @@ export class MCPClient {
       try {
         streamResult = await createAndProcessStream();
       } catch (thinkingErr: any) {
-        if (isThinkingError(thinkingErr) && this.preferencesManager.getThinkingEnabled()) {
+        const errorProviderName = this.modelProvider.getProviderName();
+        if (isThinkingError(thinkingErr) && isReasoningModel(this.model, errorProviderName)) {
           // Auto-disable thinking and retry
-          this.preferencesManager.setThinkingEnabled(false);
           this.logger.log(
             '\n⚠️  Thinking mode disabled — model rejected thinking parameters. Retrying...\n',
             { type: 'warning' },
           );
           observer?.({ type: 'warning', message: 'Thinking mode disabled — model rejected thinking parameters. Retrying...' });
           if (this.modelProvider.setThinkingConfig) {
-            this.modelProvider.setThinkingConfig({ enabled: false, model: this.model, level: undefined });
+            this.modelProvider.setThinkingConfig(null);
           }
           // Strip thinking blocks from conversation history so the retry doesn't send
           // empty/invalid thinking blocks back to the API

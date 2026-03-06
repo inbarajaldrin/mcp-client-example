@@ -71,11 +71,8 @@ export interface TokenCounter {
 
 // Thinking/reasoning configuration passed to providers
 export interface ThinkingConfig {
-  enabled: boolean;
   model: string;
-  level?: string; // Thinking level: 'adaptive'|'small'|'medium'|'large' for Anthropic,
-                  // 'none'|'low'|'medium'|'high' for OpenAI, 'low'|'high' for xAI,
-                  // 'minimal'|'dynamic'|'generous' for Google, 'on' for Ollama
+  level: string;
 }
 
 // Thinking content block from model responses (Anthropic extended thinking)
@@ -147,7 +144,7 @@ export interface ModelProvider {
   supportsSystemRole(): boolean;
 
   // Set thinking/reasoning configuration for subsequent API calls
-  setThinkingConfig?(config: ThinkingConfig): void;
+  setThinkingConfig?(config: ThinkingConfig | null): void;
 
   // Unload a model from memory (e.g., Ollama keep_alive: 0)
   unloadModel?(model: string): Promise<void>;

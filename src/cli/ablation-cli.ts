@@ -2747,8 +2747,7 @@ export class AblationCLI {
     // Save original provider/model, thinking, limits, and chat state to restore after all ablations
     const originalProviderName = this.client.getProviderName();
     const originalModel = this.client.getModel();
-    const originalThinkingEnabled = this.preferencesManager.getThinkingEnabled();
-    const originalThinkingLevel = this.preferencesManager.getThinkingLevel();
+    const originalThinkingLevels = { ...this.preferencesManager.getThinkingLevels() };
     const originalMaxIterations = this.preferencesManager.getMaxIterations();
     const originalMcpTimeout = this.preferencesManager.getMCPTimeout();
     const originalMaxIpcCalls = this.preferencesManager.getMaxIpcCalls();
@@ -2830,8 +2829,9 @@ export class AblationCLI {
     }
 
     // Restore thinking state
-    this.preferencesManager.setThinkingEnabled(originalThinkingEnabled);
-    this.preferencesManager.setThinkingLevel(originalThinkingLevel);
+    for (const [provider, level] of Object.entries(originalThinkingLevels)) {
+      this.preferencesManager.setThinkingLevel(provider, level as string);
+    }
 
     // Restore limit settings
     this.preferencesManager.setMaxIterations(originalMaxIterations);
@@ -3438,23 +3438,18 @@ export class AblationCLI {
           // If omitted but model supports reasoning, apply provider default.
           // If explicitly set to 'off', disable thinking.
           if (model.thinking === 'off') {
-            this.preferencesManager.setThinkingEnabled(false);
-            this.preferencesManager.setThinkingLevel(undefined);
+            // Do nothing — provider will get null thinkingConfig from index.ts
           } else if (model.thinking) {
-            this.preferencesManager.setThinkingEnabled(true);
-            this.preferencesManager.setThinkingLevel(model.thinking);
+            this.preferencesManager.setThinkingLevel(model.provider, model.thinking);
           } else {
             // No thinking field — apply provider default if model supports reasoning
             const defaultLevel = isReasoningModel(model.model, model.provider)
               ? getDefaultThinkingLevel(model.provider)
               : undefined;
             if (defaultLevel) {
-              this.preferencesManager.setThinkingEnabled(true);
-              this.preferencesManager.setThinkingLevel(defaultLevel);
-            } else {
-              this.preferencesManager.setThinkingEnabled(false);
-              this.preferencesManager.setThinkingLevel(undefined);
+              this.preferencesManager.setThinkingLevel(model.provider, defaultLevel);
             }
+            // Non-reasoning model without thinking field — do nothing
           }
         }
 
