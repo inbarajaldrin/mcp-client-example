@@ -199,6 +199,11 @@ export class MCPClientCLI {
         getHILManager: () => this.hilManager,
         routeSlashCommand: (cmd: string) => this.routeSlashCommand(cmd),
         getChatHistoryCLI: () => this.chatHistoryCLI,
+        restoreIterationLimitCallback: () => {
+          this.client.setOnIterationLimitCallback(async (iterations, maxIterations) => {
+            return this.askIterationLimitExtension(iterations, maxIterations);
+          });
+        },
       },
     );
 

@@ -1634,7 +1634,7 @@ export class MCPClient {
    * CLI mode: prompts user to extend or stop. Returns new maxIterations or null.
    * If not set, providers hard-stop at the limit (ablation behavior).
    */
-  setOnIterationLimitCallback(callback: (iterations: number, maxIterations: number) => Promise<number | null>): void {
+  setOnIterationLimitCallback(callback: ((iterations: number, maxIterations: number) => Promise<number | null>) | undefined): void {
     this.onIterationLimitCallback = callback;
   }
 

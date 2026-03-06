@@ -114,6 +114,8 @@ export interface AblationCLICallbacks {
   routeSlashCommand: (command: string) => Promise<boolean>;
   /** Get ChatHistoryCLI instance for restoring chat from ablation runs */
   getChatHistoryCLI: () => import('./chat-history-cli.js').ChatHistoryCLI;
+  /** Restore the CLI's iteration-limit callback on the MCPClient (cleared during ablation) */
+  restoreIterationLimitCallback: () => void;
 }
 
 /**
@@ -3362,6 +3364,8 @@ export class AblationCLI {
     if (ipcServer) {
       ipcServer.setOnIpcLimitReached(undefined);
     }
+    // Disable pause-and-ask for iteration limits during ablation — hard stop only
+    this.client.setOnIterationLimitCallback(undefined);
 
     try {
     // Determine models to iterate over
@@ -4171,6 +4175,9 @@ export class AblationCLI {
 
       // Restore original abort callback (keyboard monitor only, for normal CLI mode)
       this.client.setAbortRequestedCallback(() => this.callbacks.isInterruptRequested());
+
+      // Restore CLI's iteration-limit callback (pause-and-ask behavior)
+      this.callbacks.restoreIterationLimitCallback();
     }
 
     // Clean up system prompt so it doesn't leak into regular chat
