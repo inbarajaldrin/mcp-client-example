@@ -1676,6 +1676,7 @@ export class AblationCLI {
     dryRun: boolean = false,
     ablation?: AblationDefinition,
     phaseName?: string,
+    iterationDir?: string,
   ): Promise<AblationCommandResult> {
     const trimmedCommand = command.trim();
 
@@ -1912,6 +1913,26 @@ export class AblationCLI {
         }
       }
 
+      // Record the injection to the iteration-level resources.yaml
+      if (iterationDir && phaseName) {
+        const contentParts: string[] = [];
+        for (const content of result.contents) {
+          if ('text' in content && content.text) {
+            contentParts.push(content.text);
+          } else if ('blob' in content && content.blob) {
+            contentParts.push(`[Binary data, ${(content as any).blob.length} bytes base64]`);
+          }
+        }
+        this.ablationManager.appendResourceInjection(
+          iterationDir,
+          phaseName,
+          nameArg,
+          resolved.uri,
+          contentParts.join('\n'),
+          resourceArgs,
+        );
+      }
+
       this.logger.log(`  ✓ Injected resource "${nameArg}" (${result.contents.length} content block(s)) into context\n`, { type: 'success' });
       return {};
     }
@@ -2123,7 +2144,7 @@ export class AblationCLI {
         }
 
         // Consume pending directives from hooks (attachment/prompt injections)
-        const pendingResult = await this.consumePendingHookDirectives(hookMgr, maxIterations, ablation, phaseName);
+        const pendingResult = await this.consumePendingHookDirectives(hookMgr, maxIterations, ablation, phaseName, iterationDir);
         if (pendingResult) return pendingResult;
 
         // Agent stopped responding without @complete-phase or @abort.
@@ -2319,7 +2340,7 @@ export class AblationCLI {
       }
 
       // Consume pending directives from hooks (attachment/prompt injections)
-      const pendingResult = await this.consumePendingHookDirectives(hookManager, maxIterations, ablation, phaseName);
+      const pendingResult = await this.consumePendingHookDirectives(hookManager, maxIterations, ablation, phaseName, iterationDir);
       if (pendingResult) return pendingResult;
 
       // Agent stopped responding without @complete-phase or @abort.
@@ -2360,6 +2381,7 @@ export class AblationCLI {
     maxIterations: number,
     ablation?: AblationDefinition,
     phaseName?: string,
+    iterationDir?: string,
   ): Promise<AblationCommandResult | null> {
     if (!hookMgr.hasPendingDirectives()) return null;
 
@@ -2376,7 +2398,7 @@ export class AblationCLI {
       hookMgr.resetPendingAttachmentInsertions();
       for (const cmd of pendingAttachments) {
         this.logger.log(`    Hook: executing ${cmd}\n`, { type: 'info' });
-        await this.executeAblationCommand(cmd, maxIterations, false, ablation, phaseName);
+        await this.executeAblationCommand(cmd, maxIterations, false, ablation, phaseName, iterationDir);
       }
     }
 
@@ -2393,7 +2415,7 @@ export class AblationCLI {
     if (pendingPrompt) {
       hookMgr.resetPendingPromptInsertion();
       this.logger.log(`    Hook: executing ${pendingPrompt}\n`, { type: 'info' });
-      return await this.executeAblationCommand(pendingPrompt, maxIterations, false, ablation, phaseName);
+      return await this.executeAblationCommand(pendingPrompt, maxIterations, false, ablation, phaseName, iterationDir);
     }
 
     return null;
@@ -3277,113 +3299,6 @@ export class AblationCLI {
     // Save a frozen copy of the ablation definition for provenance
     this.ablationManager.saveDefinitionSnapshot(runDir, ablation);
 
-    // Save a snapshot of all available tools and their descriptions (constant for the whole ablation)
-    this.ablationManager.saveToolsSnapshot(runDir, this.client.getServersInfo());
-
-    // Save a snapshot of all available prompts with resolved content for referenced ones
-    const promptRefSources = [
-      ablation.systemPrompt,
-      ...ablation.phases.flatMap(p => [
-        p.systemPrompt,
-        p.userPrompt,
-        ...p.commands,
-        ...(p.onStart ?? []),
-        ...(p.onEnd ?? []),
-      ]),
-    ].filter((s): s is string => typeof s === 'string');
-
-    const usesPrompts = promptRefSources.some(s => s.trim().startsWith('@insert-prompt:'));
-    if (usesPrompts) {
-      const allPrompts = this.client.listPrompts().map(p => ({
-        server: p.server,
-        prompt: {
-          name: p.prompt.name,
-          description: p.prompt.description,
-          arguments: p.prompt.arguments,
-        },
-      }));
-
-      // Resolve each unique @insert-prompt: reference used in this ablation
-      const resolvedContent: Record<string, string> = {};
-      const seen = new Set<string>();
-      for (const src of promptRefSources) {
-        const trimmed = src.trim();
-        if (!trimmed.startsWith('@insert-prompt:')) continue;
-        const nameArg = trimmed.slice('@insert-prompt:'.length).split(/[\s(]/)[0].trim();
-        if (seen.has(nameArg)) continue;
-        seen.add(nameArg);
-        try {
-          const resolved = await this.resolvePromptReference(trimmed, resolvedArguments);
-          resolvedContent[nameArg] = resolved;
-        } catch {
-          // Skip prompts that fail to resolve (missing args, server down, etc.)
-        }
-      }
-
-      this.ablationManager.savePromptsSnapshot(runDir, allPrompts, resolvedContent);
-    }
-
-    // Save a snapshot of all available resources and resource templates with resolved content
-    const allResources = this.client.listResources();
-    const allResourceTemplates = this.client.listResourceTemplates();
-    if (allResources.length > 0 || allResourceTemplates.length > 0) {
-      // Resolve each unique @insert-resource: reference used in this ablation
-      const resolvedResourceContent: Record<string, string> = {};
-      const resourceRefSources = [
-        ablation.systemPrompt,
-        ...ablation.phases.flatMap(p => [
-          p.systemPrompt,
-          p.userPrompt,
-          ...p.commands,
-          ...(p.onStart ?? []),
-          ...(p.onEnd ?? []),
-        ]),
-      ].filter((s): s is string => typeof s === 'string');
-
-      const seenResources = new Set<string>();
-      for (const src of resourceRefSources) {
-        // Substitute argument placeholders first
-        let resolved = src;
-        if (resolvedArguments) {
-          resolved = this.ablationManager.substituteArguments([resolved], resolvedArguments)[0];
-        }
-        const trimmed = resolved.trim();
-        if (!trimmed.startsWith('@insert-resource:')) continue;
-        const nameArg = trimmed.slice('@insert-resource:'.length).split(/[\s(]/)[0].trim();
-        if (seenResources.has(nameArg)) continue;
-        seenResources.add(nameArg);
-        try {
-          const resolvedText = await this.resolveResourceReference(trimmed);
-          resolvedResourceContent[nameArg] = resolvedText;
-        } catch {
-          // Skip resources that fail to resolve (missing args, server down, etc.)
-        }
-      }
-
-      this.ablationManager.saveResourcesSnapshot(
-        runDir,
-        allResources.map(r => ({
-          server: r.server,
-          resource: {
-            name: r.resource.name,
-            uri: r.resource.uri,
-            description: r.resource.description,
-            mimeType: r.resource.mimeType,
-          },
-        })),
-        allResourceTemplates.map(t => ({
-          server: t.server,
-          template: {
-            name: t.template.name,
-            uriTemplate: t.template.uriTemplate,
-            description: t.template.description,
-            mimeType: t.template.mimeType,
-          },
-        })),
-        resolvedResourceContent,
-      );
-    }
-
     // Copy attachments to run directory (same for all runs)
     // Pass resolved arguments so dynamically-named attachments are detected
     this.ablationManager.copyAttachmentsToRun(runDir, ablation, resolvedArguments);
@@ -3567,6 +3482,55 @@ export class AblationCLI {
           );
         }
 
+        // Save tools, prompts, and resources snapshots per iteration per model
+        const iterationDir = this.ablationManager.getIterationDir(runDir, model, getRunIter(iteration));
+        mkdirSync(iterationDir, { recursive: true });
+
+        // Tools snapshot (constant across phases but saved per iteration for uniformity)
+        this.ablationManager.saveToolsSnapshot(iterationDir, this.client.getServersInfo());
+
+        // Prompts snapshot with resolved content for referenced ones
+        const promptRefSources = [
+          ablation.systemPrompt,
+          ...ablation.phases.flatMap(p => [
+            p.systemPrompt,
+            p.userPrompt,
+            ...p.commands,
+            ...(p.onStart ?? []),
+            ...(p.onEnd ?? []),
+          ]),
+        ].filter((s): s is string => typeof s === 'string');
+
+        const usesPrompts = promptRefSources.some(s => s.trim().startsWith('@insert-prompt:'));
+        if (usesPrompts) {
+          const allPrompts = this.client.listPrompts().map(p => ({
+            server: p.server,
+            prompt: {
+              name: p.prompt.name,
+              description: p.prompt.description,
+              arguments: p.prompt.arguments,
+            },
+          }));
+
+          const resolvedContent: Record<string, string> = {};
+          const seen = new Set<string>();
+          for (const src of promptRefSources) {
+            const trimmed = src.trim();
+            if (!trimmed.startsWith('@insert-prompt:')) continue;
+            const nameArg = trimmed.slice('@insert-prompt:'.length).split(/[\s(]/)[0].trim();
+            if (seen.has(nameArg)) continue;
+            seen.add(nameArg);
+            try {
+              const resolved = await this.resolvePromptReference(trimmed, resolvedArguments);
+              resolvedContent[nameArg] = resolved;
+            } catch {
+              // Skip prompts that fail to resolve
+            }
+          }
+
+          this.ablationManager.savePromptsSnapshot(iterationDir, allPrompts, resolvedContent);
+        }
+
         for (const phase of ablation.phases) {
           if (shouldBreak || modelAborted) break;
 
@@ -3728,6 +3692,7 @@ export class AblationCLI {
                   ablation.dryRun || false,
                   ablation,
                   phase.name,
+                  iterationDir,
                 );
 
                 // Log onStart tool execution to chat history
@@ -3767,6 +3732,7 @@ export class AblationCLI {
                   ablation.dryRun || false,
                   ablation,
                   phase.name,
+                  iterationDir,
                 );
                 stagedIndices.add(i);
               }
@@ -3832,6 +3798,7 @@ export class AblationCLI {
                         ablation.dryRun || false,
                         ablation,
                         phase.name,
+                        iterationDir,
                       );
 
                     }
@@ -3846,6 +3813,7 @@ export class AblationCLI {
                 ablation.dryRun || false,
                 ablation,
                 phase.name,
+                iterationDir,
               );
 
               // Track executed commands for rewind picker
@@ -3921,6 +3889,7 @@ export class AblationCLI {
                       ablation.dryRun || false,
                       ablation,
                       phase.name,
+                      iterationDir,
                     );
 
                     // Inject hookPrompt as client prompt after hook execution
@@ -3986,6 +3955,7 @@ export class AblationCLI {
                   ablation.dryRun || false,
                   ablation,
                   phase.name,
+                  iterationDir,
                 );
 
                 // Log onEnd tool execution to chat history

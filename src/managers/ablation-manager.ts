@@ -485,6 +485,18 @@ export class AblationManager {
   }
 
   /**
+   * Get the iteration directory for a model within a run.
+   * Structure: {runDir}/{modelDir}/(run-{N}/)
+   * This is the parent of phase directories and holds per-iteration snapshots.
+   */
+  getIterationDir(runDir: string, model: AblationModel, runIteration?: number): string {
+    const modelDir = this.getModelDirName(model);
+    return runIteration !== undefined
+      ? join(runDir, modelDir, `run-${runIteration}`)
+      : join(runDir, modelDir);
+  }
+
+  /**
    * Create phase directory within a run under the model's directory.
    * Structure: {runDir}/{modelDir}/(run-{N}/){phase}/
    */
@@ -597,6 +609,49 @@ export class AblationManager {
       writeFileSync(snapshotPath, yamlContent, 'utf-8');
     } catch (error) {
       this.logger.log(`Failed to save resources snapshot: ${error}\n`, { type: 'error' });
+    }
+  }
+
+  /**
+   * Append a resource injection record to the iteration-level resources.yaml.
+   * Called each time @insert-resource: fires during a phase, capturing the
+   * resolved content at that point in time.
+   */
+  appendResourceInjection(
+    iterationDir: string,
+    phaseName: string,
+    resourceKey: string,
+    uri: string,
+    content: string,
+    args?: Record<string, string>,
+  ): void {
+    try {
+      const snapshotPath = join(iterationDir, 'resources.yaml');
+      let data: { injections: Array<Record<string, unknown>> } = { injections: [] };
+
+      if (existsSync(snapshotPath)) {
+        const existing = yaml.parse(readFileSync(snapshotPath, 'utf-8'));
+        if (existing?.injections && Array.isArray(existing.injections)) {
+          data = existing;
+        }
+      }
+
+      const entry: Record<string, unknown> = {
+        resource: resourceKey,
+        uri,
+        phase: phaseName,
+        injected_at: new Date().toISOString(),
+        resolved_content: content,
+      };
+      if (args && Object.keys(args).length > 0) {
+        entry.args = args;
+      }
+
+      data.injections.push(entry);
+      mkdirSync(iterationDir, { recursive: true });
+      writeFileSync(snapshotPath, yaml.stringify(data), 'utf-8');
+    } catch (error) {
+      this.logger.log(`Failed to append resource injection: ${error}\n`, { type: 'error' });
     }
   }
 
