@@ -211,7 +211,8 @@ export class AblationCLI {
       return 'handled';
     }
 
-    // Regular text — send to the agent
+    // Regular text — log user message and send to the agent
+    this.client.getChatHistoryManager().addUserMessage(trimmed);
     await this.client.processQuery(trimmed, false, undefined, stopCondition);
     return 'handled';
   }

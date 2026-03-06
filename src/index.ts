@@ -3324,7 +3324,7 @@ export class MCPClient {
           throw thinkingErr; // Not a thinking error or thinking already off — rethrow
         }
       }
-      const { pendingToolResults, lastTokenUsage, deferredHookData } = streamResult;
+      let { pendingToolResults, lastTokenUsage, deferredHookData } = streamResult;
 
       // Flush any remaining pending tool results (in case we aborted before they were added)
       if (pendingToolResults && pendingToolResults.length > 0) {
@@ -3408,6 +3408,23 @@ export class MCPClient {
         }
       }
       
+      // Log token usage from the stream BEFORE checking cancellation.
+      // On abort, the early return below would skip the post-loop token logging,
+      // leaving tokenUsagePerCallback empty and preventing chat.json from being saved.
+      if (lastTokenUsage) {
+        const totalTokens = lastTokenUsage.inputTokens + lastTokenUsage.outputTokens;
+        this.chatHistoryManager.addTokenUsagePerCallback(
+          lastTokenUsage.inputTokens,
+          lastTokenUsage.outputTokens,
+          totalTokens,
+          lastTokenUsage.regularInputTokens,
+          lastTokenUsage.cacheCreationTokens,
+          lastTokenUsage.cacheReadTokens,
+          lastTokenUsage.ollamaMetrics
+        );
+        lastTokenUsage = null;
+      }
+
       // Check if query was cancelled - messages are kept visible even when aborted.
       // Don't early-return for pending tool injection — deferred hooks still need to fire.
       const hasPendingInjection = this.hookManager?.hasPendingInjection?.() || false;
