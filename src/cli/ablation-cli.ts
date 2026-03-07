@@ -2720,6 +2720,20 @@ export class AblationCLI {
       }
     }
 
+    // Pre-flight: validate tool filters against connected tools
+    for (const ablation of selectedAblations) {
+      if (ablation.tools || ablation.phases.some(p => p.tools)) {
+        const connectedToolNames = this.client.getTools().map(t => t.name);
+        const toolWarnings = this.ablationManager.validateToolFilters(ablation, connectedToolNames);
+        if (toolWarnings.length > 0) {
+          this.logger.log(`\n⚠ Tool filter issues in "${ablation.name}":\n`, { type: 'warning' });
+          for (const warning of toolWarnings) {
+            this.logger.log(`  ${warning}\n`, { type: 'warning' });
+          }
+        }
+      }
+    }
+
     const confirm = (await rl.question('\nStart ablation? (Y/n): '))
       .trim()
       .toLowerCase();
@@ -3540,9 +3554,20 @@ export class AblationCLI {
             continue;
           }
 
+          // Apply per-phase tool filter (merged top-level + phase-level)
+          const phaseToolFilter = this.ablationManager.getToolFilterForPhase(ablation, phase.name);
+          if (phaseToolFilter) {
+            this.client.applyAblationToolFilter(
+              tools => this.ablationManager.applyToolFilter(tools, phaseToolFilter),
+            );
+            const filteredCount = this.client.getTools().length;
+            this.logger.log(`  Tool filter active: ${filteredCount} tool(s) available for this phase\n`, { type: 'info' });
+          }
+
           // Check for abort (Ctrl+A or Ctrl+C)
           if (this.callbacks.isAbortRequested()) {
             this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+            this.client.restoreAblationToolFilter();
             shouldBreak = true;
             break;
           }
@@ -4104,6 +4129,9 @@ export class AblationCLI {
           }
 
           run.results.push(result);
+
+          // Restore tool list after phase filter
+          this.client.restoreAblationToolFilter();
 
           // Capture outputs produced during this phase (even on failure, for diagnostics)
           this.ablationManager.captureRunOutputs(runDir, phase.name, model, getRunIter(iteration));

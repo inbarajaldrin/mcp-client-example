@@ -1388,6 +1388,13 @@ export class MCPClient {
   }
 
   /**
+   * Get the current list of tools visible to the agent.
+   */
+  getTools(): Tool[] {
+    return this.tools;
+  }
+
+  /**
    * Get the set of server names that are disabled in config.
    * These servers are connected (for direct tool execution) but their tools
    * are not exposed to the agent.
@@ -3874,6 +3881,31 @@ export class MCPClient {
       allTools.push(...connection.tools);
     }
     this.tools = this.toolManager.filterTools(allTools);
+  }
+
+  /**
+   * Snapshot of this.tools before ablation tool filtering was applied.
+   * Used to restore the full enabled set after a phase completes.
+   */
+  private toolsBeforeAblationFilter: Tool[] | null = null;
+
+  /**
+   * Apply an ablation tool filter on top of the current enabled tools.
+   * Saves a snapshot so restoreAblationToolFilter() can undo it.
+   */
+  applyAblationToolFilter(filterFn: (tools: Tool[]) => Tool[]): void {
+    this.toolsBeforeAblationFilter = [...this.tools];
+    this.tools = filterFn(this.tools);
+  }
+
+  /**
+   * Restore tools to the pre-ablation-filter snapshot.
+   */
+  restoreAblationToolFilter(): void {
+    if (this.toolsBeforeAblationFilter) {
+      this.tools = this.toolsBeforeAblationFilter;
+      this.toolsBeforeAblationFilter = null;
+    }
   }
 
   /**

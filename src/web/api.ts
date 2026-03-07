@@ -1401,6 +1401,14 @@ export function createApiRouter(client: MCPClient): Router {
           for (const phase of ablation.phases) {
             if (shouldBreak || ablationCancelRequested || modelAborted) break;
 
+            // Apply per-phase tool filter (merged top-level + phase-level)
+            const phaseToolFilter = ablationManager.getToolFilterForPhase(ablation, phase.name);
+            if (phaseToolFilter) {
+              client.applyAblationToolFilter(
+                tools => ablationManager.applyToolFilter(tools, phaseToolFilter),
+              );
+            }
+
             // Conditional context clearing between phases (not for first phase)
             const isFirstPhase = phase === ablation.phases[0];
             if (!isFirstPhase && !ablation.dryRun) {
@@ -1493,6 +1501,9 @@ export function createApiRouter(client: MCPClient): Router {
             result.duration = Date.now() - startTime;
             result.durationFormatted = fmtDur(result.duration);
             results.push(result);
+
+            // Restore tool list after phase filter
+            client.restoreAblationToolFilter();
 
             send({ type: 'result', runNumber, totalRuns, ...result });
 

@@ -39,6 +39,10 @@
       "items": { "$ref": "#/$defs/AblationModel" }
     },
     "settings": { "$ref": "#/$defs/AblationSettings" },
+    "tools": {
+      "$ref": "#/$defs/AblationToolFilter",
+      "description": "Top-level tool filter — applies to all phases. Phase-level tools: blocks are merged (deny is additive, allow is intersected)."
+    },
     "hooks": {
       "type": "array",
       "description": "Global hooks that apply across all phases",
@@ -99,6 +103,10 @@
         "userPrompt": {
           "type": "string",
           "description": "User prompt injected as a user message at phase start, before commands run. Supports @insert-prompt:server__promptName(arg='val') and @insert-resource:server__templateName(param='val') syntax."
+        },
+        "tools": {
+          "$ref": "#/$defs/AblationToolFilter",
+          "description": "Per-phase tool filter. Merged with top-level: deny is additive (union), allow is intersected. Deny always wins over allow."
         }
       }
     },
@@ -170,6 +178,22 @@
         "prompt": {
           "type": "string",
           "description": "Client prompt injected after gate commands execute (as system role on supported providers)"
+        }
+      }
+    },
+    "AblationToolFilter": {
+      "type": "object",
+      "description": "Tool visibility filter. Allow = whitelist (only matching tools visible). Deny = blacklist (matching tools hidden). Deny always wins. Patterns support * glob (e.g. ros-mcp-server__* matches all tools from that server).",
+      "properties": {
+        "allow": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Glob patterns — only matching tools are visible to the agent. If absent, all globally-enabled tools are allowed."
+        },
+        "deny": {
+          "type": "array",
+          "items": { "type": "string" },
+          "description": "Glob patterns — matching tools are hidden from the agent regardless of allow."
         }
       }
     },

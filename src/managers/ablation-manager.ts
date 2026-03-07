@@ -50,6 +50,11 @@ export interface AblationArgument {
   default?: string;               // Fallback value for optional args
 }
 
+export interface AblationToolFilter {
+  allow?: string[];   // Glob patterns — only matching tools are visible (whitelist)
+  deny?: string[];    // Glob patterns — matching tools are hidden (deny wins over allow)
+}
+
 export interface AblationPhase {
   name: string;
   enabled?: boolean;        // Default true; set false to skip this phase
@@ -59,6 +64,7 @@ export interface AblationPhase {
   onEnd?: string[];         // Commands to run after phase commands
   systemPrompt?: string;    // Per-phase system prompt override (replaces master for this phase)
   userPrompt?: string;      // User prompt injected as user message at phase start
+  tools?: AblationToolFilter;  // Per-phase tool filter (merged with top-level)
 }
 
 export interface AblationSettings {
@@ -82,6 +88,7 @@ export interface AblationDefinition {
   models: AblationModel[];
   settings: AblationSettings;
   hooks?: PostToolHook[];  // Post-tool hooks applied to all phases
+  tools?: AblationToolFilter;  // Top-level tool filter — applies to all phases
   systemPrompt?: string;   // Master system prompt — all phases inherit unless overridden
 }
 
@@ -196,6 +203,7 @@ export class AblationManager {
     if (ablation.runs !== undefined) ordered.runs = ablation.runs;
     if (ablation.arguments && ablation.arguments.length > 0) ordered.arguments = ablation.arguments;
     ordered.settings = ablation.settings;
+    if (ablation.tools) ordered.tools = ablation.tools;
     ordered.phases = ablation.phases;
     if (ablation.hooks && ablation.hooks.length > 0) ordered.hooks = ablation.hooks;
     const yamlContent = yaml.stringify(ordered);
@@ -415,6 +423,137 @@ export class AblationManager {
     const phase = ablation.phases.find(p => p.name === phaseName);
     const phaseLevel = phase?.hooks ?? [];
     return [...topLevel, ...phaseLevel];
+  }
+
+  /**
+   * Get merged tool filter for a phase.
+   * deny = union of top-level and phase deny (additive).
+   * allow = intersection if both exist, otherwise whichever is present.
+   * deny always wins over allow.
+   */
+  getToolFilterForPhase(ablation: AblationDefinition, phaseName: string): AblationToolFilter | null {
+    const topLevel = ablation.tools;
+    const phase = ablation.phases.find(p => p.name === phaseName);
+    const phaseLevel = phase?.tools;
+
+    if (!topLevel && !phaseLevel) return null;
+
+    const merged: AblationToolFilter = {};
+
+    // Merge deny: union
+    const topDeny = topLevel?.deny ?? [];
+    const phaseDeny = phaseLevel?.deny ?? [];
+    if (topDeny.length > 0 || phaseDeny.length > 0) {
+      merged.deny = [...new Set([...topDeny, ...phaseDeny])];
+    }
+
+    // Merge allow: intersection if both, otherwise whichever exists
+    const topAllow = topLevel?.allow;
+    const phaseAllow = phaseLevel?.allow;
+    if (topAllow && phaseAllow) {
+      // Phase can only narrow top-level allow, not widen
+      merged.allow = phaseAllow.filter(pp =>
+        topAllow.some(tp => this.toolGlobMatch(pp, tp) || this.toolGlobMatch(tp, pp))
+      );
+      // If intersection is empty but both had entries, keep the more specific (phase)
+      if (merged.allow.length === 0) merged.allow = phaseAllow;
+    } else if (topAllow) {
+      merged.allow = [...topAllow];
+    } else if (phaseAllow) {
+      merged.allow = [...phaseAllow];
+    }
+
+    return merged;
+  }
+
+  /**
+   * Check if a tool name matches a glob pattern.
+   * Supports * as wildcard (e.g. "ros-mcp-server__*" matches all tools from that server).
+   */
+  toolGlobMatch(toolName: string, pattern: string): boolean {
+    if (pattern === toolName) return true;
+    if (!pattern.includes('*')) return false;
+    const regex = new RegExp('^' + pattern.replace(/\*/g, '.*') + '$');
+    return regex.test(toolName);
+  }
+
+  /**
+   * Filter a list of tools using an AblationToolFilter.
+   * Returns only tools that pass both allow and deny checks.
+   */
+  applyToolFilter<T extends { name: string }>(tools: T[], filter: AblationToolFilter): T[] {
+    return tools.filter(tool => {
+      // deny takes precedence
+      if (filter.deny?.some(pattern => this.toolGlobMatch(tool.name, pattern))) {
+        return false;
+      }
+      // If allow is specified, tool must match at least one pattern
+      if (filter.allow && filter.allow.length > 0) {
+        return filter.allow.some(pattern => this.toolGlobMatch(tool.name, pattern));
+      }
+      return true;
+    });
+  }
+
+  /**
+   * Pre-flight validation of tool filters against currently connected tools.
+   * Returns warnings for contradictions, empty results, and dead patterns.
+   */
+  validateToolFilters(ablation: AblationDefinition, connectedToolNames: string[]): string[] {
+    const warnings: string[] = [];
+
+    const validateFilter = (filter: AblationToolFilter, context: string) => {
+      // Check for dead patterns (match no connected tools)
+      for (const pattern of (filter.allow ?? [])) {
+        if (!connectedToolNames.some(name => this.toolGlobMatch(name, pattern))) {
+          warnings.push(`${context}: allow pattern "${pattern}" matches no connected tools (typo?)`);
+        }
+      }
+      for (const pattern of (filter.deny ?? [])) {
+        if (!connectedToolNames.some(name => this.toolGlobMatch(name, pattern))) {
+          warnings.push(`${context}: deny pattern "${pattern}" matches no connected tools (typo?)`);
+        }
+      }
+
+      // Check for contradictions (tool in both allow and deny)
+      if (filter.allow && filter.deny) {
+        for (const name of connectedToolNames) {
+          const allowed = filter.allow.some(p => this.toolGlobMatch(name, p));
+          const denied = filter.deny.some(p => this.toolGlobMatch(name, p));
+          if (allowed && denied) {
+            warnings.push(`${context}: ${name} is in both allow and deny (deny wins)`);
+          }
+        }
+      }
+
+      // Check for empty result
+      const surviving = connectedToolNames.filter(name => {
+        if (filter.deny?.some(p => this.toolGlobMatch(name, p))) return false;
+        if (filter.allow && filter.allow.length > 0) {
+          return filter.allow.some(p => this.toolGlobMatch(name, p));
+        }
+        return true;
+      });
+      if (surviving.length === 0) {
+        warnings.push(`${context}: filter results in 0 available tools — phase would have no tools`);
+      }
+    };
+
+    // Validate top-level filter
+    if (ablation.tools) {
+      validateFilter(ablation.tools, 'Top-level');
+    }
+
+    // Validate merged filter for each enabled phase
+    for (const phase of ablation.phases) {
+      if (phase.enabled === false) continue;
+      const merged = this.getToolFilterForPhase(ablation, phase.name);
+      if (merged) {
+        validateFilter(merged, `Phase "${phase.name}"`);
+      }
+    }
+
+    return warnings;
   }
 
   /**
