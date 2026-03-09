@@ -702,14 +702,22 @@ export function createApiRouter(client: MCPClient): Router {
       const result = await client.readResource(server, uri);
       let addedCount = 0;
 
+      // Look up resource description from listing metadata
+      const allResources = client.listResources();
+      const allTemplates = client.listResourceTemplates();
+      const resMatch = allResources.find(r => r.server === server && r.resource.uri === uri);
+      const tmplMatch = !resMatch ? allTemplates.find(t => t.server === server && uri.match(new RegExp('^' + t.template.uriTemplate.replace(/\{[^}]+\}/g, '[^/]+') + '$'))) : undefined;
+      const description = resMatch?.resource.description ?? tmplMatch?.template.description;
+      const descLine = description ? `\n${description}\n` : '\n';
+
       for (const content of result.contents) {
         let text = '';
         if ('text' in content && content.text) {
-          text = `[Resource: ${content.uri}]\n\`\`\`\n${content.text}\n\`\`\``;
+          text = `[Resource: ${content.uri}]${descLine}\`\`\`\n${content.text}\n\`\`\``;
         } else if ('blob' in content && content.blob) {
-          text = `[Resource: ${content.uri}]\n[Binary data, ${content.blob.length} bytes base64]`;
+          text = `[Resource: ${content.uri}]${descLine}[Binary data, ${content.blob.length} bytes base64]`;
         } else {
-          text = `[Resource: ${content.uri}]\n[Empty resource]`;
+          text = `[Resource: ${content.uri}]${descLine}[Empty resource]`;
         }
         client.injectClientPrompt(text, `resource: ${uri}`);
         addedCount++;

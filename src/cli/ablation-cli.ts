@@ -1583,14 +1583,14 @@ export class AblationCLI {
    * Look up a resource by server__name key or URI, searching both concrete resources
    * and resource templates. Returns the server name and URI to pass to readResource().
    */
-  private findResourceOrTemplate(nameArg: string, args?: Record<string, string>): { server: string; uri: string } | null {
+  private findResourceOrTemplate(nameArg: string, args?: Record<string, string>): { server: string; uri: string; description?: string } | null {
     // Search concrete resources first
     const allResources = this.client.listResources();
     let match = allResources.find(r => `${r.server}__${r.resource.name}` === nameArg);
-    if (match) return { server: match.server, uri: match.resource.uri };
+    if (match) return { server: match.server, uri: match.resource.uri, description: match.resource.description };
 
     match = allResources.find(r => r.resource.uri === nameArg);
-    if (match) return { server: match.server, uri: match.resource.uri };
+    if (match) return { server: match.server, uri: match.resource.uri, description: match.resource.description };
 
     // Search resource templates — match by server__name key or uriTemplate
     const allTemplates = this.client.listResourceTemplates();
@@ -1602,11 +1602,11 @@ export class AblationCLI {
           uri = uri.replace(`{${key}}`, value);
         }
       }
-      return { server: tmatch.server, uri };
+      return { server: tmatch.server, uri, description: tmatch.template.description };
     }
 
     tmatch = allTemplates.find(t => t.template.uriTemplate === nameArg);
-    if (tmatch) return { server: tmatch.server, uri: tmatch.template.uriTemplate };
+    if (tmatch) return { server: tmatch.server, uri: tmatch.template.uriTemplate, description: tmatch.template.description };
 
     return null;
   }
@@ -1653,6 +1653,9 @@ export class AblationCLI {
     const result = await this.client.readResource(resolved.server, resolved.uri);
 
     const parts: string[] = [];
+    if (resolved.description) {
+      parts.push(resolved.description);
+    }
     for (const content of result.contents) {
       if ('text' in content && content.text) {
         parts.push(content.text);
@@ -1891,15 +1894,16 @@ export class AblationCLI {
 
       // Read the resource content
       const result = await this.client.readResource(resolved.server, resolved.uri);
+      const descLine = resolved.description ? `\n${resolved.description}\n` : '\n';
 
       for (const content of result.contents) {
         let contentText = '';
         if ('text' in content && content.text) {
-          contentText = `[Resource: ${content.uri}]\n\`\`\`\n${content.text}\n\`\`\``;
+          contentText = `[Resource: ${content.uri}]${descLine}\`\`\`\n${content.text}\n\`\`\``;
         } else if ('blob' in content && content.blob) {
-          contentText = `[Resource: ${content.uri}]\n[Binary data, ${(content as any).blob.length} bytes base64]`;
+          contentText = `[Resource: ${content.uri}]${descLine}[Binary data, ${(content as any).blob.length} bytes base64]`;
         } else {
-          contentText = `[Resource: ${content.uri}]\n[Empty resource]`;
+          contentText = `[Resource: ${content.uri}]${descLine}[Empty resource]`;
         }
 
         this.client.injectClientPrompt(contentText, `resource: ${nameArg}`);

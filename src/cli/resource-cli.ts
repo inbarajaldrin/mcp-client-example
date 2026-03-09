@@ -27,6 +27,19 @@ export class ResourceCLI {
     this.callbacks = callbacks;
   }
 
+  /**
+   * Extract {param} placeholders from a URI template string.
+   */
+  private extractTemplateParams(uriTemplate: string): string[] {
+    const params: string[] = [];
+    const regex = /\{([^}]+)\}/g;
+    let match;
+    while ((match = regex.exec(uriTemplate)) !== null) {
+      params.push(match[1]);
+    }
+    return params;
+  }
+
   async addResourceToContext(): Promise<void> {
     const rl = this.callbacks.getReadline();
     if (!rl) {
@@ -34,10 +47,14 @@ export class ResourceCLI {
     }
 
     const allResources = this.client.listResources();
+    const allTemplates = this.client.listResourceTemplates();
     const resourceManager = this.client.getResourceManager();
     const enabledResources = resourceManager.filterResources(allResources);
+    const enabledTemplates = allTemplates.filter(({ server, template }) =>
+      resourceManager.isResourceEnabled(server, template.name),
+    );
 
-    if (enabledResources.length === 0) {
+    if (enabledResources.length === 0 && enabledTemplates.length === 0) {
       this.logger.log(
         '\nNo enabled resources available. Use /resources-manager to enable resources.\n',
         { type: 'warning' },
@@ -45,40 +62,54 @@ export class ResourceCLI {
       return;
     }
 
-    // Group resources by server
-    const resourcesByServer = new Map<string, typeof enabledResources>();
-    for (const resourceData of enabledResources) {
-      if (!resourcesByServer.has(resourceData.server)) {
-        resourcesByServer.set(resourceData.server, []);
-      }
-      resourcesByServer.get(resourceData.server)!.push(resourceData);
+    // Unified item type for the selection list
+    type ResourceItem =
+      | { kind: 'concrete'; server: string; resource: (typeof enabledResources)[0]['resource'] }
+      | { kind: 'template'; server: string; template: (typeof enabledTemplates)[0]['template'] };
+
+    // Group all items by server
+    const itemsByServer = new Map<string, ResourceItem[]>();
+    for (const r of enabledResources) {
+      if (!itemsByServer.has(r.server)) itemsByServer.set(r.server, []);
+      itemsByServer.get(r.server)!.push({ kind: 'concrete', server: r.server, resource: r.resource });
+    }
+    for (const t of enabledTemplates) {
+      if (!itemsByServer.has(t.server)) itemsByServer.set(t.server, []);
+      itemsByServer.get(t.server)!.push({ kind: 'template', server: t.server, template: t.template });
     }
 
-    const sortedServers = Array.from(resourcesByServer.entries()).sort((a, b) =>
+    const sortedServers = Array.from(itemsByServer.entries()).sort((a, b) =>
       a[0].localeCompare(b[0]),
     );
 
-    // Display resources
+    // Display resources and templates
     this.logger.log('\n📦 Available Resources:\n', { type: 'info' });
 
-    const indexToResource = new Map<number, (typeof enabledResources)[0]>();
-    let resourceIndex = 1;
+    const indexToItem = new Map<number, ResourceItem>();
+    let itemIndex = 1;
 
-    for (const [serverName, serverResources] of sortedServers) {
+    for (const [serverName, items] of sortedServers) {
       this.logger.log(`\n[${serverName}]:\n`, { type: 'info' });
 
-      for (const resourceData of serverResources) {
-        const resource = resourceData.resource;
-        const mimeInfo = resource.mimeType ? ` (${resource.mimeType})` : '';
-        this.logger.log(`  ${resourceIndex}. ${resource.name}${mimeInfo}\n`, {
-          type: 'info',
-        });
-        this.logger.log(`     URI: ${resource.uri}\n`, { type: 'info' });
-        if (resource.description) {
-          this.logger.log(`     ${resource.description}\n`, { type: 'info' });
+      for (const item of items) {
+        if (item.kind === 'concrete') {
+          const mimeInfo = item.resource.mimeType ? ` (${item.resource.mimeType})` : '';
+          this.logger.log(`  ${itemIndex}. ${item.resource.name}${mimeInfo}\n`, { type: 'info' });
+          this.logger.log(`     URI: ${item.resource.uri}\n`, { type: 'info' });
+          if (item.resource.description) {
+            this.logger.log(`     ${item.resource.description}\n`, { type: 'info' });
+          }
+        } else {
+          const params = this.extractTemplateParams(item.template.uriTemplate);
+          const paramsHint = params.length > 0 ? ` (${params.length} param${params.length > 1 ? 's' : ''}: ${params.join(', ')})` : '';
+          this.logger.log(`  ${itemIndex}. ${item.template.name}${paramsHint}\n`, { type: 'info' });
+          this.logger.log(`     Template: ${item.template.uriTemplate}\n`, { type: 'info' });
+          if (item.template.description) {
+            this.logger.log(`     ${item.template.description}\n`, { type: 'info' });
+          }
         }
-        indexToResource.set(resourceIndex, resourceData);
-        resourceIndex++;
+        indexToItem.set(itemIndex, item);
+        itemIndex++;
       }
     }
 
@@ -122,40 +153,81 @@ export class ResourceCLI {
       return;
     }
 
-    const selectedResources: Array<(typeof allResources)[0]> = [];
+    const selectedItems: ResourceItem[] = [];
     for (const idx of selectedIndices) {
-      if (indexToResource.has(idx)) {
-        selectedResources.push(indexToResource.get(idx)!);
+      if (indexToItem.has(idx)) {
+        selectedItems.push(indexToItem.get(idx)!);
       }
     }
 
-    if (selectedResources.length === 0) {
+    if (selectedItems.length === 0) {
       this.logger.log('\n✗ No valid resources found\n', { type: 'warning' });
       return;
     }
 
-    // Read and inject each selected resource
-    for (const resourceData of selectedResources) {
-      const resource = resourceData.resource;
+    // Resolve and inject each selected item
+    for (const item of selectedItems) {
+      let server: string;
+      let uri: string;
+      let description: string | undefined;
+      let displayName: string;
+
+      if (item.kind === 'concrete') {
+        server = item.server;
+        uri = item.resource.uri;
+        description = item.resource.description;
+        displayName = item.resource.name;
+      } else {
+        // Template — collect arguments
+        server = item.server;
+        description = item.template.description;
+        displayName = item.template.name;
+        const params = this.extractTemplateParams(item.template.uriTemplate);
+
+        if (params.length > 0) {
+          this.logger.log(
+            `\n📦 Entering parameters for: ${item.template.name}\n`,
+            { type: 'info' },
+          );
+
+          uri = item.template.uriTemplate;
+          let skipped = false;
+          for (const param of params) {
+            this.logger.log(`  ${param}:\n`, { type: 'info' });
+            const value = (await rl.question('  > ')).trim();
+            if (!value) {
+              this.logger.log(
+                `\n⚠️ Parameter "${param}" is required. Skipping this resource.\n`,
+                { type: 'warning' },
+              );
+              skipped = true;
+              break;
+            }
+            uri = uri.replace(`{${param}}`, value);
+          }
+          if (skipped) continue;
+        } else {
+          uri = item.template.uriTemplate;
+        }
+      }
 
       try {
-        const result = await this.client.readResource(
-          resourceData.server,
-          resource.uri,
-        );
+        const result = await this.client.readResource(server, uri);
 
         const messages = this.callbacks.getMessages();
         const historyManager = this.client.getChatHistoryManager();
+
+        const descLine = description ? `\n${description}\n` : '\n';
 
         for (const content of result.contents) {
           let contentText = '';
 
           if ('text' in content && content.text) {
-            contentText = `[Resource: ${content.uri}]\n\`\`\`\n${content.text}\n\`\`\``;
+            contentText = `[Resource: ${content.uri}]${descLine}\`\`\`\n${content.text}\n\`\`\``;
           } else if ('blob' in content && content.blob) {
-            contentText = `[Resource: ${content.uri}]\n[Binary data, ${content.blob.length} bytes base64]`;
+            contentText = `[Resource: ${content.uri}]${descLine}[Binary data, ${content.blob.length} bytes base64]`;
           } else {
-            contentText = `[Resource: ${content.uri}]\n[Empty resource]`;
+            contentText = `[Resource: ${content.uri}]${descLine}[Empty resource]`;
           }
 
           messages.push({
@@ -179,12 +251,12 @@ export class ResourceCLI {
 
         const contentCount = result.contents.length;
         this.logger.log(
-          `\n✓ Added resource "${resource.name}" to conversation context (${contentCount} content block${contentCount > 1 ? 's' : ''} added)\n`,
+          `\n✓ Added resource "${displayName}" to conversation context (${contentCount} content block${contentCount > 1 ? 's' : ''} added)\n`,
           { type: 'info' },
         );
       } catch (error) {
         this.logger.log(
-          `\n✗ Failed to read resource "${resource.name}": ${error}\n`,
+          `\n✗ Failed to read resource "${displayName}": ${error}\n`,
           { type: 'error' },
         );
       }
@@ -204,9 +276,13 @@ export class ResourceCLI {
   async displayResourcesList(): Promise<void> {
     const resourceManager = this.client.getResourceManager();
     const allResources = this.client.listResources();
+    const allTemplates = this.client.listResourceTemplates();
     const enabledResources = resourceManager.filterResources(allResources);
+    const enabledTemplates = allTemplates.filter(({ server, template }) =>
+      resourceManager.isResourceEnabled(server, template.name),
+    );
 
-    if (enabledResources.length === 0) {
+    if (enabledResources.length === 0 && enabledTemplates.length === 0) {
       this.logger.log('\n📦 Enabled Resources:\n', { type: 'info' });
       this.logger.log('  No enabled resources.\n', { type: 'warning' });
       this.logger.log('  Use /resources-manager to enable resources.\n', {
@@ -216,27 +292,26 @@ export class ResourceCLI {
     }
 
     // Group by server
-    const resourcesByServer = new Map<string, Array<{ name: string; uri: string }>>();
-    for (const resourceData of enabledResources) {
-      if (!resourcesByServer.has(resourceData.server)) {
-        resourcesByServer.set(resourceData.server, []);
-      }
-      resourcesByServer.get(resourceData.server)!.push({
-        name: resourceData.resource.name,
-        uri: resourceData.resource.uri,
-      });
+    const itemsByServer = new Map<string, Array<{ name: string; uri: string }>>();
+    for (const r of enabledResources) {
+      if (!itemsByServer.has(r.server)) itemsByServer.set(r.server, []);
+      itemsByServer.get(r.server)!.push({ name: r.resource.name, uri: r.resource.uri });
+    }
+    for (const t of enabledTemplates) {
+      if (!itemsByServer.has(t.server)) itemsByServer.set(t.server, []);
+      itemsByServer.get(t.server)!.push({ name: t.template.name, uri: t.template.uriTemplate });
     }
 
     this.logger.log('\n📦 Enabled Resources:\n', { type: 'info' });
 
-    for (const [serverName, resources] of resourcesByServer.entries()) {
-      this.logger.log(`\n[${serverName}] (${resources.length} enabled):\n`, {
+    for (const [serverName, items] of itemsByServer.entries()) {
+      this.logger.log(`\n[${serverName}] (${items.length} enabled):\n`, {
         type: 'info',
       });
 
-      for (const resource of resources) {
-        this.logger.log(`  ✓ ${resource.name}\n`, { type: 'info' });
-        this.logger.log(`    ${resource.uri}\n`, { type: 'info' });
+      for (const item of items) {
+        this.logger.log(`  ✓ ${item.name}\n`, { type: 'info' });
+        this.logger.log(`    ${item.uri}\n`, { type: 'info' });
       }
     }
 
@@ -253,27 +328,35 @@ export class ResourceCLI {
     const initialState = { ...resourceManager.getResourceStates() };
 
     const allResources = this.client.listResources();
+    const allTemplates = this.client.listResourceTemplates();
 
-    if (allResources.length === 0) {
+    // Unified item type for the manager list
+    type ManagerItem =
+      | { kind: 'concrete'; server: string; name: string; uri: string }
+      | { kind: 'template'; server: string; name: string; uri: string };
+
+    if (allResources.length === 0 && allTemplates.length === 0) {
       this.logger.log('\nNo resources available from any server.\n', {
         type: 'warning',
       });
       return;
     }
 
-    const indexToResource = new Map<number, (typeof allResources)[0]>();
-    let resourceIndex = 1;
-
-    // Group resources by server
-    const resourcesByServer = new Map<string, typeof allResources>();
-    for (const resourceData of allResources) {
-      if (!resourcesByServer.has(resourceData.server)) {
-        resourcesByServer.set(resourceData.server, []);
-      }
-      resourcesByServer.get(resourceData.server)!.push(resourceData);
+    // Group all items by server
+    const itemsByServer = new Map<string, ManagerItem[]>();
+    for (const r of allResources) {
+      if (!itemsByServer.has(r.server)) itemsByServer.set(r.server, []);
+      itemsByServer.get(r.server)!.push({ kind: 'concrete', server: r.server, name: r.resource.name, uri: r.resource.uri });
+    }
+    for (const t of allTemplates) {
+      if (!itemsByServer.has(t.server)) itemsByServer.set(t.server, []);
+      itemsByServer.get(t.server)!.push({ kind: 'template', server: t.server, name: t.template.name, uri: t.template.uriTemplate });
     }
 
-    const sortedServers = Array.from(resourcesByServer.entries()).sort((a, b) =>
+    const indexToItem = new Map<number, ManagerItem>();
+    let itemIndex = 1;
+
+    const sortedServers = Array.from(itemsByServer.entries()).sort((a, b) =>
       a[0].localeCompare(b[0]),
     );
 
@@ -285,15 +368,15 @@ export class ResourceCLI {
       let displayText = '\n📦 Resource Manager\n';
       displayText += 'Available Servers and Resources:\n';
 
-      resourceIndex = 1;
-      indexToResource.clear();
+      itemIndex = 1;
+      indexToItem.clear();
 
       for (let serverIdx = 0; serverIdx < sortedServers.length; serverIdx++) {
-        const [serverName, serverResources] = sortedServers[serverIdx];
-        const enabledCount = serverResources.filter((r) =>
-          resourceManager.isResourceEnabled(r.server, r.resource.name),
+        const [serverName, serverItems] = sortedServers[serverIdx];
+        const enabledCount = serverItems.filter((item) =>
+          resourceManager.isResourceEnabled(item.server, item.name),
         ).length;
-        const totalCount = serverResources.length;
+        const totalCount = serverItems.length;
 
         let serverStatus = '✓';
         if (enabledCount === 0) {
@@ -304,16 +387,13 @@ export class ResourceCLI {
 
         displayText += `\nS${serverIdx + 1}. ${serverStatus} [${serverName}] (${enabledCount}/${totalCount} enabled):\n`;
 
-        for (const resourceData of serverResources) {
-          const enabled = resourceManager.isResourceEnabled(
-            resourceData.server,
-            resourceData.resource.name,
-          );
+        for (const item of serverItems) {
+          const enabled = resourceManager.isResourceEnabled(item.server, item.name);
           const status = enabled ? '✓' : '✗';
-          displayText += `  ${resourceIndex}. ${status} ${resourceData.resource.name}\n`;
-          displayText += `       ${resourceData.resource.uri}\n`;
-          indexToResource.set(resourceIndex, resourceData);
-          resourceIndex++;
+          displayText += `  ${itemIndex}. ${status} ${item.name}\n`;
+          displayText += `       ${item.uri}\n`;
+          indexToItem.set(itemIndex, item);
+          itemIndex++;
         }
       }
 
@@ -344,26 +424,18 @@ export class ResourceCLI {
         break;
       }
 
+      const allItems = Array.from(itemsByServer.values()).flat();
+
       if (selection === 'a' || selection === 'all') {
-        for (const resourceData of allResources) {
-          resourceManager.setResourceEnabled(
-            resourceData.server,
-            resourceData.resource.name,
-            true,
-            false,
-          );
+        for (const item of allItems) {
+          resourceManager.setResourceEnabled(item.server, item.name, true, false);
         }
         continue;
       }
 
       if (selection === 'n' || selection === 'none') {
-        for (const resourceData of allResources) {
-          resourceManager.setResourceEnabled(
-            resourceData.server,
-            resourceData.resource.name,
-            false,
-            false,
-          );
+        for (const item of allItems) {
+          resourceManager.setResourceEnabled(item.server, item.name, false, false);
         }
         continue;
       }
@@ -372,19 +444,14 @@ export class ResourceCLI {
       if (selection.match(/^s\d+$/i)) {
         const serverNum = parseInt(selection.slice(1)) - 1;
         if (serverNum >= 0 && serverNum < sortedServers.length) {
-          const [, serverResources] = sortedServers[serverNum];
-          const allEnabled = serverResources.every((r) =>
-            resourceManager.isResourceEnabled(r.server, r.resource.name),
+          const [, serverItems] = sortedServers[serverNum];
+          const allEnabled = serverItems.every((item) =>
+            resourceManager.isResourceEnabled(item.server, item.name),
           );
           const newState = !allEnabled;
 
-          for (const resourceData of serverResources) {
-            resourceManager.setResourceEnabled(
-              resourceData.server,
-              resourceData.resource.name,
-              newState,
-              false,
-            );
+          for (const item of serverItems) {
+            resourceManager.setResourceEnabled(item.server, item.name, newState, false);
           }
           continue;
         }
@@ -413,13 +480,9 @@ export class ResourceCLI {
 
         let toggledCount = 0;
         for (const idx of indices) {
-          if (indexToResource.has(idx)) {
-            const resourceData = indexToResource.get(idx)!;
-            resourceManager.toggleResource(
-              resourceData.server,
-              resourceData.resource.name,
-              false,
-            );
+          if (indexToItem.has(idx)) {
+            const item = indexToItem.get(idx)!;
+            resourceManager.toggleResource(item.server, item.name, false);
             toggledCount++;
           }
         }
