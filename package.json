@@ -22,7 +22,7 @@
     "prepare": "npm run build",
     "watch": "tsc-watch --onSuccess \"chmod 755 dist/bin.js && chmod 755 dist/index.js\"",
     "format": "prettier --write .",
-    "start": "node ./dist/bin.js"
+    "start": "node --disable-warning=DEP0040 ./dist/bin.js"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.32.1",

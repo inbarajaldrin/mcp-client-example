@@ -3846,7 +3846,9 @@ export class MCPClient {
    */
   getServersInfo(): Array<{ name: string; tools: Array<{ name: string; description: string; input_schema?: Record<string, unknown> }> }> {
     const result: Array<{ name: string; tools: Array<{ name: string; description: string; input_schema?: Record<string, unknown> }> }> = [];
+    const disabledServers = this.getDisabledServerNames();
     for (const [name, connection] of this.servers) {
+      if (disabledServers.has(name)) continue;
       const enabledTools = connection.tools
         .filter(t => this.toolManager.isToolEnabled(t.name))
         .map(t => ({
