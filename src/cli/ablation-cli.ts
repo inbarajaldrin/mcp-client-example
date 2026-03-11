@@ -2725,9 +2725,12 @@ export class AblationCLI {
     }
 
     // Pre-flight: validate tool filters against connected tools
+    // Use getAllConnectedToolNames() instead of getTools() — the latter returns
+    // only agent-visible tools (filtered by enabled state, disabled servers, etc.),
+    // which can intermittently exclude tools that ablation deny patterns target.
     for (const ablation of selectedAblations) {
       if (ablation.tools || ablation.phases.some(p => p.tools)) {
-        const connectedToolNames = this.client.getTools().map(t => t.name);
+        const connectedToolNames = this.client.getAllConnectedToolNames();
         const toolWarnings = this.ablationManager.validateToolFilters(ablation, connectedToolNames);
         if (toolWarnings.length > 0) {
           this.logger.log(`\n⚠ Tool filter issues in "${ablation.name}":\n`, { type: 'warning' });

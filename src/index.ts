@@ -3911,6 +3911,21 @@ export class MCPClient {
   }
 
   /**
+   * Get all tool names across ALL connected servers (including disabled servers).
+   * Used by ablation validation to check deny/allow patterns against every known tool,
+   * not just the agent-visible subset.
+   */
+  getAllConnectedToolNames(): string[] {
+    const names: string[] = [];
+    for (const [, connection] of this.servers) {
+      for (const tool of connection.tools) {
+        names.push(tool.name);
+      }
+    }
+    return names;
+  }
+
+  /**
    * Get all tools across all servers with their enabled/disabled state (for web UI tool management).
    * Excludes tools from servers that are disabled in config (they are connected but not exposed to the agent).
    */
