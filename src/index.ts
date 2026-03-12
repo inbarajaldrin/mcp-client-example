@@ -27,6 +27,7 @@ import { ToolManager } from './managers/tool-manager.js';
 import { PromptManager } from './managers/prompt-manager.js';
 import { ResourceManager } from './managers/resource-manager.js';
 import { ChatHistoryManager, type ChatSession } from './managers/chat-history-manager.js';
+import { ServerLogManager } from './managers/server-log-manager.js';
 import { AttachmentManager } from './managers/attachment-manager.js';
 import { PreferencesManager } from './managers/preferences-manager.js';
 import { HookManager } from './managers/hook-manager.js';
@@ -127,6 +128,7 @@ export class MCPClient {
   private elicitationHandler: ElicitationHandler;
   private toolExecutor: MCPToolExecutor;
   private hookManager: HookManager;
+  private serverLogManager: ServerLogManager;
   private forceStopCallback?: (toolName: string, elapsedSeconds: number, abortSignal?: AbortSignal) => Promise<boolean>;
   private isAbortRequestedCallback?: () => boolean;
   private onIterationLimitCallback?: (iterations: number, maxIterations: number) => Promise<number | null>;
@@ -234,6 +236,13 @@ export class MCPClient {
     this.chatHistoryManager.setProviderName(this.modelProvider.getProviderName());
     this.hookManager.setChatLogger(this.chatHistoryManager);
 
+    // Initialize server log manager
+    this.serverLogManager = new ServerLogManager(this.logger);
+    this.chatHistoryManager.setOnSessionSaved((sessionDir: string) => {
+      const finalLogDir = join(sessionDir, 'server-logs');
+      this.serverLogManager.moveLogsToDir(finalLogDir);
+    });
+
     // Initialize attachment manager
     this.attachmentManager = new AttachmentManager(this.logger);
 
@@ -321,6 +330,11 @@ export class MCPClient {
     client.chatHistoryManager = new ChatHistoryManager(client.logger);
     client.chatHistoryManager.setProviderName(client.modelProvider.getProviderName());
     client.hookManager.setChatLogger(client.chatHistoryManager);
+    client.serverLogManager = new ServerLogManager(client.logger);
+    client.chatHistoryManager.setOnSessionSaved((sessionDir: string) => {
+      const finalLogDir = join(sessionDir, 'server-logs');
+      client.serverLogManager.moveLogsToDir(finalLogDir);
+    });
     client.attachmentManager = new AttachmentManager(client.logger);
     client.orchestratorIPCServer = null;
     client.enableOrchestratorIPC = options?.enableOrchestratorIPC ?? false;
@@ -367,6 +381,15 @@ export class MCPClient {
       }
     }
 
+    // Initialize server log staging directory BEFORE server connections
+    // so attachStderrCapture() can capture stderr from the initial connect.
+    // Uses a timestamp-based temp name; logs are moved to the final session dir on save.
+    {
+      const stagingId = `staging-${Date.now()}`;
+      const stagingDir = join(__dirname, '..', '.mcp-client-data', 'server-logs-staging', stagingId);
+      this.serverLogManager.setLogDir(stagingDir);
+    }
+
     // Load models.dev data (pricing + capabilities) in parallel with server connections
     const modelsDevReady = initModelsDevCache().catch(() => {});
 
@@ -397,9 +420,10 @@ export class MCPClient {
           { name: 'cli-client', version: '1.0.0' },
           { capabilities: { elicitation: { form: {} } } },
         );
-        const transport = new StdioClientTransport(config);
+        const transport = new StdioClientTransport({ ...config, stderr: 'pipe' });
 
         await client.connect(transport);
+        this.attachStderrCapture(serverConfig.name, transport);
 
         // Register elicitation request handler
         client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
@@ -468,17 +492,20 @@ export class MCPClient {
     await this.initMCPPrompts();
     await this.initMCPResources();
 
-    // Start chat session after servers are connected
-    const serverNames = Array.from(this.servers.keys());
-    // Get enabled tools for the session
-    const enabledTools = this.tools.map(tool => ({ name: tool.name, description: tool.description, input_schema: tool.input_schema }));
-    this.chatHistoryManager.startSession(this.model, serverNames, enabledTools);
-
     // Log connected servers (only enabled servers should be connected now)
     this.logger.log(
       `Connected to ${this.servers.size} server(s): ${Array.from(this.servers.keys()).join(', ')}\n`,
       { type: 'info' },
     );
+
+    // Start chat session with full server/tool metadata (after connections are established)
+    const serverNames = Array.from(this.servers.keys());
+    const enabledTools = this.toolManager.getEnabledTools(this.tools).map(t => ({
+      name: t.name,
+      description: t.description || '',
+      input_schema: t.input_schema,
+    }));
+    this.chatHistoryManager.startSession(this.model, serverNames, enabledTools);
 
     this.logger.log(
       `Chat session started: ${this.chatHistoryManager.getCurrentSessionId()}\n`,
@@ -586,9 +613,10 @@ export class MCPClient {
       { name: 'cli-client', version: '1.0.0' },
       { capabilities: { elicitation: { form: {} } } },
     );
-    const transport = new StdioClientTransport(config);
+    const transport = new StdioClientTransport({ ...config, stderr: 'pipe' });
 
     await client.connect(transport);
+    this.attachStderrCapture(serverName, transport);
 
     // Register elicitation request handler
     client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
@@ -620,6 +648,13 @@ export class MCPClient {
   }
 
   async stop() {
+    // Set server logs mapping before stopping captures
+    const serverLogs = this.serverLogManager.getServerLogsMapping();
+    if (serverLogs) {
+      this.chatHistoryManager.setServerLogs(serverLogs);
+    }
+    this.serverLogManager.stopAll();
+
     // Stop orchestrator IPC server if running
     if (this.orchestratorIPCServer) {
       try {
@@ -650,6 +685,17 @@ export class MCPClient {
     );
     await Promise.all(closePromises);
     this.servers.clear();
+  }
+
+  /**
+   * Attach stderr capture to a transport for server log capture.
+   * Must be called after transport is created but before or after connect.
+   * transport.stderr returns Stream | null (MCP SDK types).
+   */
+  private attachStderrCapture(serverName: string, transport: StdioClientTransport): void {
+    if (transport.stderr) {
+      this.serverLogManager.startCapture(serverName, transport.stderr);
+    }
   }
 
   /**
@@ -853,9 +899,10 @@ export class MCPClient {
           { name: 'cli-client', version: '1.0.0' },
           { capabilities: { elicitation: { form: {} } } },
         );
-        const transport = new StdioClientTransport(config);
+        const transport = new StdioClientTransport({ ...config, stderr: 'pipe' });
 
         await client.connect(transport);
+        this.attachStderrCapture(serverConfig.name, transport);
 
         // Register elicitation request handler
         client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
@@ -962,9 +1009,10 @@ export class MCPClient {
         { name: 'cli-client', version: '1.0.0' },
         { capabilities: { elicitation: { form: {} } } },
       );
-      const transport = new StdioClientTransport(config);
+      const transport = new StdioClientTransport({ ...config, stderr: 'pipe' });
 
       await client.connect(transport);
+      this.attachStderrCapture(serverName, transport);
 
       // Register elicitation request handler
       client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
@@ -1264,8 +1312,9 @@ export class MCPClient {
           { name: 'cli-client', version: '1.0.0' },
           { capabilities: { elicitation: { form: {} } } },
         );
-        const transport = new StdioClientTransport(todoConfig.config);
+        const transport = new StdioClientTransport({ ...todoConfig.config, stderr: 'pipe' });
         await client.connect(transport);
+        this.attachStderrCapture(todoServerName, transport);
 
         // Register elicitation request handler
         client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {
@@ -1428,6 +1477,10 @@ export class MCPClient {
     return this.chatHistoryManager;
   }
 
+  getServerLogManager(): ServerLogManager {
+    return this.serverLogManager;
+  }
+
   getAttachmentManager(): AttachmentManager {
     return this.attachmentManager;
   }
@@ -1485,6 +1538,12 @@ export class MCPClient {
    * The current session is saved to disk (via endSession) before clearing.
    */
   clearContext(): void {
+    // Set server logs mapping before saving session
+    const serverLogs = this.serverLogManager.getServerLogsMapping();
+    if (serverLogs) {
+      this.chatHistoryManager.setServerLogs(serverLogs);
+    }
+
     // Save the current session if it has messages, otherwise discard
     if (this.messages.length > 0) {
       this.chatHistoryManager.endSession('context-cleared');
@@ -1999,7 +2058,7 @@ export class MCPClient {
     if (!this.servers.has('mcp-tools-orchestrator')) {
       try {
         this.logger.log(`Connecting to mcp-tools-orchestrator server...\n`, { type: 'info' });
-        
+
         // Inject IPC URL into mcp-tools-orchestrator's environment
         const config = { ...orchestratorConfig.config };
         if (process.env.MCP_CLIENT_IPC_URL) {
@@ -2008,13 +2067,14 @@ export class MCPClient {
             MCP_CLIENT_IPC_URL: process.env.MCP_CLIENT_IPC_URL,
           };
         }
-        
+
         const client = new Client(
           { name: 'cli-client', version: '1.0.0' },
           { capabilities: { elicitation: { form: {} } } },
         );
-        const transport = new StdioClientTransport(config);
+        const transport = new StdioClientTransport({ ...config, stderr: 'pipe' });
         await client.connect(transport);
+        this.attachStderrCapture('mcp-tools-orchestrator', transport);
 
         // Register elicitation request handler
         client.setRequestHandler(ElicitRequestSchema, async (request: ElicitRequest) => {

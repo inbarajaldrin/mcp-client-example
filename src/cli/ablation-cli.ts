@@ -163,6 +163,10 @@ export class AblationCLI {
     iteration: number,
   ): void {
     const chatHistoryManager = this.client.getChatHistoryManager();
+    const serverLogs = this.client.getServerLogManager().getServerLogsMapping();
+    if (serverLogs) {
+      chatHistoryManager.setServerLogs(serverLogs);
+    }
     const chatMetadata = chatHistoryManager.endSession(endReason);
 
     if (chatMetadata) {
@@ -177,6 +181,10 @@ export class AblationCLI {
         if (existsSync(chatMetadata.filePath)) cpSync(chatMetadata.filePath, destJsonPath);
         if (existsSync(chatMetadata.mdFilePath)) cpSync(chatMetadata.mdFilePath, destMdPath);
         result.chatFile = relativeChatPath;
+
+        // Copy server logs to phase directory
+        const serverLogManager = this.client.getServerLogManager();
+        serverLogManager.copyLogsToDir(phaseDir);
       } catch (copyError) {
         this.logger.log(`  Warning: Failed to copy chat files to run directory: ${copyError}\n`, { type: 'warning' });
         result.chatFile = chatMetadata.filePath;
@@ -198,6 +206,7 @@ export class AblationCLI {
 
     // Exit during active run → graceful abort (callers also check, this is a safety net)
     if (this.isExitCommand(trimmed)) {
+      this.client.getChatHistoryManager().addUserInteractionEvent('abort', 'exit-command');
       process.emit('SIGINT', 'SIGINT');
       return 'abort';
     }
@@ -214,7 +223,7 @@ export class AblationCLI {
     }
 
     // Regular text — log user message and send to the agent
-    this.client.getChatHistoryManager().addUserMessage(trimmed);
+    this.client.getChatHistoryManager().addUserMessage(trimmed, undefined, true);
     await this.client.processQuery(trimmed, false, undefined, stopCondition);
     return 'handled';
   }
@@ -2093,6 +2102,8 @@ export class AblationCLI {
                 if (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()
                     && !hookMgr.isPhaseCompleteRequested() && !hookMgr.isAbortRunRequested()) {
                   this.callbacks.resetInterrupt();
+                  // Log pause event to chat history
+                  this.client.getChatHistoryManager().addUserInteractionEvent('pause', 'ctrl-a');
                   this.callbacks.stopKeyboardMonitor();
 
                   if (this.callbacks.getReadline()) {
@@ -2107,6 +2118,7 @@ export class AblationCLI {
 
                       // Check for exit — trigger graceful abort (same as Ctrl+C)
                       if (this.isExitCommand(userInput)) {
+                        this.client.getChatHistoryManager().addUserInteractionEvent('abort', 'exit-command');
                         this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
                         process.emit('SIGINT', 'SIGINT');
                         paused = false;
@@ -2123,6 +2135,7 @@ export class AblationCLI {
                       this.callbacks.stopKeyboardMonitor();
 
                       if (result === 'resume') {
+                        this.client.getChatHistoryManager().addUserInteractionEvent('resume', 'user-input');
                         continueAfterPause = true;
                         paused = false;
                       }
@@ -2308,6 +2321,7 @@ export class AblationCLI {
           if (this.callbacks.isInterruptRequested() && !this.callbacks.isAbortRequested()
               && !hookManager.isPhaseCompleteRequested() && !hookManager.isAbortRunRequested()) {
             this.callbacks.resetInterrupt();
+            this.client.getChatHistoryManager().addUserInteractionEvent('pause', 'ctrl-a');
             this.logger.log('\n  ⏸ Agent paused. Type a message, /command, or press Enter to resume. (/help for commands)\n', { type: 'warning' });
 
             let paused = true;
@@ -2323,6 +2337,7 @@ export class AblationCLI {
 
               // Check for exit — trigger graceful abort (same as Ctrl+C)
               if (this.isExitCommand(userInput)) {
+                this.client.getChatHistoryManager().addUserInteractionEvent('abort', 'exit-command');
                 this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
                 process.emit('SIGINT', 'SIGINT');
                 paused = false;
@@ -2334,6 +2349,7 @@ export class AblationCLI {
               // Reset interrupt flag so the next iteration's processQuery doesn't exit immediately
               this.callbacks.resetInterrupt();
               if (result === 'resume') {
+                this.client.getChatHistoryManager().addUserInteractionEvent('resume', 'user-input');
                 continueAfterPause = true;
                 paused = false;
               }
@@ -3363,7 +3379,7 @@ export class AblationCLI {
           const attempt = attemptIndex + 1;
           const modelKey = `${model.provider}/${model.model}`;
 
-          // Check for user abort
+          // Check for user abort (before model switch — no session needed for the check itself)
           if (this.callbacks.isAbortRequested()) {
             this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
             setShouldBreak(true);
@@ -3379,7 +3395,7 @@ export class AblationCLI {
               `\n  ✗ Skipping ${modelKey}: failed to initialize — ${error.message}\n`,
               { type: 'error' },
             );
-            run.results.push({ phase: phase.name, model, status: 'skipped', attempt });
+            run.results.push({ phase: phase.name, model, status: 'skipped', attempt, error: error.message });
             continue; // try next model
           }
 
@@ -3397,8 +3413,16 @@ export class AblationCLI {
             }
           }
 
-          // Clear context for fresh attempt
+          // Clear context for fresh attempt (starts a new session)
           this.client.clearContext();
+
+          // Log abort event now that a session is active (Ctrl+C may have been pressed during model switch)
+          if (this.callbacks.isAbortRequested()) {
+            this.client.getChatHistoryManager().addUserInteractionEvent('abort', 'ctrl-c');
+            this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+            setShouldBreak(true);
+            break;
+          }
 
           // Restore outputs from prior successful phases
           this.ablationManager.restoreOutputsFromPriorPhases(successfulPhaseOutputs);
@@ -3908,7 +3932,7 @@ export class AblationCLI {
       for (const model of modelsToRun) {
         if (shouldBreak) break;
 
-        // Check for abort (Ctrl+A or Ctrl+C)
+        // Check for abort (Ctrl+A or Ctrl+C) — early exit before model switch
         if (this.callbacks.isAbortRequested()) {
           this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
           shouldBreak = true;
@@ -3933,11 +3957,19 @@ export class AblationCLI {
             // Record all phases as skipped for this model
             for (const phase of ablation.phases) {
               if (phase.enabled !== false) {
-                run.results.push({ phase: phase.name, model, status: 'skipped' });
+                run.results.push({ phase: phase.name, model, status: 'skipped', error: error.message });
               }
             }
             runNumber++;
             continue; // Skip to next model
+          }
+
+          // Log abort event now that a session is active (Ctrl+C may have been pressed during model switch)
+          if (this.callbacks.isAbortRequested()) {
+            this.client.getChatHistoryManager().addUserInteractionEvent('abort', 'ctrl-c');
+            this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+            shouldBreak = true;
+            break;
           }
 
           // Apply per-model thinking config

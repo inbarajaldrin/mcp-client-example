@@ -19,8 +19,12 @@ const __dirname = dirname(__filename);
 // Chat storage directory structure:
 // .mcp-client-data/chats/
 //   ├── YYYY-MM-DD/
-//   │   ├── chat-HHMMSS-{sessionId}.json (full history)
-//   │   └── chat-HHMMSS-{sessionId}.md (human-readable)
+//   │   ├── chat-HHMMSS-{sessionId}/
+//   │   │   ├── chat.json (full history)
+//   │   │   ├── chat.md (human-readable)
+//   │   │   └── server-logs/ (MCP server stderr captures)
+//   │   │       ├── ros-mcp-server.log
+//   │   │       └── isaac-sim.log
 //   └── index.json (metadata of all chats)
 
 const CHATS_DIR = join(__dirname, '../..', '.mcp-client-data', 'chats');
@@ -44,6 +48,7 @@ export interface ChatMetadata {
   name?: string;
   filePath: string;
   mdFilePath: string;
+  serverLogDir?: string;
   // Whether thinking/reasoning was enabled during this session
   thinkingLevel?: string; // Thinking level used (provider-specific)
   thinkingProvider?: string;
@@ -115,6 +120,11 @@ export interface ChatSession {
       serverMessage?: string;
       reason?: string;  // e.g. "phase already complete", "tool timeout", "url not supported"
     };
+    interactionEvent?: {
+      type: 'pause' | 'resume' | 'abort';
+      trigger: 'ctrl-a' | 'ctrl-c' | 'exit-command' | 'user-input';
+    };
+    isInterjection?: boolean;
   }>;
   tokenUsagePerCallback?: Array<{
     timestamp: string;
@@ -146,6 +156,7 @@ export interface ChatSession {
     ipcCallCount: number; // IPC calls made automatically
     totalCost?: number; // Total estimated cost in USD for the session
   };
+  serverLogs?: Record<string, string>;
 }
 
 export class ChatHistoryManager {
@@ -156,6 +167,7 @@ export class ChatHistoryManager {
   private toolUseCount: number = 0;
   private providerName: string | undefined;
   private activeModel: string | undefined;
+  private onSessionSaved: ((sessionDir: string) => void) | null = null;
 
   constructor(logger?: Logger) {
     this.logger = logger || new Logger({ mode: 'verbose' });
@@ -266,7 +278,7 @@ export class ChatHistoryManager {
   /**
    * Add a user message to current session
    */
-  addUserMessage(content: string, attachments?: Array<{ fileName: string; ext: string; mediaType: string }>): void {
+  addUserMessage(content: string, attachments?: Array<{ fileName: string; ext: string; mediaType: string }>, isInterjection?: boolean): void {
     if (!this.currentSession) {
       this.logger.log('No active session. Call startSession() first.\n', {
         type: 'warning',
@@ -279,6 +291,7 @@ export class ChatHistoryManager {
       role: 'user',
       content,
       attachments: attachments && attachments.length > 0 ? attachments : undefined,
+      ...(isInterjection && { isInterjection: true }),
     });
 
     this.currentSession.metadata.messageCount++;
@@ -503,6 +516,31 @@ export class ChatHistoryManager {
     if (serverMessage) msg.elicitationEvent.serverMessage = serverMessage;
     if (reason) msg.elicitationEvent.reason = reason;
     this.currentSession.messages.push(msg);
+    this.currentSession.metadata.messageCount++;
+  }
+
+  /**
+   * Add a user interaction event to current session.
+   * Records pauses (Ctrl+A), resumes, and aborts (Ctrl+C, exit command) during ablation runs.
+   */
+  addUserInteractionEvent(
+    type: 'pause' | 'resume' | 'abort',
+    trigger: 'ctrl-a' | 'ctrl-c' | 'exit-command' | 'user-input',
+  ): void {
+    if (!this.currentSession) return;
+
+    const contentMap: Record<string, Record<string, string>> = {
+      pause: { 'ctrl-a': 'User paused (Ctrl+A)' },
+      resume: { 'user-input': 'User resumed' },
+      abort: { 'ctrl-c': 'User aborted (Ctrl+C)', 'exit-command': 'User aborted (exit)' },
+    };
+
+    this.currentSession.messages.push({
+      timestamp: new Date().toISOString(),
+      role: 'system',
+      content: contentMap[type]?.[trigger] || `User ${type} (${trigger})`,
+      interactionEvent: { type, trigger },
+    });
     this.currentSession.metadata.messageCount++;
   }
 
@@ -740,8 +778,12 @@ export class ChatHistoryManager {
       const seconds = String(endTime.getSeconds()).padStart(2, '0');
       const timestamp = `${hours}${minutes}${seconds}`; // HHMMSS in local time
       const baseName = `chat-${timestamp}-${sessionToSave.sessionId}`;
-      const jsonPath = join(dateDir, `${baseName}.json`);
-      const mdPath = join(dateDir, `${baseName}.md`);
+      const sessionDir = join(dateDir, baseName);
+      if (!existsSync(sessionDir)) {
+        mkdirSync(sessionDir, { recursive: true });
+      }
+      const jsonPath = join(sessionDir, 'chat.json');
+      const mdPath = join(sessionDir, 'chat.md');
 
       // Save JSON format (machine-readable, for analysis/replay)
       writeFileSync(jsonPath, JSON.stringify(sessionToSave, null, 2));
@@ -766,6 +808,7 @@ export class ChatHistoryManager {
         // summary,
         filePath: jsonPath,
         mdFilePath: mdPath,
+        serverLogDir: join(sessionDir, 'server-logs'),
         ...(sessionToSave.thinkingConfig?.level && {
           thinkingLevel: sessionToSave.thinkingConfig.level,
           thinkingProvider: sessionToSave.thinkingConfig.provider,
@@ -775,6 +818,11 @@ export class ChatHistoryManager {
       // Update index
       this.index.set(sessionToSave.sessionId, metadata);
       this.saveIndex();
+
+      // Move server logs from staging to final session directory
+      if (this.onSessionSaved) {
+        this.onSessionSaved(sessionDir);
+      }
 
       return metadata;
     } catch (error) {
@@ -1833,6 +1881,22 @@ export class ChatHistoryManager {
    */
   getCurrentSessionId(): string | null {
     return this.currentSession?.sessionId || null;
+  }
+
+  /**
+   * Set server log file mappings on the current session.
+   */
+  setServerLogs(logs: Record<string, string>): void {
+    if (!this.currentSession) return;
+    this.currentSession.serverLogs = logs;
+  }
+
+  /**
+   * Register a callback to be invoked after a session is saved to disk.
+   * Used to move server logs from staging to the final session directory.
+   */
+  setOnSessionSaved(callback: (sessionDir: string) => void): void {
+    this.onSessionSaved = callback;
   }
 
   /**

@@ -2,7 +2,7 @@
   "$schema": "https://json-schema.org/draft/2020-12/schema",
   "$id": "chat-session.schema.json",
   "title": "ChatSession",
-  "description": "Full conversation session stored at .mcp-client-data/chats/YYYY-MM-DD/chat-HHMMSS-{sessionId}.json",
+  "description": "Full conversation session stored at .mcp-client-data/chats/YYYY-MM-DD/chat-HHMMSS-{sessionId}/chat.json",
   "type": "object",
   "required": ["sessionId", "startTime", "model", "servers", "messages", "metadata"],
   "properties": {
@@ -57,7 +57,15 @@
       "description": "Token usage recorded per LLM callback",
       "items": { "$ref": "#/$defs/TokenUsageRecord" }
     },
-    "metadata": { "$ref": "#/$defs/SessionMetadata" }
+    "metadata": { "$ref": "#/$defs/SessionMetadata" },
+    "serverLogs": {
+      "type": "object",
+      "description": "Mapping of server names to relative paths of their stderr log files captured during this session.",
+      "additionalProperties": {
+        "type": "string",
+        "description": "Relative path to the server's log file within the session directory"
+      }
+    }
   },
   "$defs": {
     "OrchestratorWorkflow": {
@@ -197,6 +205,27 @@
             "serverMessage": { "type": "string", "description": "The message from the MCP server requesting elicitation" },
             "reason": { "type": "string", "description": "Why the elicitation was auto-declined (e.g. 'phase already complete', 'URL elicitation not supported')" }
           }
+        },
+        "interactionEvent": {
+          "type": "object",
+          "description": "User interaction event during ablation runs. Records pauses (Ctrl+A), resumes, and aborts (Ctrl+C, exit command).",
+          "required": ["type", "trigger"],
+          "properties": {
+            "type": {
+              "type": "string",
+              "enum": ["pause", "resume", "abort"],
+              "description": "The kind of interaction: pause (Ctrl+A), resume (Enter after pause), abort (Ctrl+C or exit)"
+            },
+            "trigger": {
+              "type": "string",
+              "enum": ["ctrl-a", "ctrl-c", "exit-command", "user-input"],
+              "description": "What triggered this event"
+            }
+          }
+        },
+        "isInterjection": {
+          "type": "boolean",
+          "description": "Whether this user message was typed during an ablation pause (Ctrl+A interjection), as opposed to the original ablation prompt."
         }
       }
     },
