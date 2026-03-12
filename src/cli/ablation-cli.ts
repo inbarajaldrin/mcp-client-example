@@ -1698,6 +1698,12 @@ export class AblationCLI {
       return { abortRun: true };
     }
 
+    // Handle @escalate — signal to escalate to the next model in the chain
+    if (trimmedCommand === '@escalate') {
+      this.logger.log(`  ⤴ @escalate: escalating to next model for current phase\n`, { type: 'warning' });
+      return { escalate: true };
+    }
+
     // Handle @wait:<seconds> — pause execution
     const waitMatch = trimmedCommand.match(/^@wait:(\d+(?:\.\d+)?)$/);
     if (waitMatch) {
@@ -2149,6 +2155,11 @@ export class AblationCLI {
           return { phaseComplete: true };
         }
 
+        if (hookMgr.isEscalateRequested()) {
+          hookMgr.resetEscalate();
+          return { escalate: true };
+        }
+
         // Consume pending directives from hooks (attachment/prompt injections)
         const pendingResult = await this.consumePendingHookDirectives(hookMgr, maxIterations, ablation, phaseName, iterationDir);
         if (pendingResult) return pendingResult;
@@ -2171,7 +2182,16 @@ export class AblationCLI {
             hookMgr.resetAbortRun();
             return { abortRun: true };
           }
-          // Nudge didn't work — abort
+          if (hookMgr.isEscalateRequested()) {
+            hookMgr.resetEscalate();
+            return { escalate: true };
+          }
+          // Nudge didn't work — escalate if escalation enabled, otherwise abort
+          if (ablation?.escalation) {
+            this.logger.log(`  ⤴ Phase "${phaseName}": agent did not signal after nudge — escalating to next model\n`, { type: 'warning' });
+            this.client.getChatHistoryManager().addPhaseEvent('phase-escalate', phaseName, { after: 'agent-stopped' });
+            return { escalate: true };
+          }
           this.logger.log(`  ⚠ Phase "${phaseName}": agent still did not signal after nudge — aborting remaining phases\n`, { type: 'warning' });
           this.client.getChatHistoryManager().addPhaseEvent('phase-abort', phaseName, { after: 'agent-stopped' });
           return { abortRun: true };
@@ -2345,6 +2365,11 @@ export class AblationCLI {
         return { phaseComplete: true };
       }
 
+      if (hookManager.isEscalateRequested()) {
+        hookManager.resetEscalate();
+        return { escalate: true };
+      }
+
       // Consume pending directives from hooks (attachment/prompt injections)
       const pendingResult = await this.consumePendingHookDirectives(hookManager, maxIterations, ablation, phaseName, iterationDir);
       if (pendingResult) return pendingResult;
@@ -2367,7 +2392,16 @@ export class AblationCLI {
           hookManager.resetAbortRun();
           return { abortRun: true };
         }
-        // Nudge didn't work — abort
+        if (hookManager.isEscalateRequested()) {
+          hookManager.resetEscalate();
+          return { escalate: true };
+        }
+        // Nudge didn't work — escalate if escalation enabled, otherwise abort
+        if (ablation?.escalation) {
+          this.logger.log(`  ⤴ Phase "${phaseName}": agent did not signal after nudge — escalating to next model\n`, { type: 'warning' });
+          this.client.getChatHistoryManager().addPhaseEvent('phase-escalate', phaseName, { after: 'agent-stopped' });
+          return { escalate: true };
+        }
         this.logger.log(`  ⚠ Phase "${phaseName}": agent still did not signal after nudge — aborting remaining phases\n`, { type: 'warning' });
         this.client.getChatHistoryManager().addPhaseEvent('phase-abort', phaseName, { after: 'agent-stopped' });
         return { abortRun: true };
@@ -2980,13 +3014,15 @@ export class AblationCLI {
         case 'failed': return '✗';
         case 'skipped': return '⊘';
         case 'aborted': return '!';
+        case 'escalated': return '⤴';
         default: return '?';
       }
     };
 
     // Compute column widths
     const phaseColWidth = Math.max(14, ...results.map(r => r.phase.length + 2));
-    const statusColWidth = 8;
+    const hasAttempts = results.some(r => r.attempt);
+    const statusColWidth = hasAttempts ? 18 : 8;
     const durationColWidth = 10;
     const tokenColWidth = 12;
 
@@ -3015,8 +3051,9 @@ export class AblationCLI {
 
     for (const r of results) {
       const symbol = statusSymbol(r.status);
+      const attemptInfo = r.attempt ? ` (attempt ${r.attempt})` : '';
       const duration = r.duration ? formatDuration(r.duration) : '—';
-      let row = `│ ${r.phase.padEnd(phaseColWidth - 2)} │ ${symbol.padEnd(statusColWidth - 2)} │ ${duration.padEnd(durationColWidth - 2)} │`;
+      let row = `│ ${r.phase.padEnd(phaseColWidth - 2)} │ ${(symbol + attemptInfo).padEnd(statusColWidth - 2)} │ ${duration.padEnd(durationColWidth - 2)} │`;
       if (showTokens) {
         const tokens = this.formatTokenCount(r.tokens);
         row += ` ${tokens.padEnd(tokenColWidth - 2)} │`;
@@ -3275,6 +3312,449 @@ export class AblationCLI {
   }
 
   /**
+   * Escalation runner: phase-outer, model-inner loop.
+   * Models form an ordered chain — on failure/escalation, the next model retries the same phase.
+   * On success, resets to model[0] for the next phase.
+   */
+  private async runEscalationLoop(
+    ablation: AblationDefinition,
+    run: AblationRun,
+    runDir: string,
+    resolvedArguments: Record<string, string> | undefined,
+    iterations: number,
+    hasMultipleIterations: boolean,
+    getShouldBreak: () => boolean,
+    setShouldBreak: (v: boolean) => void,
+  ): Promise<void> {
+    const getRunIter = (iter: number) => hasMultipleIterations ? iter : undefined;
+    const models = ablation.models;
+
+    for (let iteration = 1; iteration <= iterations; iteration++) {
+      if (getShouldBreak()) break;
+
+      if (hasMultipleIterations) {
+        const iterLine = `ITERATION ${iteration}/${iterations}`;
+        const iterWidth = Math.max(iterLine.length, 59);
+        this.logger.log(`\n╔══${'═'.repeat(iterWidth)}══╗\n`, { type: 'info' });
+        this.logger.log(`║  ${iterLine.padEnd(iterWidth)}  ║\n`, { type: 'info' });
+        this.logger.log(`╚══${'═'.repeat(iterWidth)}══╝\n`, { type: 'info' });
+      }
+
+      // Track successful attempt dirs for output restoration across phases
+      const successfulPhaseOutputs = new Map<string, string>();
+      let runAborted = false;
+
+      for (const phase of ablation.phases) {
+        if (getShouldBreak() || runAborted) break;
+
+        // Skip disabled phases
+        if (phase.enabled === false) {
+          this.logger.log(`\n  ⤳ Skipping disabled phase: ${phase.name}\n`, { type: 'info' });
+          run.results.push({ phase: phase.name, model: models[0], status: 'skipped' });
+          continue;
+        }
+
+        let phaseCompleted = false;
+
+        for (let attemptIndex = 0; attemptIndex < models.length; attemptIndex++) {
+          if (getShouldBreak()) break;
+
+          const model = models[attemptIndex];
+          const attempt = attemptIndex + 1;
+          const modelKey = `${model.provider}/${model.model}`;
+
+          // Check for user abort
+          if (this.callbacks.isAbortRequested()) {
+            this.logger.log('\n⚠️  Ablation aborted by user.\n', { type: 'warning' });
+            setShouldBreak(true);
+            break;
+          }
+
+          // Switch to this model
+          try {
+            const provider = this.createProviderInstance(model.provider);
+            await this.client.switchProviderAndModel(provider, model.model);
+          } catch (error: any) {
+            this.logger.log(
+              `\n  ✗ Skipping ${modelKey}: failed to initialize — ${error.message}\n`,
+              { type: 'error' },
+            );
+            run.results.push({ phase: phase.name, model, status: 'skipped', attempt });
+            continue; // try next model
+          }
+
+          // Apply thinking config
+          if (model.thinking === 'off') {
+            // Do nothing
+          } else if (model.thinking) {
+            this.preferencesManager.setThinkingLevel(model.provider, model.thinking);
+          } else {
+            const defaultLevel = isReasoningModel(model.model, model.provider)
+              ? getDefaultThinkingLevel(model.provider)
+              : undefined;
+            if (defaultLevel) {
+              this.preferencesManager.setThinkingLevel(model.provider, defaultLevel);
+            }
+          }
+
+          // Clear context for fresh attempt
+          this.client.clearContext();
+
+          // Restore outputs from prior successful phases
+          this.ablationManager.restoreOutputsFromPriorPhases(successfulPhaseOutputs);
+
+          // Reset IPC call counter
+          const phaseIpcServer = this.client.getOrchestratorIPCServer();
+          if (phaseIpcServer) {
+            phaseIpcServer.resetIpcCallCount();
+          }
+
+          // Create attempt directory
+          const attemptDir = this.ablationManager.createEscalationAttemptDir(
+            runDir, phase.name, attempt, model,
+          );
+
+          // Save snapshots to attempt dir
+          this.ablationManager.saveToolsSnapshot(attemptDir, this.client.getServersInfo());
+
+          // Apply per-phase tool filter
+          const phaseToolFilter = this.ablationManager.getToolFilterForPhase(ablation, phase.name);
+          if (phaseToolFilter) {
+            this.client.applyAblationToolFilter(
+              tools => this.ablationManager.applyToolFilter(tools, phaseToolFilter),
+            );
+          }
+
+          // Display header
+          const thinkingInfo = model.thinking || (isReasoningModel(model.model, model.provider) ? getDefaultThinkingLevel(model.provider) : undefined);
+          const thinkingStatus = thinkingInfo ? ` │ Thinking: ${thinkingInfo}` : '';
+          const phaseIndex = ablation.phases.filter(p => p.enabled !== false).indexOf(phase) + 1;
+          const totalPhases = ablation.phases.filter(p => p.enabled !== false).length;
+
+          this.logger.log(
+            `\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`,
+            { type: 'info' },
+          );
+          this.logger.log(
+            `  PHASE ${phaseIndex}/${totalPhases}: ${phase.name}\n`,
+            { type: 'info' },
+          );
+          this.logger.log(
+            `  Attempt ${attempt}/${models.length}: ${modelKey}${thinkingStatus}\n`,
+            { type: 'info' },
+          );
+          this.logger.log(
+            `━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━\n`,
+            { type: 'info' },
+          );
+
+          const result: AblationRunResult = {
+            phase: phase.name,
+            model,
+            attempt,
+            status: 'running',
+          };
+          if (hasMultipleIterations) {
+            result.run = iteration;
+          }
+
+          const startTime = Date.now();
+
+          // Substitute argument placeholders
+          const sub = (cmds: string[]) =>
+            resolvedArguments ? this.ablationManager.substituteArguments(cmds, resolvedArguments) : cmds;
+          const phaseCommands = sub(phase.commands);
+          const phaseOnStart = phase.onStart ? sub(phase.onStart) : undefined;
+          const phaseOnEnd = phase.onEnd ? sub(phase.onEnd) : undefined;
+
+          try {
+            let aborted = false;
+            let abortCurrentRun = false;
+            let phaseCompletedViaSignal = false;
+            let escalateRequested = false;
+
+            // Log phase-start event
+            this.client.getChatHistoryManager().addPhaseEvent('phase-start', phase.name);
+
+            // Set system prompt
+            const masterPrompt = ablation.systemPrompt ?? null;
+            const phasePrompt = phase.systemPrompt ?? null;
+            const effectivePrompt = phasePrompt ?? masterPrompt ?? null;
+            if (effectivePrompt !== null) {
+              const resolvedPrompt = await this.resolvePromptReference(effectivePrompt, resolvedArguments);
+              this.client.setSystemPrompt(resolvedPrompt);
+            } else {
+              this.client.setSystemPrompt(null);
+            }
+
+            // Inject userPrompt
+            if (phase.userPrompt) {
+              const resolvedUserPrompt = await this.resolvePromptReference(phase.userPrompt, resolvedArguments);
+              this.client.getMessages().push({ role: 'user', content: resolvedUserPrompt });
+              this.client.getChatHistoryManager().addUserMessage(resolvedUserPrompt);
+            }
+
+            // Execute onStart hooks
+            if (phaseOnStart && phaseOnStart.length > 0) {
+              this.logger.log(`  ⤷ Phase onStart hooks...\n`, { type: 'info' });
+              for (const startCmd of phaseOnStart) {
+                if (this.callbacks.isAbortRequested()) {
+                  aborted = true;
+                  setShouldBreak(true);
+                  break;
+                }
+                this.logger.log(`    ↳ ${startCmd}\n`, { type: 'info' });
+                const hookResult = await this.executeAblationCommand(
+                  startCmd, ablation.settings.maxIterations, false, ablation, phase.name, attemptDir,
+                );
+                if (hookResult.toolExecResult) {
+                  this.client.getChatHistoryManager().addHookToolExecution(
+                    hookResult.toolExecResult.toolName,
+                    hookResult.toolExecResult.args,
+                    hookResult.toolExecResult.displayText || '',
+                    { type: 'on-start', action: 'tool-exec' },
+                  );
+                }
+              }
+            }
+
+            if (!aborted) {
+              // Pre-stage attachments
+              const isStagingCommand = (cmd: string) => {
+                const t = cmd.trim().toLowerCase();
+                return t.startsWith('@insert-attachment:') || t === '@clear-attachments';
+              };
+              const stagedIndices = new Set<number>();
+              for (let i = 0; i < phaseCommands.length; i++) {
+                if (isStagingCommand(phaseCommands[i])) {
+                  await this.executeAblationCommand(
+                    phaseCommands[i], ablation.settings.maxIterations, false, ablation, phase.name, attemptDir,
+                  );
+                  stagedIndices.add(i);
+                }
+              }
+
+              // Execute remaining commands
+              for (let i = 0; i < phaseCommands.length && !aborted; i++) {
+                if (stagedIndices.has(i)) continue;
+
+                this.callbacks.resetInterrupt();
+
+                if (this.callbacks.isAbortRequested()) {
+                  aborted = true;
+                  setShouldBreak(true);
+                  break;
+                }
+
+                const command = phaseCommands[i];
+                this.logger.log(`  [${i + 1}/${phaseCommands.length}] Executing: ${command}\n`, { type: 'info' });
+
+                // Handle @wait
+                const waitMatch = command.trim().match(/^@wait:(\d+(?:\.\d+)?)$/);
+                if (waitMatch) {
+                  const waitSeconds = parseFloat(waitMatch[1]);
+                  this.logger.log(`    Waiting ${waitSeconds}s...\n`, { type: 'info' });
+                  await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
+                  continue;
+                }
+
+                // Execute before-hooks for @tool-exec/@tool commands
+                const trimmedCmd = command.trim();
+                if (trimmedCmd.startsWith('@tool:') || trimmedCmd.startsWith('@tool-exec:')) {
+                  const parsed = parseDirectToolCall(trimmedCmd);
+                  if (parsed) {
+                    const hooks = this.ablationManager.getHooksForPhase(ablation, phase.name);
+                    for (const hook of hooks) {
+                      if (hook.before === parsed.toolName) {
+                        if (this.callbacks.isAbortRequested()) break;
+                        if (!hook.run) continue;
+                        const hookCmd = resolvedArguments
+                          ? this.ablationManager.substituteArguments([hook.run], resolvedArguments)[0]
+                          : hook.run;
+                        this.logger.log(`  ↳ Before hook: executing ${hookCmd}\n`, { type: 'info' });
+                        await this.executeAblationCommand(
+                          hookCmd, ablation.settings.maxIterations, false, ablation, phase.name, attemptDir,
+                        );
+                      }
+                    }
+                  }
+                }
+
+                const cmdResult = await this.executeAblationCommand(
+                  command, ablation.settings.maxIterations, false, ablation, phase.name, attemptDir,
+                );
+
+                // Check signals
+                if (cmdResult.phaseComplete) {
+                  phaseCompletedViaSignal = true;
+                  break;
+                }
+                if (cmdResult.escalate) {
+                  escalateRequested = true;
+                  break;
+                }
+                if (cmdResult.abortRun) {
+                  abortCurrentRun = true;
+                  break;
+                }
+
+                // Execute after-hooks
+                if (cmdResult.toolExecResult) {
+                  const hooks = this.ablationManager.getHooksForPhase(ablation, phase.name);
+                  for (const hook of hooks) {
+                    if (hook.after === cmdResult.toolExecResult.toolName) {
+                      if (hook.whenInput && !matchesWhenInputCondition(hook.whenInput, cmdResult.toolExecResult.args)) continue;
+                      if (hook.whenOutput && !matchesWhenOutputCondition(hook.whenOutput, cmdResult.toolExecResult.displayText)) continue;
+                      if (this.callbacks.isAbortRequested()) break;
+                      if (!hook.run) continue;
+
+                      const hookCmd = resolvedArguments
+                        ? this.ablationManager.substituteArguments([hook.run], resolvedArguments)[0]
+                        : hook.run;
+                      this.logger.log(`  ↳ Hook: executing ${hookCmd}\n`, { type: 'info' });
+                      const hookResult = await this.executeAblationCommand(
+                        hookCmd, ablation.settings.maxIterations, false, ablation, phase.name, attemptDir,
+                      );
+
+                      if (hook.prompt && !hookCmd.trim().startsWith('@tool-exec:')) {
+                        const resolvedHookPrompt = resolvedArguments
+                          ? this.ablationManager.substituteArguments([hook.prompt], resolvedArguments)[0]
+                          : hook.prompt;
+                        this.client.injectClientPrompt(resolvedHookPrompt, `hook: after ${hook.after}`);
+                      }
+
+                      if (hookResult.abortRun) { abortCurrentRun = true; break; }
+                      if (hookResult.phaseComplete) { break; }
+                      if (hookResult.escalate) { escalateRequested = true; break; }
+                    }
+                  }
+                }
+
+                if (abortCurrentRun || escalateRequested) break;
+
+                if (this.callbacks.isAbortRequested()) {
+                  aborted = true;
+                  setShouldBreak(true);
+                  break;
+                }
+              }
+            }
+
+            // Execute onEnd hooks (only if not aborted/escalated)
+            if (!aborted && !escalateRequested && !abortCurrentRun && phaseOnEnd && phaseOnEnd.length > 0) {
+              this.logger.log(`  ⤷ Phase onEnd hooks...\n`, { type: 'info' });
+              for (const endCmd of phaseOnEnd) {
+                if (this.callbacks.isAbortRequested()) break;
+                this.logger.log(`    ↳ ${endCmd}\n`, { type: 'info' });
+                await this.executeAblationCommand(
+                  endCmd, ablation.settings.maxIterations, false, ablation, phase.name, attemptDir,
+                );
+              }
+            }
+
+            // Determine result
+            await this.client.cleanupVideoRecording();
+            result.duration = Date.now() - startTime;
+            result.durationFormatted = formatDuration(result.duration);
+
+            if (!ablation.dryRun) {
+              const tokenUsage = this.client.getTokenUsage();
+              result.tokens = tokenUsage.current;
+            }
+
+            if (aborted) {
+              result.status = 'aborted';
+              this.client.getChatHistoryManager().addPhaseEvent('phase-abort', phase.name);
+            } else if (abortCurrentRun) {
+              result.status = 'aborted';
+              runAborted = true;
+            } else if (escalateRequested) {
+              result.status = 'escalated';
+              this.client.getChatHistoryManager().addPhaseEvent('phase-escalate', phase.name, { after: `escalation-attempt-${attempt}` });
+            } else if (phaseCompletedViaSignal) {
+              result.status = 'completed';
+              this.logger.log(`  ✓ Phase "${phase.name}" completed (attempt ${attempt})\n`, { type: 'success' });
+            } else {
+              // Commands exhausted without signal — treat as completed
+              result.status = 'completed';
+              this.client.getChatHistoryManager().addPhaseEvent('phase-complete', phase.name, { after: 'commands-exhausted' });
+            }
+
+            // Save chat history to attempt dir
+            this.savePhaseChatHistory(
+              `Ablation run (escalation): ${phase.name} with ${modelKey} (attempt ${attempt})`,
+              runDir, phase.name, attemptDir, model, result, hasMultipleIterations, iteration,
+            );
+
+          } catch (error: any) {
+            result.status = 'failed';
+            result.error = error.message;
+            result.duration = Date.now() - startTime;
+            result.durationFormatted = formatDuration(result.duration);
+
+            if (!ablation.dryRun) {
+              try {
+                const tokenUsage = this.client.getTokenUsage();
+                result.tokens = tokenUsage.current;
+              } catch { /* ignore */ }
+            }
+
+            await this.client.cleanupVideoRecording();
+
+            this.savePhaseChatHistory(
+              `Ablation run (failed): ${phase.name} with ${modelKey} (attempt ${attempt})`,
+              runDir, phase.name, attemptDir, model, result, hasMultipleIterations, iteration,
+            );
+
+            this.logger.log(`\n  ✗ Attempt failed: ${error.message}\n`, { type: 'error' });
+            // Treat exception as implicit escalation
+          }
+
+          // Capture outputs to attempt dir
+          this.ablationManager.captureEscalationOutputs(attemptDir);
+
+          // Restore tool filter
+          this.client.restoreAblationToolFilter();
+
+          run.results.push(result);
+
+          // Handle result
+          if (result.status === 'completed') {
+            successfulPhaseOutputs.set(phase.name, attemptDir);
+            phaseCompleted = true;
+            // Clear outputs for next phase
+            this.ablationManager.clearOutputs();
+            break; // next phase
+          }
+
+          if (result.status === 'aborted' || runAborted) {
+            runAborted = true;
+            break; // abort entire run
+          }
+
+          // escalated or failed — try next model
+          this.logger.log(
+            `  ⤴ Phase "${phase.name}" escalating from ${modelKey} (attempt ${attempt}/${models.length})\n`,
+            { type: 'warning' },
+          );
+          this.ablationManager.clearOutputs();
+        } // end model attempts loop
+
+        // Check if phase was never completed (models exhausted)
+        if (!phaseCompleted && !runAborted && !getShouldBreak()) {
+          this.logger.log(
+            `\n  ✗ All models exhausted for phase "${phase.name}" — aborting run\n`,
+            { type: 'error' },
+          );
+          runAborted = true;
+        }
+
+        if (runAborted) break;
+      } // end phase loop
+    } // end iteration loop
+  }
+
+  /**
    * Run a single ablation study. Handles MCP config, execution, results, and output cleanup.
    * Server connections are reused across calls when the config hasn't changed.
    * @returns true if the user aborted
@@ -3397,6 +3877,12 @@ export class AblationCLI {
     const hasMultipleIterations = iterations > 1;
     // runIteration passed to directory helpers: undefined when iterations=1 (preserves old paths)
     const getRunIter = (iter: number) => hasMultipleIterations ? iter : undefined;
+
+    if (ablation.escalation && !ablation.dryRun) {
+      // ==================== Escalation Mode ====================
+      // Phase-outer, model-inner: try models in order per phase
+      await this.runEscalationLoop(ablation, run, runDir, resolvedArguments, iterations, hasMultipleIterations, () => shouldBreak, (v: boolean) => { shouldBreak = v; });
+    } else {
 
     // Execute: iteration > model > phase
     for (let iteration = 1; iteration <= iterations; iteration++) {
@@ -3646,6 +4132,7 @@ export class AblationCLI {
             let abortCurrentModel = false;
             let phaseCompletedViaSignal = false;
             let restartPhase = false;
+            let escalateRequested = false;
 
             // Outer loop: re-entered when user chooses "restart phase"
             // eslint-disable-next-line no-constant-condition
@@ -3893,6 +4380,12 @@ export class AblationCLI {
                 break;
               }
 
+              // Escalation requested via @escalate (from direct command or agent-driven hook)
+              if (cmdResult.escalate) {
+                escalateRequested = true;
+                break;
+              }
+
               // Execute after-hooks (only for @tool-exec/@tool commands, no recursion)
               if (cmdResult.toolExecResult) {
                 const hooks = this.ablationManager.getHooksForPhase(ablation, phase.name);
@@ -3944,12 +4437,21 @@ export class AblationCLI {
                       break;
                     }
 
+                    // @escalate hook — escalate to next model for this phase
+                    if (hookResult.escalate) {
+                      escalateRequested = true;
+                      break;
+                    }
+
                   }
                 }
               }
 
               // If @abort was triggered by an after-hook, break out of the command loop
               if (abortCurrentModel) break;
+
+              // If @escalate was triggered by an after-hook, break out of the command loop
+              if (escalateRequested) break;
 
               // Check for abort after each command
               if (this.callbacks.isAbortRequested()) {
@@ -4074,6 +4576,35 @@ export class AblationCLI {
               break; // break phase loop, continue to next model
             }
 
+            // @escalate triggered — record as escalated and let outer loop handle
+            if (escalateRequested) {
+              await this.client.cleanupVideoRecording();
+
+              result.status = 'escalated';
+              result.duration = Date.now() - startTime;
+              result.durationFormatted = formatDuration(result.duration);
+
+              if (!ablation.dryRun) {
+                const tokenUsage = this.client.getTokenUsage();
+                result.tokens = tokenUsage.current;
+              }
+
+              if (ablation.settings.clearContextBetweenPhases !== false) {
+                this.savePhaseChatHistory(
+                  `Ablation run (@escalate): ${phase.name} with ${model.provider}/${model.model}`,
+                  runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
+                );
+              }
+
+              this.logger.log(
+                `\n  ⤴ Escalating phase "${phase.name}" to next model\n`,
+                { type: 'warning' },
+              );
+
+              run.results.push(result);
+              break; // break phase loop — escalation handled by outer logic
+            }
+
             // Get token usage (skip in dry run - no model means no tokens)
             if (!ablation.dryRun) {
               const tokenUsage = this.client.getTokenUsage();
@@ -4189,6 +4720,7 @@ export class AblationCLI {
       }
 
     }
+    } // end else (non-escalation)
     } finally {
       // Resume client-side hooks
       hookManager.resume();
@@ -4387,6 +4919,7 @@ export class AblationCLI {
       for (let i = 0; i < page.length; i++) {
         const { timestamp, run } = page[i];
         const completedCount = run.results.filter(r => r.status === 'completed').length;
+        const escalatedCount = run.results.filter(r => r.status === 'escalated').length;
         const totalCount = run.results.length;
         const duration = run.totalDuration ? formatDuration(run.totalDuration) : 'N/A';
 
@@ -4400,9 +4933,10 @@ export class AblationCLI {
         const modelNames = [...modelSet].join(', ');
         const phaseNames = [...phaseSet].join(', ');
 
+        const escalatedSuffix = escalatedCount > 0 ? ` (${escalatedCount} escalated)` : '';
         this.logger.log(`  ${offset + i + 1}. ${timestamp}\n`, { type: 'info' });
         this.logger.log(
-          `     └─ ${completedCount}/${totalCount} completed | ${duration} | ${modelNames}\n`,
+          `     └─ ${completedCount}/${totalCount} completed${escalatedSuffix} | ${duration} | ${modelNames}\n`,
           { type: 'info' },
         );
         this.logger.log(
@@ -4584,6 +5118,7 @@ export class AblationCLI {
       for (const [, { model, results }] of modelKeys) {
         const modelShort = this.ablationManager.getModelShortName(model);
         const completedCount = results.filter(r => r.status === 'completed').length;
+        const escalatedCount = results.filter(r => r.status === 'escalated').length;
         const totalDuration = results.reduce((sum, r) => sum + (r.duration || 0), 0);
 
         let totalCost = 0;
@@ -4613,8 +5148,9 @@ export class AblationCLI {
           tokenDisplay = totalTokens > 0 ? `${totalTokens.toLocaleString()} tok` : 'N/A';
         }
 
+        const escalatedSuffix = escalatedCount > 0 ? ` (${escalatedCount} escalated)` : '';
         this.logger.log(`    ${modelShort} (${model.provider})\n`, { type: 'info' });
-        this.logger.log(`      Phases: ${completedCount}/${results.length} completed\n`, { type: 'info' });
+        this.logger.log(`      Phases: ${completedCount}/${results.length} completed${escalatedSuffix}\n`, { type: 'info' });
         this.logger.log(`      Duration: ${formatDuration(totalDuration)}\n`, { type: 'info' });
         this.logger.log(`      Tokens: ${tokenDisplay}\n`, { type: 'info' });
 
@@ -4677,6 +5213,7 @@ export class AblationCLI {
 
       for (const [phaseName, results] of phaseKeys) {
         const completedCount = results.filter(r => r.status === 'completed').length;
+        const escalatedCount = results.filter(r => r.status === 'escalated').length;
         const totalDuration = results.reduce((sum, r) => sum + (r.duration || 0), 0);
 
         let totalCost = 0;
@@ -4699,8 +5236,9 @@ export class AblationCLI {
           ? this.ablationManager.getModelShortName(results[0].model)
           : `${modelCount} models`;
 
+        const escalatedSuffix = escalatedCount > 0 ? ` (${escalatedCount} escalated)` : '';
         this.logger.log(`    ${phaseName} (${modelLabel})\n`, { type: 'info' });
-        this.logger.log(`      Status: ${completedCount}/${results.length} completed\n`, { type: 'info' });
+        this.logger.log(`      Status: ${completedCount}/${results.length} completed${escalatedSuffix}\n`, { type: 'info' });
         this.logger.log(`      Duration: ${formatDuration(totalDuration)}\n`, { type: 'info' });
         this.logger.log(`      Tokens: ${tokenDisplay}\n`, { type: 'info' });
 
@@ -4728,6 +5266,7 @@ export class AblationCLI {
       for (const iter of sortedIters) {
         const results = iterationKeys.get(iter)!;
         const completedCount = results.filter(r => r.status === 'completed').length;
+        const escalatedCount = results.filter(r => r.status === 'escalated').length;
         const totalDuration = results.reduce((sum, r) => sum + (r.duration || 0), 0);
         const totalTokens = results.reduce((sum, r) => sum + (r.tokens || 0), 0);
 
@@ -4737,8 +5276,9 @@ export class AblationCLI {
           if (c) totalCost += c.totalCost;
         }
 
+        const escalatedSuffix = escalatedCount > 0 ? ` (${escalatedCount} escalated)` : '';
         this.logger.log(`    Run ${iter}\n`, { type: 'info' });
-        this.logger.log(`      Status: ${completedCount}/${results.length} completed\n`, { type: 'info' });
+        this.logger.log(`      Status: ${completedCount}/${results.length} completed${escalatedSuffix}\n`, { type: 'info' });
         this.logger.log(`      Duration: ${formatDuration(totalDuration)}\n`, { type: 'info' });
         if (totalTokens > 0) {
           this.logger.log(`      Tokens: ${totalTokens.toLocaleString()}\n`, { type: 'info' });
@@ -4870,8 +5410,10 @@ export class AblationCLI {
         const results = modelGroups.get(modelKeys[i])!;
         const modelShort = this.ablationManager.getModelShortName(results[0].model);
         const completedCount = results.filter(r => r.status === 'completed').length;
+        const escalatedCount = results.filter(r => r.status === 'escalated').length;
+        const escalatedSuffix = escalatedCount > 0 ? `, ${escalatedCount} escalated` : '';
         this.logger.log(
-          `  ${i + 1}. ${modelShort} (${completedCount}/${results.length} phases completed)\n`,
+          `  ${i + 1}. ${modelShort} (${completedCount}/${results.length} phases completed${escalatedSuffix})\n`,
           { type: 'info' },
         );
       }

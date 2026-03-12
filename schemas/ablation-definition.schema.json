@@ -51,6 +51,11 @@
     "systemPrompt": {
       "type": "string",
       "description": "Master system prompt — all phases inherit unless overridden. Sent via each provider's native system prompt mechanism. Supports @insert-prompt:server__promptName(arg='val') and @insert-resource:server__templateName(param='val') syntax."
+    },
+    "escalation": {
+      "type": "boolean",
+      "default": false,
+      "description": "When true, models form an ordered escalation chain. On phase failure (@escalate), the runner switches to the next model and re-runs the same phase with clean context. On success, resets to model[0] for the next phase. If all models are exhausted, the run is aborted."
     }
   },
   "$defs": {
@@ -79,7 +84,7 @@
         "commands": {
           "type": "array",
           "items": { "type": "string" },
-          "description": "Ordered commands: @tool-exec:server__tool(args), @tool:server__tool(args), @insert-prompt:server__promptName(arg='val'), @insert-resource:server__resourceName, @insert-resource:server__templateName(param='val'), @insert-attachment:filename, @clear-attachments, @wait:N, @complete-phase, @abort, or plain text (user prompt to LLM)"
+          "description": "Ordered commands: @tool-exec:server__tool(args), @tool:server__tool(args), @insert-prompt:server__promptName(arg='val'), @insert-resource:server__resourceName, @insert-resource:server__templateName(param='val'), @insert-attachment:filename, @clear-attachments, @wait:N, @complete-phase, @escalate, @abort, or plain text (user prompt to LLM)"
         },
         "hooks": {
           "type": "array",

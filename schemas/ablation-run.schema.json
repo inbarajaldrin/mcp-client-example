@@ -37,10 +37,11 @@
           }
         },
         "run": { "type": "integer", "description": "Run number (only populated when runs > 1)" },
+        "attempt": { "type": "integer", "description": "Escalation attempt number (1-based). Only set when escalation: true." },
         "status": {
           "type": "string",
-          "enum": ["pending", "running", "completed", "failed", "skipped", "aborted"],
-          "description": "Execution status of this phase/model combination"
+          "enum": ["pending", "running", "completed", "failed", "skipped", "aborted", "escalated"],
+          "description": "Execution status of this phase/model combination. 'escalated' means this attempt failed and the next model in the chain was tried."
         },
         "tokens": { "type": "integer", "description": "Tokens consumed" },
         "duration": { "type": "number", "description": "Duration in milliseconds" },

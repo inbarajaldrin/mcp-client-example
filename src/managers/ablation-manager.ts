@@ -90,13 +90,15 @@ export interface AblationDefinition {
   hooks?: PostToolHook[];  // Post-tool hooks applied to all phases
   tools?: AblationToolFilter;  // Top-level tool filter — applies to all phases
   systemPrompt?: string;   // Master system prompt — all phases inherit unless overridden
+  escalation?: boolean;  // When true, models are an ordered escalation chain (not parallel)
 }
 
 export interface AblationRunResult {
   phase: string;
   model: AblationModel;
   run?: number;           // Only populated when runs > 1
-  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'aborted';
+  attempt?: number;       // Escalation attempt number (1-based), only set when escalation: true
+  status: 'pending' | 'running' | 'completed' | 'failed' | 'skipped' | 'aborted' | 'escalated';
   tokens?: number;
   duration?: number; // milliseconds
   durationFormatted?: string; // human-readable (e.g. "4m 5s")
@@ -127,6 +129,8 @@ export interface AblationCommandResult {
   abortRun?: boolean;
   /** When true, signals that the current phase is complete and should advance to the next */
   phaseComplete?: boolean;
+  /** When true, signals escalation to the next model in the chain for the current phase */
+  escalate?: boolean;
 }
 
 // ==================== Manager ====================
@@ -646,6 +650,75 @@ export class AblationManager {
       : join(runDir, modelDir, sanitizeFolderName(phaseName));
     mkdirSync(basePath, { recursive: true });
     return basePath;
+  }
+
+  /**
+   * Create escalation attempt directory within a run.
+   * Structure: {runDir}/{phase}/attempt-{N}--{provider}--{model}/
+   */
+  createEscalationAttemptDir(runDir: string, phaseName: string, attempt: number, model: AblationModel): string {
+    const phaseDir = sanitizeFolderName(phaseName);
+    const modelDir = this.getModelDirName(model);
+    const attemptDir = join(runDir, phaseDir, `attempt-${attempt}--${modelDir}`);
+    mkdirSync(attemptDir, { recursive: true });
+    return attemptDir;
+  }
+
+  /**
+   * Capture outputs for an escalation attempt.
+   * Copies from shared OUTPUTS_DIR to the attempt directory.
+   */
+  captureEscalationOutputs(attemptDir: string): number {
+    try {
+      if (!existsSync(OUTPUTS_DIR)) {
+        return 0;
+      }
+
+      const items = readdirSync(OUTPUTS_DIR);
+      if (items.length === 0) {
+        return 0;
+      }
+
+      mkdirSync(attemptDir, { recursive: true });
+      cpSync(OUTPUTS_DIR, attemptDir, { recursive: true });
+      return items.length;
+    } catch (error) {
+      this.logger.log(`Failed to capture escalation outputs: ${error}\n`, { type: 'error' });
+      return 0;
+    }
+  }
+
+  /**
+   * Restore outputs from prior successful phases into the shared OUTPUTS_DIR.
+   * Used during escalation to give the new model access to prior phases' artifacts.
+   * 1. Clears OUTPUTS_DIR
+   * 2. Copies outputs from each successful prior phase's attempt dir
+   */
+  restoreOutputsFromPriorPhases(successfulPhaseOutputs: Map<string, string>): void {
+    this.clearOutputs();
+
+    for (const [phaseName, attemptDir] of successfulPhaseOutputs) {
+      try {
+        if (!existsSync(attemptDir)) continue;
+
+        // Copy all items from the attempt dir's output content into OUTPUTS_DIR
+        // The attempt dir IS the outputs capture (captureEscalationOutputs copies OUTPUTS_DIR → attemptDir)
+        const items = readdirSync(attemptDir);
+        for (const item of items) {
+          // Skip non-output files (chat.json, chat.md, tools.yaml, resources.yaml)
+          if (['chat.json', 'chat.md', 'tools.yaml', 'resources.yaml', 'prompts.yaml'].includes(item)) continue;
+          const src = join(attemptDir, item);
+          const dest = join(OUTPUTS_DIR, item);
+          try {
+            cpSync(src, dest, { recursive: true });
+          } catch (copyErr) {
+            this.logger.log(`Failed to restore output "${item}" from phase "${phaseName}": ${copyErr}\n`, { type: 'warning' });
+          }
+        }
+      } catch (error) {
+        this.logger.log(`Failed to restore outputs from phase "${phaseName}": ${error}\n`, { type: 'warning' });
+      }
+    }
   }
 
   /**

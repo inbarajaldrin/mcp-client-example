@@ -51,7 +51,7 @@ interface HookChatLogger {
     },
   ): void;
   addPhaseEvent(
-    type: 'phase-start' | 'phase-complete' | 'phase-abort',
+    type: 'phase-start' | 'phase-complete' | 'phase-abort' | 'phase-escalate',
     phaseName: string,
     trigger?: { after?: string; whenOutput?: Record<string, unknown> },
   ): void;
@@ -69,6 +69,7 @@ export class HookManager {
   private currentPhaseName: string = '';
   private phaseCompleteRequested: boolean = false;
   private abortRunRequested: boolean = false;
+  private escalateRequested: boolean = false;
   private pendingToolInjection: boolean = false;
 
   // Pending @ directive commands from hooks — consumed by ablation-cli after processQuery returns
@@ -200,6 +201,7 @@ export class HookManager {
     this.pendingAttachmentInsertions = [];
     this.pendingClearAttachments = false;
     this.pendingClientPrompt = null;
+    this.escalateRequested = false;
   }
 
   /** Set the current phase name for @complete-phase:name matching */
@@ -229,6 +231,17 @@ export class HookManager {
 
   /** Reset abort run flag */
   resetAbortRun(): void { this.abortRunRequested = false; }
+
+  // ==================== Escalation Signaling ====================
+
+  /** Signal that the current phase should escalate to the next model */
+  requestEscalate(): void { this.escalateRequested = true; }
+
+  /** Check if escalation has been requested */
+  isEscalateRequested(): boolean { return this.escalateRequested; }
+
+  /** Reset escalation flag */
+  resetEscalate(): void { this.escalateRequested = false; }
 
   // ==================== Pending Tool Injection Signaling ====================
 
@@ -312,6 +325,17 @@ export class HookManager {
       this.logger.log(`[Hook abort: skipping remaining phases for current model]\n`, { type: 'warning' });
       this.abortRunRequested = true;
       this.chatLogger?.addPhaseEvent('phase-abort', this.currentPhaseName || 'unknown', {
+        after: triggerTool,
+        whenOutput,
+      });
+      return true;
+    }
+
+    // @escalate — signal that the current phase should escalate to the next model
+    if (trimmed === '@escalate') {
+      this.logger.log(`[Hook escalate: escalating to next model for phase "${this.currentPhaseName || 'unknown'}"]\n`, { type: 'warning' });
+      this.escalateRequested = true;
+      this.chatLogger?.addPhaseEvent('phase-escalate', this.currentPhaseName || 'unknown', {
         after: triggerTool,
         whenOutput,
       });
@@ -523,7 +547,7 @@ export class HookManager {
 
           // Special commands were already handled inline — skip
           const trimmed = hook.run.trim();
-          if (trimmed === '@complete-phase' || trimmed.startsWith('@complete-phase:') || trimmed === '@abort') {
+          if (trimmed === '@complete-phase' || trimmed.startsWith('@complete-phase:') || trimmed === '@abort' || trimmed === '@escalate') {
             continue;
           }
 
