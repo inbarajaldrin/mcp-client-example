@@ -4,7 +4,7 @@
 
 import readline from 'readline/promises';
 import chalk from 'chalk';
-import { cpSync, existsSync, mkdirSync } from 'fs';
+import { cpSync, existsSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import { ListToolsResultSchema } from '@modelcontextprotocol/sdk/types.js';
@@ -116,6 +116,8 @@ export interface AblationCLICallbacks {
   getChatHistoryCLI: () => import('./chat-history-cli.js').ChatHistoryCLI;
   /** Restore the CLI's iteration-limit callback on the MCPClient (cleared during ablation) */
   restoreIterationLimitCallback: () => void;
+  /** Signal the main chat loop to auto-continue (trigger agent without user input) */
+  setPendingContinuation: () => void;
 }
 
 /**
@@ -129,6 +131,11 @@ export class AblationCLI {
   private preferencesManager: PreferencesManager;
   private callbacks: AblationCLICallbacks;
   private lastAblationMcpConfigPath: string | null = null;
+  private continuationPhaseDir: string | null = null;
+
+  getContinuationPhaseDir(): string | null {
+    return this.continuationPhaseDir;
+  }
 
   constructor(
     client: MCPClient,
@@ -5685,6 +5692,18 @@ export class AblationCLI {
             `\n✓ Restored ${restoredCount} messages into conversation context.\n`,
             { type: 'success' },
           );
+
+          // Offer continuation if this is a single aborted phase
+          if (selectedResults.length === 1 && selectedResults[0].status === 'aborted') {
+            const continueAnswer = (
+              await rl.question('\nPhase was aborted. Rewind to last scene checkpoint and continue without iteration limit? (y/n, default: n): ')
+            ).trim().toLowerCase();
+            if (continueAnswer === 'y' || continueAnswer === 'yes') {
+              const r = selectedResults[0];
+              const phaseDir = this.ablationManager.getRunOutputsDir(runDir, r.phase, r.model, r.run);
+              await this.handleContinuationSetup(chatSession, phaseDir, runDir, r.phase, rl);
+            }
+          }
         } else {
           this.logger.log('\nFailed to load chat session from file.\n', { type: 'error' });
         }
@@ -5701,6 +5720,152 @@ export class AblationCLI {
         this.logger.log('\n  (No chat file found for this phase — likely a dry run)\n', { type: 'info' });
       }
     }
+  }
+
+  // ==================== Ablation Continuation ====================
+
+  /**
+   * After restoring an aborted phase chat, rewind to the last save_scene_state checkpoint,
+   * physically restore the scene via MCP, inject the result, remove the iteration limit,
+   * and auto-trigger the agent to continue.
+   */
+  private async handleContinuationSetup(
+    chatSession: any,
+    phaseDir: string,
+    runDir: string,
+    phaseName: string,
+    rl: readline.Interface,
+  ): Promise<void> {
+    const messages: any[] = chatSession.messages || [];
+
+    // Search backwards for the last save_scene_state tool result (preferred checkpoint),
+    // falling back to restore_scene_state if no save is found.
+    let checkpointIdx = -1;
+    for (let i = messages.length - 1; i >= 0; i--) {
+      const msg = messages[i];
+      if (msg.role === 'tool' && msg.toolName && msg.toolName.includes('save_scene_state')) {
+        checkpointIdx = i;
+        break;
+      }
+    }
+    if (checkpointIdx === -1) {
+      for (let i = messages.length - 1; i >= 0; i--) {
+        const msg = messages[i];
+        if (msg.role === 'tool' && msg.toolName && msg.toolName.includes('restore_scene_state')) {
+          checkpointIdx = i;
+          break;
+        }
+      }
+    }
+
+    if (checkpointIdx === -1) {
+      this.logger.log(
+        '\n  No scene checkpoint found (save_scene_state / restore_scene_state). Cannot auto-rewind.\n',
+        { type: 'warning' },
+      );
+      return;
+    }
+
+    const checkpointMsg = messages[checkpointIdx];
+    const filename: string | undefined = checkpointMsg.toolInput?.json_file_path;
+    this.logger.log(
+      `\n  Found checkpoint: ${checkpointMsg.toolName} — ${filename ?? '(no filename)'}\n`,
+      { type: 'info' },
+    );
+
+    if (!filename) {
+      this.logger.log('  Warning: No json_file_path in checkpoint call. Cannot auto-restore scene.\n', { type: 'warning' });
+      return;
+    }
+
+    // Truncate just before the next assistant message after the checkpoint
+    let truncationIdx = messages.length;
+    for (let i = checkpointIdx + 1; i < messages.length; i++) {
+      if (messages[i].role === 'assistant') {
+        truncationIdx = i;
+        break;
+      }
+    }
+    const removedCount = messages.length - truncationIdx;
+    if (removedCount > 0) {
+      this.logger.log(`  Removing ${removedCount} messages after checkpoint.\n`, { type: 'info' });
+    }
+
+    // Re-restore from truncated session
+    const truncatedSession = { ...chatSession, messages: messages.slice(0, truncationIdx) };
+    this.client.clearContext();
+    const chatHistoryCLI = this.callbacks.getChatHistoryCLI();
+    const rewindCount = chatHistoryCLI.restoreFromSession(truncatedSession);
+    this.logger.log(`  Rewound to checkpoint (${rewindCount} messages in context).\n`, { type: 'success' });
+
+    // Physically restore the scene and inject the call+result into context
+    const restoreToolName = checkpointMsg.toolName.replace('save_scene_state', 'restore_scene_state');
+    const restoreInput = { json_file_path: filename };
+    this.logger.log(`  Calling ${restoreToolName} with ${filename}...\n`, { type: 'info' });
+    try {
+      const restoreResult = await this.client.executeMCPTool(restoreToolName, restoreInput);
+      this.client.injectToolResult(restoreToolName, restoreInput as Record<string, unknown>, restoreResult);
+      this.logger.log('  Scene restored.\n', { type: 'success' });
+    } catch (err) {
+      this.logger.log(`  Warning: ${restoreToolName} failed: ${err}\n`, { type: 'warning' });
+      this.client.injectToolResult(restoreToolName, restoreInput as Record<string, unknown>, {
+        displayText: `Scene restoration attempted (${filename})`,
+        contentBlocks: [{ type: 'text', text: `restore_scene_state called with json_file_path=${filename}` }],
+      });
+    }
+
+    // Restore ablation phase configuration (tool filter, system prompt, hooks)
+    const frozenDefPath = join(runDir, 'definition.yaml');
+    if (existsSync(frozenDefPath)) {
+      const yaml = (await import('yaml')).default;
+      const frozenDef = yaml.parse(readFileSync(frozenDefPath, 'utf-8')) as AblationDefinition;
+      const phaseDef = frozenDef.phases?.find((p: any) => p.name === phaseName);
+      const runMeta = this.ablationManager.loadRunResults(runDir);
+      const resolvedArguments = runMeta?.resolvedArguments ?? {};
+
+      // Apply tool filter
+      const phaseToolFilter = this.ablationManager.getToolFilterForPhase(frozenDef, phaseName);
+      if (phaseToolFilter) {
+        this.client.applyAblationToolFilter(
+          tools => this.ablationManager.applyToolFilter(tools, phaseToolFilter),
+        );
+        this.logger.log(`  Tool filter applied (${this.client.getTools().length} tools available).\n`, { type: 'info' });
+      }
+
+      // Restore system prompt
+      const effectivePrompt = phaseDef?.systemPrompt ?? frozenDef.systemPrompt ?? null;
+      if (effectivePrompt !== null) {
+        const resolved = await this.resolvePromptReference(effectivePrompt, resolvedArguments ?? {});
+        this.client.setSystemPrompt(resolved);
+        this.logger.log('  System prompt restored.\n', { type: 'info' });
+      } else {
+        this.client.setSystemPrompt(null);
+      }
+
+      // Load ablation hooks
+      const hookManager = this.client.getHookManager();
+      hookManager.suspend();
+      const phaseHooks = this.ablationManager.getHooksForPhase(frozenDef, phaseName);
+      if (phaseHooks.length > 0) {
+        hookManager.loadAblationHooks(phaseHooks);
+        hookManager.setCurrentPhaseName(phaseName);
+        hookManager.resetPhaseComplete();
+        this.logger.log(`  ${phaseHooks.length} phase hook(s) loaded.\n`, { type: 'info' });
+      }
+    }
+
+    // Remove iteration limit for continuation
+    this.preferencesManager.setMaxIterations(-1);
+    this.callbacks.restoreIterationLimitCallback();
+    this.logger.log('  Iteration limit removed (unlimited).\n', { type: 'success' });
+
+    // Store phase dir for /ablation-save-continuation and trigger agent auto-continuation
+    this.continuationPhaseDir = phaseDir;
+    this.callbacks.setPendingContinuation();
+    this.logger.log(
+      `  Agent will continue automatically. Run /ablation-save-continuation when done to save as chat_new.json.\n`,
+      { type: 'info' },
+    );
   }
 
   // ==================== Ablation Edit Helpers ====================
