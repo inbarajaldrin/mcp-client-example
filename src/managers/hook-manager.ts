@@ -615,7 +615,7 @@ export class HookManager {
       gateResult = await executeTool(gateParsed.toolName, gateParsed.args);
     } catch (error: any) {
       this.logger.log(`[Gate tool failed: ${error.message} — running onFail commands]\n`, { type: 'warning' });
-      await this.executeGateCommands(gate.onFail, triggerTool, executeTool);
+      await this.executeGateCommands(gate.onFail, triggerTool, executeTool, error.message);
       return;
     }
 
@@ -633,8 +633,8 @@ export class HookManager {
       whenOutput: gate.whenOutput,
     });
 
-    // 3. Execute the chosen command list
-    await this.executeGateCommands(commands, triggerTool, executeTool);
+    // 3. Execute the chosen command list (pass gate output for {{gate_output}} substitution)
+    await this.executeGateCommands(commands, triggerTool, executeTool, gateResult.displayText);
 
     // 4. Queue gate prompt for injection by ablation-cli (if present)
     if (gate.prompt) {
@@ -646,14 +646,18 @@ export class HookManager {
    * Execute a list of commands from a gate's onPass or onFail array.
    * Supports: @tool-exec, special commands (@insert-prompt, @complete-phase, etc.),
    * and plain text (treated as @insert-prompt with inline text).
+   * Commands may contain {{gate_output}} which is replaced with the gate tool's output.
    */
   private async executeGateCommands(
     commands: string[],
     triggerTool: string,
     executeTool: (name: string, args: Record<string, unknown>) => Promise<ToolExecutionResult>,
+    gateOutput?: string,
   ): Promise<void> {
     for (const cmd of commands) {
-      const trimmed = cmd.trim();
+      const trimmed = gateOutput
+        ? cmd.trim().replace(/\{\{gate_output\}\}/g, gateOutput)
+        : cmd.trim();
 
       // Special commands (@insert-prompt, @complete-phase, @abort, etc.)
       if (this.handleSpecialCommand(trimmed, triggerTool)) {
