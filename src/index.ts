@@ -3243,50 +3243,54 @@ export class MCPClient {
     return { pendingToolResults, lastTokenUsage, deferredHookData };
   }
 
-  async processQuery(query: string, isSystemPrompt: boolean = false, attachments?: Array<{ path: string; fileName: string; ext: string; mediaType: string }>, cancellationCheck?: () => boolean, observer?: StreamObserver) {
+  async processQuery(query: string | null, isSystemPrompt: boolean = false, attachments?: Array<{ path: string; fileName: string; ext: string; mediaType: string }>, cancellationCheck?: () => boolean, observer?: StreamObserver) {
     // Track message count before adding new message (for cleanup on abort)
     const messagesBeforeQuery = this.messages.length;
     const tokenCountBeforeQuery = this.currentTokenCount;
-    
+
     // Reset token tracking for this query
     // This ensures we track tokens per callback correctly
     if (this.modelProvider.getProviderName() === 'anthropic') {
       // For Anthropic, we'll track from the current count
       // The processToolUseStream will handle per-callback tracking
     }
-    
+
     try {
       // Check if we need to summarize before adding new message
       if (this.tokenManager.shouldSummarize()) {
         await this.tokenManager.autoSummarize();
       }
 
-      // Note: System prompt is now logged BEFORE the user message in cli-client.ts
-      // to ensure correct chronological order. The query passed here may already
-      // include the system prompt prepended.
+      // null query = continue from current context without adding a user message
+      // (used by ablation continuation after injecting tool results)
+      if (query !== null) {
+        // Note: System prompt is now logged BEFORE the user message in cli-client.ts
+        // to ensure correct chronological order. The query passed here may already
+        // include the system prompt prepended.
 
-      // Handle attachments if provided
-      let userMessage: Message;
-      if (attachments && attachments.length > 0) {
-        // Create content blocks from attachments and query text
-        const contentBlocks = this.attachmentManager.createContentBlocks(attachments, query);
-        
-        // Create message with content_blocks for Anthropic API
-        userMessage = {
-          role: 'user',
-          content: query, // Keep text content for compatibility
-          content_blocks: contentBlocks, // Add content blocks for Anthropic
-        };
-      } else {
-        // Standard text message
-        userMessage = { role: 'user', content: query };
+        // Handle attachments if provided
+        let userMessage: Message;
+        if (attachments && attachments.length > 0) {
+          // Create content blocks from attachments and query text
+          const contentBlocks = this.attachmentManager.createContentBlocks(attachments, query);
+
+          // Create message with content_blocks for Anthropic API
+          userMessage = {
+            role: 'user',
+            content: query, // Keep text content for compatibility
+            content_blocks: contentBlocks, // Add content blocks for Anthropic
+          };
+        } else {
+          // Standard text message
+          userMessage = { role: 'user', content: query };
+        }
+
+        this.messages.push(userMessage);
+        // Token counting for messages with attachments is approximate
+        // Anthropic API will provide accurate counts during streaming
+        await this.tokenManager.ensureTokenCounter();
+        this.currentTokenCount += this.tokenManager.getTokenCounter()!.countMessageTokens(userMessage);
       }
-      
-      this.messages.push(userMessage);
-      // Token counting for messages with attachments is approximate
-      // Anthropic API will provide accurate counts during streaming
-      await this.tokenManager.ensureTokenCounter();
-      this.currentTokenCount += this.tokenManager.getTokenCounter()!.countMessageTokens(userMessage);
 
       // Check again after adding message
       if (this.tokenManager.shouldSummarize()) {

@@ -835,6 +835,22 @@ export class ChatHistoryManager {
   }
 
   /**
+   * Snapshot the current session to specific file paths without ending it.
+   * Used for saving continuation chat files (e.g., chat_new.json after an aborted phase).
+   */
+  snapshotToFile(jsonPath: string, mdPath: string): boolean {
+    if (!this.currentSession) return false;
+    try {
+      writeFileSync(jsonPath, JSON.stringify(this.currentSession, null, 2));
+      const mdContent = this.generateMarkdownChat(this.currentSession);
+      writeFileSync(mdPath, mdContent);
+      return true;
+    } catch {
+      return false;
+    }
+  }
+
+  /**
    * End current session and save to disk
    * TODO: Fix summary creation logic - summary parameter is being used as end reason, should be actual chat summary
    */

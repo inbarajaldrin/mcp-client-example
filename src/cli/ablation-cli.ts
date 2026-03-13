@@ -132,9 +132,68 @@ export class AblationCLI {
   private callbacks: AblationCLICallbacks;
   private lastAblationMcpConfigPath: string | null = null;
   private continuationPhaseDir: string | null = null;
+  private continuationRunDir: string | null = null;
+  private pendingBatchQueue: Array<{
+    runDir: string;
+    phaseDir: string;
+    phaseName: string;
+    model: import('../managers/ablation-manager.js').AblationModel;
+    run?: number;
+    mode: 'continue' | 'interact';
+  }> = [];
 
   getContinuationPhaseDir(): string | null {
     return this.continuationPhaseDir;
+  }
+
+  /**
+   * Finalize a continuation: save chat + outputs to a new timestamped
+   * subdirectory under the phase dir. Original run data is never touched.
+   * Then unstash the user's original outputs and clear continuation state.
+   * Returns the continuation directory path, or null on failure.
+   */
+  finalizeContinuation(): string | null {
+    const phaseDir = this.continuationPhaseDir;
+    const runDir = this.continuationRunDir;
+    if (!phaseDir) return null;
+
+    // Create a unique continuation directory: phaseDir/continuation-<timestamp>
+    const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+    const contDir = join(phaseDir, `continuation-${ts}`);
+    mkdirSync(contDir, { recursive: true });
+
+    // Save chat into the continuation directory
+    const chatJsonPath = join(contDir, 'chat.json');
+    const chatMdPath = join(contDir, 'chat.md');
+    const saved = this.client.getChatHistoryManager().snapshotToFile(chatJsonPath, chatMdPath);
+    if (saved) {
+      this.logger.log(`  Chat saved to ${contDir}/chat.json\n`, { type: 'info' });
+    }
+
+    // Capture continuation outputs
+    try {
+      const outputsDir = this.ablationManager.getOutputsDir();
+      if (existsSync(outputsDir)) {
+        cpSync(outputsDir, contDir, { recursive: true });
+        this.logger.log(`  Outputs captured to ${contDir}\n`, { type: 'info' });
+      }
+    } catch (err) {
+      this.logger.log(`  Warning: failed to capture outputs: ${err}\n`, { type: 'warning' });
+    }
+
+    // Unstash original outputs
+    if (runDir) {
+      this.ablationManager.unstashOutputs(runDir);
+      this.logger.log('  Original outputs restored from stash.\n', { type: 'info' });
+    }
+
+    // Clear chat context
+    this.client.clearContext();
+    this.logger.log('  Chat context cleared (original session ended).\n', { type: 'info' });
+
+    this.continuationPhaseDir = null;
+    this.continuationRunDir = null;
+    return contDir;
   }
 
   constructor(
@@ -4578,6 +4637,9 @@ export class AblationCLI {
                   `Ablation run (aborted): ${phase.name} with ${model.provider}/${model.model}`,
                   runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
                 );
+              } else {
+                // Continuous context: session is saved after all phases, but logs must be copied per-phase
+                this.client.getServerLogManager().copyLogsToDir(phaseDir);
               }
 
               run.results.push(result);
@@ -4610,6 +4672,9 @@ export class AblationCLI {
                   `Ablation run (@abort): ${phase.name} with ${model.provider}/${model.model}`,
                   runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
                 );
+              } else {
+                // Continuous context: session is saved after all phases, but logs must be copied per-phase
+                this.client.getServerLogManager().copyLogsToDir(phaseDir);
               }
 
               this.logger.log(
@@ -4640,6 +4705,9 @@ export class AblationCLI {
                   `Ablation run (@escalate): ${phase.name} with ${model.provider}/${model.model}`,
                   runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
                 );
+              } else {
+                // Continuous context: session is saved after all phases, but logs must be copied per-phase
+                this.client.getServerLogManager().copyLogsToDir(phaseDir);
               }
 
               this.logger.log(
@@ -4676,6 +4744,9 @@ export class AblationCLI {
                 `Ablation run: ${phase.name} with ${model.provider}/${model.model}`,
                 runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
               );
+            } else {
+              // Continuous context: session is saved after all phases, but logs must be copied per-phase
+              this.client.getServerLogManager().copyLogsToDir(phaseDir);
             }
 
             this.logger.log(
@@ -4705,6 +4776,9 @@ export class AblationCLI {
                 `Ablation run (failed): ${phase.name} with ${model.provider}/${model.model}`,
                 runDir, phase.name, phaseDir, model, result, hasMultipleIterations, iteration,
               );
+            } else {
+              // Continuous context: session is saved after all phases, but logs must be copied per-phase
+              this.client.getServerLogManager().copyLogsToDir(phaseDir);
             }
 
             this.logger.log(`\n  ✗ Scenario failed: ${error.message}\n`, {
@@ -4761,6 +4835,9 @@ export class AblationCLI {
             } catch (copyError) {
               this.logger.log(`  Warning: Failed to copy cumulative chat files: ${copyError}\n`, { type: 'warning' });
             }
+
+            // Copy cumulative server logs to model-level directory
+            this.client.getServerLogManager().copyLogsToDir(modelChatDir);
           }
         }
       }
@@ -5501,11 +5578,11 @@ export class AblationCLI {
     }
 
     if (selectedModelResults.length > 1) {
-      this.logger.log(`  a. (All phases — outputs merged in order)\n`, { type: 'info' });
+      this.logger.log(`  (Comma-separated for multiple, e.g. 2,3)\n`, { type: 'info' });
     }
 
     const phaseSelection = (
-      await rl.question('\nSelect phase (or "q" to cancel, "exit" to quit): ')
+      await rl.question('\nSelect phase(s) (comma-separated, e.g. 2,3) (or "q" to cancel, "exit" to quit): ')
     ).trim().toLowerCase();
 
     this.checkExitCommand(phaseSelection);
@@ -5514,11 +5591,19 @@ export class AblationCLI {
       return;
     }
 
-    const selectAll = phaseSelection === 'a' && selectedModelResults.length > 1;
     let selectedResults: AblationRunResult[];
 
-    if (selectAll) {
+    if (phaseSelection === 'a' && selectedModelResults.length > 1) {
       selectedResults = selectedModelResults;
+    } else if (phaseSelection.includes(',')) {
+      // Comma-separated multi-select
+      const indices = phaseSelection.split(',').map(s => parseInt(s.trim()) - 1);
+      const invalid = indices.some(i => isNaN(i) || i < 0 || i >= selectedModelResults.length);
+      if (invalid) {
+        this.logger.log('\nInvalid selection.\n', { type: 'error' });
+        return;
+      }
+      selectedResults = indices.map(i => selectedModelResults[i]);
     } else {
       const phaseIdx = parseInt(phaseSelection) - 1;
       if (isNaN(phaseIdx) || phaseIdx < 0 || phaseIdx >= selectedModelResults.length) {
@@ -5528,35 +5613,16 @@ export class AblationCLI {
       selectedResults = [selectedModelResults[phaseIdx]];
     }
 
-    // Step 4: Handle outputs folder
+    // Step 4: Handle outputs folder — always stash if not empty
     const outputsEmpty = this.ablationManager.isOutputsEmpty();
 
     if (!outputsEmpty) {
-      const action = (
-        await rl.question('\nOutputs folder is not empty. (o)verwrite, (s)tash, or (c)ancel? ')
-      ).trim().toLowerCase();
-
-      if (action === 'c' || action === 'cancel') {
-        this.logger.log('\nCancelled.\n', { type: 'info' });
+      const stashed = this.ablationManager.stashOutputs(runDir);
+      if (!stashed) {
+        this.logger.log('\nFailed to stash current outputs. Aborting.\n', { type: 'error' });
         return;
       }
-
-      if (action === 's' || action === 'stash') {
-        // Use a temporary run dir for stashing
-        const stashed = this.ablationManager.stashOutputs(runDir);
-        if (!stashed) {
-          this.logger.log('\nFailed to stash outputs. Aborting.\n', { type: 'error' });
-          return;
-        }
-        this.logger.log('  Current outputs stashed to .mcp-client-data/ablations/_stashed_outputs/\n', { type: 'info' });
-        this.logger.log('  Run /ablation-restore again and choose (o)verwrite to get them back, or delete the stash manually.\n', { type: 'info' });
-      } else if (action === 'o' || action === 'overwrite') {
-        this.ablationManager.clearOutputs();
-        this.logger.log('  Outputs cleared.\n', { type: 'info' });
-      } else {
-        this.logger.log('\nInvalid option. Aborting.\n', { type: 'error' });
-        return;
-      }
+      this.logger.log('  Current outputs stashed.\n', { type: 'info' });
     }
 
     // Copy outputs from selected phase(s)
@@ -5581,7 +5647,59 @@ export class AblationCLI {
       this.logger.log(`\n✓ Restored ${totalRestored} output items to outputs folder.\n`, { type: 'success' });
     }
 
-    // Step 5: Optionally restore chat
+    // Step 5: Check for aborted phases — offer continue/interact before manual chat restore
+    const abortedResults = selectedResults.filter(r => r.status === 'aborted');
+    if (abortedResults.length > 0) {
+      const label = abortedResults.length === 1
+        ? 'Phase was aborted.'
+        : `${abortedResults.length} aborted phases selected.`;
+      const modeAnswer = (
+        await rl.question(`\n${label} (c)ontinue from checkpoint, (i)nteract with session, or (n)either? (default: n): `)
+      ).trim().toLowerCase();
+
+      if (modeAnswer === 'c' || modeAnswer === 'continue' || modeAnswer === 'i' || modeAnswer === 'interact') {
+        const isInteract = modeAnswer === 'i' || modeAnswer === 'interact';
+
+        // Auto-switch to the run's model
+        const runModel = abortedResults[0].model;
+        await this.autoSwitchModel(runModel);
+
+        // Load and restore chat for the first aborted phase
+        const firstResult = abortedResults[0];
+        const firstPhaseDir = this.ablationManager.getRunOutputsDir(runDir, firstResult.phase, firstResult.model, firstResult.run);
+        const firstChatPath = join(firstPhaseDir, 'chat.json');
+        const chatSession = existsSync(firstChatPath) ? this.ablationManager.loadChatFromFile(firstChatPath) : null;
+
+        if (chatSession && chatSession.messages) {
+          const chatHistoryCLI = this.callbacks.getChatHistoryCLI();
+          const restoredCount = chatHistoryCLI.restoreFromSession(chatSession);
+          this.logger.log(`\n✓ Restored ${restoredCount} messages into conversation context.\n`, { type: 'success' });
+
+          if (isInteract) {
+            await this.handleInteractSetup(firstPhaseDir, runDir, firstResult.phase, rl);
+          } else {
+            await this.handleContinuationSetup(chatSession, firstPhaseDir, runDir, firstResult.phase, rl);
+          }
+
+          // Queue remaining aborted phases for batch processing
+          if (abortedResults.length > 1) {
+            this.pendingBatchQueue = abortedResults.slice(1).map(r => ({
+              runDir,
+              phaseDir: this.ablationManager.getRunOutputsDir(runDir, r.phase, r.model, r.run),
+              phaseName: r.phase,
+              model: r.model,
+              run: r.run,
+              mode: isInteract ? 'interact' as const : 'continue' as const,
+            }));
+          }
+        } else {
+          this.logger.log('\nFailed to load chat session for aborted phase.\n', { type: 'error' });
+        }
+        return; // Skip manual chat restore flow
+      }
+    }
+
+    // Step 6: Manual chat restore (for non-aborted phases or "neither" mode)
     // Determine where chat.json lives
     let chatFilePath: string | null = null;
 
@@ -5597,7 +5715,7 @@ export class AblationCLI {
       if (existsSync(candidatePath)) {
         chatFilePath = candidatePath;
       }
-    } else if (!selectAll) {
+    } else if (selectedResults.length === 1) {
       // Per-phase chat — use the selected phase
       const result = selectedResults[0];
       const phaseDir = this.ablationManager.getRunOutputsDir(
@@ -5611,7 +5729,7 @@ export class AblationCLI {
         chatFilePath = candidatePath;
       }
     } else {
-      // "All phases" with per-phase chats — ask which phase's chat to restore
+      // Multiple phases — ask which chat to restore
       this.logger.log('\nMultiple phase chats available. Select one to restore:\n', { type: 'info' });
       const chatCandidates: { result: AblationRunResult; path: string }[] = [];
       for (const result of selectedResults) {
@@ -5675,19 +5793,15 @@ export class AblationCLI {
           if (switchAnswer === 'y' || switchAnswer === 'yes') {
             const provider = createProvider(runModel.provider);
             if (provider) {
-              // Use switchProviderAndModel which clears context as part of the switch
               await this.client.switchProviderAndModel(provider, runModel.model);
             } else {
               this.logger.log(`  Warning: Could not create provider "${runModel.provider}", continuing with current model.\n`, { type: 'warning' });
-              // Still clear context even without model switch
               this.client.clearContext();
             }
           } else {
-            // User declined model switch but still restoring chat — clear context for a clean slate
             this.client.clearContext();
           }
         } else {
-          // Same model — just clear context for the restored session
           this.client.clearContext();
         }
 
@@ -5699,23 +5813,11 @@ export class AblationCLI {
             `\n✓ Restored ${restoredCount} messages into conversation context.\n`,
             { type: 'success' },
           );
-
-          // Offer continuation if this is a single aborted phase
-          if (selectedResults.length === 1 && selectedResults[0].status === 'aborted') {
-            const continueAnswer = (
-              await rl.question('\nPhase was aborted. Rewind to last scene checkpoint and continue without iteration limit? (y/n, default: n): ')
-            ).trim().toLowerCase();
-            if (continueAnswer === 'y' || continueAnswer === 'yes') {
-              const r = selectedResults[0];
-              const phaseDir = this.ablationManager.getRunOutputsDir(runDir, r.phase, r.model, r.run);
-              await this.handleContinuationSetup(chatSession, phaseDir, runDir, r.phase, rl);
-            }
-          }
         } else {
           this.logger.log('\nFailed to load chat session from file.\n', { type: 'error' });
         }
       }
-    } else if (!selectAll || !persistentContext) {
+    } else if (selectedResults.length === 1 || !persistentContext) {
       // Only mention no chat if we didn't already handle chat selection above
       const phaseDir = this.ablationManager.getRunOutputsDir(
         runDir,
@@ -5868,9 +5970,144 @@ export class AblationCLI {
 
     // Store phase dir for /ablation-save-continuation and trigger agent auto-continuation
     this.continuationPhaseDir = phaseDir;
+    this.continuationRunDir = runDir;
     this.callbacks.setPendingContinuation();
     this.logger.log(
       `  Agent will continue automatically. Run /ablation-save-continuation when done to save as chat_new.json.\n`,
+      { type: 'info' },
+    );
+  }
+
+  /**
+   * Auto-switch to the model used by a run, if different from current.
+   */
+  private async autoSwitchModel(runModel: import('../managers/ablation-manager.js').AblationModel): Promise<void> {
+    const currentProvider = this.client.getProviderName();
+    const currentModel = this.client.getModel();
+    if (runModel.provider !== currentProvider || runModel.model !== currentModel) {
+      const provider = createProvider(runModel.provider);
+      if (provider) {
+        await this.client.switchProviderAndModel(provider, runModel.model);
+        const shortName = this.ablationManager.getModelShortName(runModel);
+        this.logger.log(`  Switched to ${runModel.provider}/${shortName}.\n`, { type: 'info' });
+      } else {
+        this.logger.log(`  Warning: Could not switch to ${runModel.provider}/${runModel.model}.\n`, { type: 'warning' });
+        this.client.clearContext();
+      }
+    } else {
+      this.client.clearContext();
+    }
+  }
+
+  /**
+   * Check if there are more batched phases to process.
+   * If so, restore outputs + chat for the next one and set it up.
+   * Returns true if a next phase was started.
+   */
+  async advanceBatchQueue(rl: readline.Interface): Promise<boolean> {
+    if (this.pendingBatchQueue.length === 0) return false;
+
+    const next = this.pendingBatchQueue.shift()!;
+    this.logger.log(`\n── Batch: starting next phase "${next.phaseName}" (${this.pendingBatchQueue.length} remaining) ──\n`, { type: 'info' });
+
+    // Stash current outputs, restore this phase's outputs
+    if (!this.ablationManager.isOutputsEmpty()) {
+      this.ablationManager.stashOutputs(next.runDir);
+    }
+    const count = this.ablationManager.restoreRunOutputs(next.phaseDir);
+    if (count > 0) {
+      this.logger.log(`  Restored ${count} output items.\n`, { type: 'info' });
+    }
+
+    // Auto-switch model and load chat
+    await this.autoSwitchModel(next.model);
+    const chatPath = join(next.phaseDir, 'chat.json');
+    if (existsSync(chatPath)) {
+      const chatSession = this.ablationManager.loadChatFromFile(chatPath);
+      if (chatSession && chatSession.messages) {
+        const chatHistoryCLI = this.callbacks.getChatHistoryCLI();
+        const restoredCount = chatHistoryCLI.restoreFromSession(chatSession);
+        this.logger.log(`  Restored ${restoredCount} messages.\n`, { type: 'info' });
+
+        if (next.mode === 'interact') {
+          await this.handleInteractSetup(next.phaseDir, next.runDir, next.phaseName, rl);
+        } else {
+          await this.handleContinuationSetup(chatSession, next.phaseDir, next.runDir, next.phaseName, rl);
+        }
+        return true;
+      }
+    }
+
+    this.logger.log(`  Warning: No chat.json found for "${next.phaseName}", skipping.\n`, { type: 'warning' });
+    // Try the next one
+    return this.advanceBatchQueue(rl);
+  }
+
+  hasPendingBatch(): boolean {
+    return this.pendingBatchQueue.length > 0;
+  }
+
+  /**
+   * Set up interact mode: optionally load ablation hooks, store dirs for
+   * finalization, but don't rewind or auto-trigger the agent.
+   * The user is dropped into a normal CLI session with the restored chat/outputs.
+   */
+  private async handleInteractSetup(
+    phaseDir: string,
+    runDir: string,
+    phaseName: string,
+    rl: readline.Interface,
+  ): Promise<void> {
+    // Load frozen definition for hooks/tool filter/system prompt
+    const frozenDefPath = join(runDir, 'definition.yaml');
+    if (existsSync(frozenDefPath)) {
+      const hooksAnswer = (
+        await rl.question('  Load ablation hooks for this phase? (y/n, default: n): ')
+      ).trim().toLowerCase();
+      const loadHooks = hooksAnswer === 'y' || hooksAnswer === 'yes';
+
+      if (loadHooks) {
+        const yaml = (await import('yaml')).default;
+        const frozenDef = yaml.parse(readFileSync(frozenDefPath, 'utf-8')) as AblationDefinition;
+        const phaseDef = frozenDef.phases?.find((p: any) => p.name === phaseName);
+        const runMeta = this.ablationManager.loadRunResults(runDir);
+        const resolvedArguments = runMeta?.resolvedArguments ?? {};
+
+        // Apply tool filter
+        const phaseToolFilter = this.ablationManager.getToolFilterForPhase(frozenDef, phaseName);
+        if (phaseToolFilter) {
+          this.client.applyAblationToolFilter(
+            tools => this.ablationManager.applyToolFilter(tools, phaseToolFilter),
+          );
+          this.logger.log(`  Tool filter applied (${this.client.getTools().length} tools available).\n`, { type: 'info' });
+        }
+
+        // Restore system prompt
+        const effectivePrompt = phaseDef?.systemPrompt ?? frozenDef.systemPrompt ?? null;
+        if (effectivePrompt !== null) {
+          const resolved = await this.resolvePromptReference(effectivePrompt, resolvedArguments);
+          this.client.setSystemPrompt(resolved);
+          this.logger.log('  System prompt restored.\n', { type: 'info' });
+        }
+
+        // Load ablation hooks
+        const hookManager = this.client.getHookManager();
+        hookManager.suspend();
+        const phaseHooks = this.ablationManager.getHooksForPhase(frozenDef, phaseName);
+        if (phaseHooks.length > 0) {
+          hookManager.loadAblationHooks(phaseHooks);
+          hookManager.setCurrentPhaseName(phaseName);
+          hookManager.resetPhaseComplete();
+          this.logger.log(`  ${phaseHooks.length} phase hook(s) loaded.\n`, { type: 'info' });
+        }
+      }
+    }
+
+    // Store dirs for finalization (save/unstash on exit or /ablation-save-continuation)
+    this.continuationPhaseDir = phaseDir;
+    this.continuationRunDir = runDir;
+    this.logger.log(
+      `  Interact mode active. Run /ablation-save-continuation when done.\n`,
       { type: 'info' },
     );
   }

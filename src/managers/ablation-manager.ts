@@ -627,6 +627,10 @@ export class AblationManager {
     return `${sanitizeFolderName(model.provider)}--${sanitizeFolderName(model.model)}`;
   }
 
+  getOutputsDir(): string {
+    return OUTPUTS_DIR;
+  }
+
   /**
    * Get the iteration directory for a model within a run.
    * Structure: {runDir}/{modelDir}/(run-{N}/)

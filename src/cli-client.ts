@@ -37,7 +37,7 @@ const CLI_COMMANDS = [
   '/resources', '/resources-list', '/resources-manager', '/resources-select', '/add-resource',
   '/attachment-upload', '/attachment-list', '/attachment-insert', '/attachment-rename', '/attachment-clear',
   '/chat-list', '/chat-search', '/chat-restore', '/chat-export', '/chat-rename', '/chat-clear',
-  '/ablation-create', '/ablation-list', '/ablation-edit', '/ablation-run', '/ablation-delete', '/ablation-results', '/ablation-restore',
+  '/ablation-create', '/ablation-list', '/ablation-edit', '/ablation-run', '/ablation-delete', '/ablation-results', '/ablation-restore', '/ablation-save-continuation',
   '/tool-replay',
   '/rewind',
   '/hil',
@@ -56,6 +56,7 @@ export class MCPClientCLI {
   private ablationManager: AblationManager;
   private pendingAttachments: AttachmentInfo[] = [];
   private pendingContextAdded = false; // Track if prompts were added via /add-prompt
+  private pendingContinuation = false; // Auto-trigger agent after ablation continuation setup
   private keyboardMonitor: KeyboardMonitor;
   private toolCLI: ToolCLI;
   private attachmentCLI: AttachmentCLI;
@@ -201,6 +202,9 @@ export class MCPClientCLI {
           this.client.setOnIterationLimitCallback(async (iterations, maxIterations) => {
             return this.askIterationLimitExtension(iterations, maxIterations);
           });
+        },
+        setPendingContinuation: () => {
+          this.pendingContinuation = true;
         },
       },
     );
@@ -981,6 +985,28 @@ export class MCPClientCLI {
     await this.client.switchModel(provider, modelId);
   }
 
+  private async handleAblationSaveContinuation(): Promise<void> {
+    const phaseDir = this.ablationCLI.getContinuationPhaseDir();
+    if (!phaseDir) {
+      this.logger.log(
+        '\nNo continuation in progress. Use /ablation-restore to restore an aborted phase first.\n',
+        { type: 'warning' },
+      );
+      return;
+    }
+
+    const { join } = await import('path');
+    const destJsonPath = join(phaseDir, 'chat_new.json');
+    const destMdPath = join(phaseDir, 'chat_new.md');
+
+    const saved = this.client.getChatHistoryManager().snapshotToFile(destJsonPath, destMdPath);
+    if (saved) {
+      this.logger.log(`\n✓ Continuation saved to:\n  ${destJsonPath}\n`, { type: 'success' });
+    } else {
+      this.logger.log('\nFailed to save continuation (no active session).\n', { type: 'error' });
+    }
+  }
+
   private async handleRewind(): Promise<void> {
     if (!this.rl) return;
 
@@ -1515,6 +1541,15 @@ export class MCPClientCLI {
       return true;
     }
 
+    if (lowerQuery === '/ablation-save-continuation') {
+      try {
+        await this.handleAblationSaveContinuation();
+      } catch (error) {
+        this.logger.log(`\nFailed to save continuation: ${error}\n`, { type: 'error' });
+      }
+      return true;
+    }
+
     if (lowerQuery === '/rewind') {
       try {
         await this.handleRewind();
@@ -1597,6 +1632,61 @@ export class MCPClientCLI {
           break;
         }
         
+        // Auto-continuation: triggered after ablation restore with scene checkpoint
+        if (this.pendingContinuation) {
+          this.pendingContinuation = false;
+          this.keyboardMonitor.abortRequested = false;
+          const ipcSrv = this.client.getOrchestratorIPCServer();
+          if (ipcSrv) ipcSrv.setAborted(false);
+          const hookManager = this.client.getHookManager();
+          const cancelCheck = () => this.keyboardMonitor.abortRequested
+            || (hookManager?.isPhaseCompleteRequested() ?? false)
+            || (hookManager?.isAbortRunRequested() ?? false);
+          this.keyboardMonitor.start();
+          try {
+            await this.client.processQuery(null, false, undefined, cancelCheck);
+          } catch (error: any) {
+            if (this.keyboardMonitor.abortRequested) {
+              await new Promise(resolve => setTimeout(resolve, 100));
+            }
+          } finally {
+            this.keyboardMonitor.stop();
+          }
+
+          // Check if phase completion was signaled by a hook (e.g. signal_phase_complete)
+          if (hookManager?.isPhaseCompleteRequested() || hookManager?.isAbortRunRequested()) {
+            hookManager.resetPhaseComplete();
+            hookManager.resetAbortRun();
+            this.logger.log('\n✓ Phase completed via signal_phase_complete.\n', { type: 'success' });
+            // Save chat + outputs to continuation-<timestamp>/ dir, unstash originals
+            const contDir = this.ablationCLI.finalizeContinuation();
+            if (contDir) {
+              this.logger.log(`  Continuation saved to ${contDir}\n`, { type: 'success' });
+            }
+            // Restore normal hooks and clear tool filter
+            hookManager.resume();
+            this.client.restoreAblationToolFilter();
+
+            // Advance to next batched phase if any
+            if (this.ablationCLI.hasPendingBatch() && this.rl) {
+              const advanced = await this.ablationCLI.advanceBatchQueue(this.rl);
+              if (advanced) {
+                this.pendingContinuation = true;
+                this.pendingAttachments = [];
+                this.pendingContextAdded = false;
+                continue;
+              }
+            }
+
+            this.logger.log('Ablation session restored.\n', { type: 'info' });
+          }
+
+          this.pendingAttachments = [];
+          this.pendingContextAdded = false;
+          this.logger.log('\n' + consoleStyles.separator + '\n');
+          continue;
+        }
+
         // Reset abort flag before reading next query to ensure clean state
         this.keyboardMonitor.abortRequested = false;
 
