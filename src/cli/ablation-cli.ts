@@ -177,10 +177,17 @@ export class AblationCLI {
     const chatMetadata = chatHistoryManager.endSession(endReason);
 
     if (chatMetadata) {
-      const modelDir = this.ablationManager.getModelDirName(model);
-      const phaseSanitized = sanitizeFolderName(phaseName);
-      const runPrefix = hasMultipleIterations ? `run-${iteration}/` : '';
-      const relativeChatPath = `${modelDir}/${runPrefix}${phaseSanitized}/chat.json`;
+      // Compute relative chat path from runDir to phaseDir
+      // Escalation mode: phaseDir = {runDir}/{phase}/attempt-N--{model}/
+      // Normal mode:     phaseDir = {runDir}/{model}/(run-N/){phase}/
+      const relativeChatPath = phaseDir.startsWith(runDir)
+        ? phaseDir.slice(runDir.length + 1) + '/chat.json'
+        : (() => {
+            const modelDir = this.ablationManager.getModelDirName(model);
+            const phaseSanitized = sanitizeFolderName(phaseName);
+            const runPrefix = hasMultipleIterations ? `run-${iteration}/` : '';
+            return `${modelDir}/${runPrefix}${phaseSanitized}/chat.json`;
+          })();
       const destJsonPath = join(phaseDir, 'chat.json');
       const destMdPath = join(phaseDir, 'chat.md');
 
