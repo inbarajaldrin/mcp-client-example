@@ -47,7 +47,10 @@
       "command": "/path/to/mcp-tools-orchestrator/.venv/bin/python",
       "args": [
         "/path/to/mcp-tools-orchestrator/server.py"
-      ]
+      ],
+      "env": {
+        "ROS_MCP_SERVER_DIR": "/path/to/ros-mcp-server"
+      }
     },
     "todo": {
       "disabled": true,
