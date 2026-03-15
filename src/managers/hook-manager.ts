@@ -551,6 +551,15 @@ export class HookManager {
             continue;
           }
 
+          // @wait:<seconds> — pause before next hook
+          const waitMatch = trimmed.match(/^@wait:(\d+(?:\.\d+)?)$/);
+          if (waitMatch) {
+            const waitSeconds = parseFloat(waitMatch[1]);
+            this.logger.log(`[Hook wait: ${waitSeconds}s]\n`, { type: 'info' });
+            await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
+            continue;
+          }
+
           const parsed = parseDirectToolCall(hook.run);
           if (!parsed) {
             this.logger.log(`[Hook invalid command: ${hook.run}]\n`, { type: 'warning' });
@@ -661,6 +670,15 @@ export class HookManager {
 
       // Special commands (@insert-prompt, @complete-phase, @abort, etc.)
       if (this.handleSpecialCommand(trimmed, triggerTool)) {
+        continue;
+      }
+
+      // @wait:<seconds> — pause before next command
+      const waitMatch = trimmed.match(/^@wait:(\d+(?:\.\d+)?)$/);
+      if (waitMatch) {
+        const waitSeconds = parseFloat(waitMatch[1]);
+        this.logger.log(`[Gate wait: ${waitSeconds}s]\n`, { type: 'info' });
+        await new Promise(resolve => setTimeout(resolve, waitSeconds * 1000));
         continue;
       }
 
