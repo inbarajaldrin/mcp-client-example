@@ -3786,6 +3786,10 @@ export class AblationCLI {
           } catch (error: any) {
             result.status = 'failed';
             result.error = error.message;
+            // Preserve HTTP status code for transient error classification (503, 429, etc.)
+            if (typeof error.status === 'number') {
+              result.errorStatus = error.status;
+            }
             result.duration = Date.now() - startTime;
             result.durationFormatted = formatDuration(result.duration);
 
@@ -4756,6 +4760,10 @@ export class AblationCLI {
           } catch (error: any) {
             result.status = 'failed';
             result.error = error.message;
+            // Preserve HTTP status code for transient error classification (503, 429, etc.)
+            if (typeof error.status === 'number') {
+              result.errorStatus = error.status;
+            }
             result.duration = Date.now() - startTime;
             result.durationFormatted = formatDuration(result.duration);
 
