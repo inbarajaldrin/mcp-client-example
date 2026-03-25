@@ -545,6 +545,10 @@ export class AnthropicProvider implements ModelProvider {
       // content blocks — it only handles text_delta and input_json_delta.
       let accumulatedThinking = '';
       let accumulatedSignature = '';
+      // Capture raw tool input JSON fragments before SDK's partialParse processes them.
+      // The SDK's partial JSON parser cannot handle scientific notation (e.g. 1e-6 → 16),
+      // so we accumulate the raw deltas to preserve the model's original output.
+      const rawToolInputJsonBuffers: Record<number, string> = {};
       for await (const chunk of stream) {
         const delta = (chunk as any).delta;
         if ((chunk as any).type === 'content_block_delta') {
@@ -552,6 +556,9 @@ export class AnthropicProvider implements ModelProvider {
             accumulatedThinking += delta.thinking || '';
           } else if (delta?.type === 'signature_delta') {
             accumulatedSignature += delta.signature || '';
+          } else if (delta?.type === 'input_json_delta') {
+            const idx = (chunk as any).index ?? 0;
+            rawToolInputJsonBuffers[idx] = (rawToolInputJsonBuffers[idx] || '') + (delta.partial_json || '');
           }
         }
         yield chunk as MessageStreamEvent;
@@ -573,6 +580,16 @@ export class AnthropicProvider implements ModelProvider {
             }
             break; // Only one thinking block per response
           }
+        }
+      }
+
+      // Map raw tool input JSON to tool_use block IDs (before partialParse corruption).
+      // Stored separately — cannot attach to content blocks as API rejects extra fields.
+      const rawToolInputByToolUseId: Record<string, string> = {};
+      for (const [idx, rawJson] of Object.entries(rawToolInputJsonBuffers)) {
+        const block = (response.content as any[])[Number(idx)];
+        if (block?.type === 'tool_use' && block.id) {
+          rawToolInputByToolUseId[block.id] = rawJson;
         }
       }
 
@@ -690,6 +707,7 @@ export class AnthropicProvider implements ModelProvider {
               toolInput: toolInput,
               result: result.displayText,
               hasImages: result.hasImages,
+              ...(rawToolInputByToolUseId[toolUseBlock.id] ? { rawInputJson: rawToolInputByToolUseId[toolUseBlock.id] } : {}),
             };
 
             // Convert content blocks to Anthropic format for tool_result

@@ -3887,7 +3887,7 @@ export class AblationCLI {
         }
 
         this.logger.log(`  Connecting servers for custom config...\n`, { type: 'info' });
-        await this.client.refreshServers();
+        await this.client.refreshServers(true);
         this.lastAblationMcpConfigPath = effectiveConfigPath;
         this.logger.log(`  ✓ Servers connected\n`, { type: 'success' });
       } else {

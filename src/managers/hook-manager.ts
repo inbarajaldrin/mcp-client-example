@@ -201,7 +201,6 @@ export class HookManager {
     this.pendingAttachmentInsertions = [];
     this.pendingClearAttachments = false;
     this.pendingClientPrompt = null;
-    this.escalateRequested = false;
   }
 
   /** Set the current phase name for @complete-phase:name matching */

@@ -860,9 +860,12 @@ export class MCPClient {
     }
   }
 
-  async refreshServers() {
+  async refreshServers(skipConfigReload = false) {
     // Reload config from disk to pick up any changes
-    this.reloadConfigFromDisk();
+    // Skip when a custom config was already loaded (e.g. ablation with custom mcpConfigPath)
+    if (!skipConfigReload) {
+      this.reloadConfigFromDisk();
+    }
 
     this.logger.log('Refreshing server connections...\n', { type: 'info' });
 
@@ -2648,6 +2651,8 @@ export class MCPClient {
           toolInputTime, // Pass the input time
           toolId, // Pass the tool_use_id for pairing with assistant's tool_use block
           regularFixedArgs.length > 0 ? regularFixedArgs : undefined,
+          (chunk as any).rawInputJson, // Raw JSON before SDK partialParse (Anthropic) or SDK-parsed args (Google)
+          (chunk as any).rawHttpResponse, // Raw HTTP response JSON (Google only, GEMINI_RAW_CAPTURE=1)
         );
 
         // Collect tool completion data for deferred hook processing after agent response.

@@ -1,0 +1,74 @@
+{
+  "mcpServers": {
+    "isaac-sim": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/home/aaugus11/Documents/isaac-sim-mcp/.venv/bin/python",
+      "args": [
+        "/home/aaugus11/Documents/isaac-sim-mcp/isaac_mcp/server.py"
+      ],
+      "env": {
+        "ISAAC_SIM_PORT": "8766"
+      }
+    },
+    "ros-mcp-server": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "-c",
+        "source /opt/ros/humble/setup.bash && source ~/Desktop/ros2_ws/install/setup.bash && /home/aaugus11/Documents/ros-mcp-server/.venv/bin/python /home/aaugus11/Documents/ros-mcp-server/server_ablation_quat.py"
+      ],
+      "env": {
+        "ROS_DOMAIN_ID": "0",
+        "ROS_LOCALHOST_ONLY": "1"
+      }
+    },
+    "Prompts": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/home/aaugus11/Documents/mcp-server-example/.venv/bin/python",
+      "args": [
+        "/home/aaugus11/Documents/ros-mcp-server/prompt.py"
+      ]
+    },
+    "Resources": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/home/aaugus11/Documents/mcp-server-example/.venv/bin/python",
+      "args": [
+        "/home/aaugus11/Documents/ros-mcp-server/resource.py"
+      ]
+    },
+    "ros2-video-recorder": {
+      "disabled": true,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "bash",
+      "args": [
+        "-c",
+        "source /opt/ros/humble/setup.bash && source ~/Desktop/ros2_ws/install/setup.bash && cd /home/aaugus11/Documents/ros2-video-recorder && python3 -m ros2_video_recorder_mcp.server"
+      ],
+      "env": {
+        "ROS_DOMAIN_ID": "0",
+        "ROS_LOCALHOST_ONLY": "1"
+      }
+    },
+    "mcp-tools-orchestrator": {
+      "disabled": false,
+      "timeout": 60,
+      "type": "stdio",
+      "command": "/home/aaugus11/Documents/mcp-tools-orchestrator/.venv/bin/python",
+      "args": [
+        "/home/aaugus11/Documents/mcp-tools-orchestrator/server.py"
+      ],
+      "env": {
+        "ROS_MCP_SERVER_DIR": "/home/aaugus11/Documents/ros-mcp-server"
+      }
+    }
+  }
+}

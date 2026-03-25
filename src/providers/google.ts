@@ -23,6 +23,64 @@ export type ToolExecutor = (
   toolInput: Record<string, any>,
 ) => Promise<ToolExecutionResult>;
 
+// --- Raw HTTP capture for pipeline dissection (mirrors Anthropic's rawInputJson) ---
+let rawSseChunks: string[] = [];
+let fetchInterceptorInstalled = false;
+
+function installFetchInterceptor(): void {
+  if (fetchInterceptorInstalled) return;
+  const originalFetch = globalThis.fetch;
+  globalThis.fetch = async (input: RequestInfo | URL, init?: RequestInit) => {
+    const response = await originalFetch(input, init);
+    const url = typeof input === 'string' ? input : (input instanceof Request ? input.url : input.toString());
+    // Only intercept Gemini streaming API calls
+    if (!url.includes('models/') || !url.includes('streamGenerateContent')) {
+      return response;
+    }
+    if (!response.body) return response;
+    const [captureStream, sdkStream] = response.body.tee();
+    // Read captureStream in background to collect raw bytes
+    const reader = captureStream.getReader();
+    const decoder = new TextDecoder('utf-8');
+    (async () => {
+      try {
+        while (true) {
+          const { done, value } = await reader.read();
+          if (done) break;
+          rawSseChunks.push(decoder.decode(value, { stream: true }));
+        }
+      } catch {
+        // Stream cancelled or errored — ignore
+      }
+    })();
+    return new Response(sdkStream, {
+      headers: response.headers,
+      status: response.status,
+      statusText: response.statusText,
+    });
+  };
+  fetchInterceptorInstalled = true;
+}
+
+function extractRawFunctionCallChunk(toolName: string): string | undefined {
+  if (rawSseChunks.length === 0) return undefined;
+  const fullResponse = rawSseChunks.join('');
+  // Parse SSE data: lines, find the one containing this functionCall
+  const dataLines = fullResponse.split('\n')
+    .filter(l => l.trimStart().startsWith('data:'))
+    .map(l => l.trimStart().slice(5).trim());
+  for (const line of dataLines) {
+    if (line.includes('functionCall') && line.includes(toolName)) {
+      return line;
+    }
+  }
+  // Fallback: return all data lines joined
+  return dataLines.join('\n');
+}
+
+// Install interceptor at module load — always active (negligible overhead from body.tee())
+installFetchInterceptor();
+
 // Provider metadata - exported for use by CLI
 export const PROVIDER_INFO = {
   name: 'google',
@@ -643,6 +701,9 @@ export class GeminiProvider implements ModelProvider {
 
       iterations++;
 
+      // Clear raw SSE buffer for this iteration (each iteration = new API call)
+      rawSseChunks = [];
+
       // Convert messages, optionally skipping images in function responses
       const contents = this.convertMessagesToGeminiFormat(
         conversationMessages,
@@ -722,6 +783,7 @@ export class GeminiProvider implements ModelProvider {
         args: any;
         id: string;
         thoughtSignature?: string;
+        sdkArgsJson: string;
       }> = [];
       let assistantContent = '';
       let thinkingContent = '';
@@ -788,6 +850,7 @@ export class GeminiProvider implements ModelProvider {
                   args: part.functionCall.args || {},
                   id: callId,
                   thoughtSignature: thoughtSignature,
+                  sdkArgsJson: JSON.stringify(part.functionCall.args || {}),
                 });
                 yield {
                   type: 'content_block_start',
@@ -893,6 +956,8 @@ export class GeminiProvider implements ModelProvider {
             toolInput: call.args,
             result: cancelledResult,
             hasImages: false,
+            rawInputJson: call.sdkArgsJson,
+            rawHttpResponse: extractRawFunctionCallChunk(call.name),
           };
           toolResults.push({
             name: call.name,
@@ -928,6 +993,8 @@ export class GeminiProvider implements ModelProvider {
             toolInput: call.args,
             result: result.displayText,
             hasImages: result.hasImages,
+            rawInputJson: call.sdkArgsJson,
+            rawHttpResponse: extractRawFunctionCallChunk(call.name),
           };
         } catch (error: any) {
           const errorResult = `Error executing tool ${call.name}: ${error.message}`;
@@ -944,6 +1011,8 @@ export class GeminiProvider implements ModelProvider {
             toolCallId: call.id,
             toolInput: call.args,
             result: errorResult,
+            rawInputJson: call.sdkArgsJson,
+            rawHttpResponse: extractRawFunctionCallChunk(call.name),
           };
         }
       }

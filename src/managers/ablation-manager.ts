@@ -104,6 +104,7 @@ export interface AblationRunResult {
   durationFormatted?: string; // human-readable (e.g. "4m 5s")
   chatFile?: string;
   error?: string;
+  errorStatus?: number;
 }
 
 export interface AblationRun {

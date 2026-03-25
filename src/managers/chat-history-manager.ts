@@ -381,6 +381,8 @@ export class ChatHistoryManager {
     toolInputTime?: string, // Optional ISO timestamp when tool input was sent
     toolUseId?: string, // Optional tool_use_id for pairing with assistant's tool_use block
     clientFixedArgs?: string[], // Args coerced by client (e.g. string→int for Gemini)
+    rawInputJson?: string, // Raw JSON from API before SDK partialParse (Anthropic) or SDK-parsed args (Google)
+    rawHttpResponse?: string, // Raw HTTP response JSON from API (Google only, GEMINI_RAW_CAPTURE=1)
   ): void {
     if (!this.currentSession) {
       this.logger.log('No active session. Call startSession() first.\n', {
@@ -413,6 +415,14 @@ export class ChatHistoryManager {
     // Store client-fixed args if any (model sent wrong types, client coerced before MCP call)
     if (clientFixedArgs && clientFixedArgs.length > 0) {
       message.clientFixedArgs = clientFixedArgs;
+    }
+    // Store raw tool input JSON before SDK's partialParse (preserves scientific notation)
+    if (rawInputJson) {
+      message.rawInputJson = rawInputJson;
+    }
+    // Store raw HTTP response JSON (Google pipeline dissection)
+    if (rawHttpResponse) {
+      message.rawHttpResponse = rawHttpResponse;
     }
 
     this.currentSession.messages.push(message);
