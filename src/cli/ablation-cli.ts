@@ -2280,6 +2280,13 @@ export class AblationCLI {
             hookMgr.resetEscalate();
             return { escalate: true };
           }
+          // Fallback: check if signal_phase_complete(success) was called during nudge
+          // but @complete-phase hook didn't fire (batched tool calls)
+          if (this.client.getChatHistoryManager().hasRecentSuccessfulPhaseSignal()) {
+            this.logger.log(`  ℹ Phase "${phaseName}": signal_phase_complete(success) accepted after nudge — completing phase\n`, { type: 'info' });
+            this.client.getChatHistoryManager().addPhaseEvent('phase-complete', phaseName, { after: 'signal-fallback-post-nudge' });
+            return { phaseComplete: true };
+          }
           // Nudge didn't work — escalate if escalation enabled, otherwise abort
           if (ablation?.escalation) {
             this.logger.log(`  ⤴ Phase "${phaseName}": agent did not signal after nudge — escalating to next model\n`, { type: 'warning' });
@@ -2500,6 +2507,13 @@ export class AblationCLI {
         if (hookManager.isEscalateRequested()) {
           hookManager.resetEscalate();
           return { escalate: true };
+        }
+        // Fallback: check if signal_phase_complete(success) was called during nudge
+        // but @complete-phase hook didn't fire (batched tool calls)
+        if (this.client.getChatHistoryManager().hasRecentSuccessfulPhaseSignal()) {
+          this.logger.log(`  ℹ Phase "${phaseName}": signal_phase_complete(success) accepted after nudge — completing phase\n`, { type: 'info' });
+          this.client.getChatHistoryManager().addPhaseEvent('phase-complete', phaseName, { after: 'signal-fallback-post-nudge' });
+          return { phaseComplete: true };
         }
         // Nudge didn't work — escalate if escalation enabled, otherwise abort
         if (ablation?.escalation) {
