@@ -2251,6 +2251,14 @@ export class AblationCLI {
         if (pendingResult) return pendingResult;
 
         // Agent stopped responding without @complete-phase or @abort.
+        // Check if signal_phase_complete(success) was already called with requires_response: false
+        // but @complete-phase hook didn't fire (can happen with batched tool calls).
+        if (ablation && phaseName && this.client.getChatHistoryManager().hasRecentSuccessfulPhaseSignal()) {
+          this.logger.log(`  ℹ Phase "${phaseName}": signal_phase_complete(success) already accepted — completing phase\n`, { type: 'info' });
+          this.client.getChatHistoryManager().addPhaseEvent('phase-complete', phaseName, { after: 'signal-fallback' });
+          return { phaseComplete: true };
+        }
+
         // Nudge it once — if it still doesn't signal, abort.
         if (ablation && phaseName && !this.callbacks.isAbortRequested()) {
           const nudgeMsg = `You stopped without signaling phase completion. Call signal_phase_complete with status "success" if the phase objectives were met, or status "failure" if they were not. Do not continue working — just signal.`;
@@ -2464,6 +2472,14 @@ export class AblationCLI {
       if (pendingResult) return pendingResult;
 
       // Agent stopped responding without @complete-phase or @abort.
+      // Check if signal_phase_complete(success) was already called with requires_response: false
+      // but @complete-phase hook didn't fire (can happen with batched tool calls).
+      if (ablation && phaseName && this.client.getChatHistoryManager().hasRecentSuccessfulPhaseSignal()) {
+        this.logger.log(`  ℹ Phase "${phaseName}": signal_phase_complete(success) already accepted — completing phase\n`, { type: 'info' });
+        this.client.getChatHistoryManager().addPhaseEvent('phase-complete', phaseName, { after: 'signal-fallback' });
+        return { phaseComplete: true };
+      }
+
       // Nudge it once — if it still doesn't signal, abort.
       if (ablation && phaseName && !this.callbacks.isAbortRequested()) {
         const nudgeMsg = `You stopped without signaling phase completion. Call signal_phase_complete with status "success" if the phase objectives were met, or status "failure" if they were not. Do not continue working — just signal.`;

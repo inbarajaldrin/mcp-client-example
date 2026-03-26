@@ -499,6 +499,30 @@ export class ChatHistoryManager {
   }
 
   /**
+   * Check if signal_phase_complete was recently called with success and requires_response: false.
+   * Used as a fallback when @complete-phase hook didn't fire (e.g. due to batched tool calls).
+   * Scans the last N messages for a non-hook signal_phase_complete tool result.
+   */
+  hasRecentSuccessfulPhaseSignal(lookback: number = 10): boolean {
+    if (!this.currentSession) return false;
+    const msgs = this.currentSession.messages;
+    const start = Math.max(0, msgs.length - lookback);
+    for (let i = msgs.length - 1; i >= start; i--) {
+      const m = msgs[i];
+      if (m.role !== 'tool') continue;
+      if (m.isHookCall) continue;
+      if (!m.toolName?.includes('signal_phase_complete')) continue;
+      try {
+        const output = JSON.parse(m.toolOutput || m.content || '{}');
+        if (output.status === 'success' && output.requires_response === false) {
+          return true;
+        }
+      } catch { /* ignore parse errors */ }
+    }
+    return false;
+  }
+
+  /**
    * Add an elicitation event to current session.
    * Records accept, decline, cancel, auto-decline, and auto-decline-cancelled outcomes.
    */

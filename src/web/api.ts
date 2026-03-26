@@ -1487,7 +1487,13 @@ export function createApiRouter(client: MCPClient): Router {
                 result.status = 'completed';
                 // Log implicit phase completion if not already logged by @complete-phase hook
                 if (!phaseCompleted) {
-                  client.getChatHistoryManager().addPhaseEvent('phase-abort', phase.name, { after: 'agent-stopped' });
+                  // Check if signal_phase_complete(success) was called with requires_response: false
+                  // but @complete-phase hook didn't fire (can happen with batched tool calls)
+                  if (client.getChatHistoryManager().hasRecentSuccessfulPhaseSignal()) {
+                    client.getChatHistoryManager().addPhaseEvent('phase-complete', phase.name, { after: 'signal-fallback' });
+                  } else {
+                    client.getChatHistoryManager().addPhaseEvent('phase-abort', phase.name, { after: 'agent-stopped' });
+                  }
                 }
                 if (!ablation.dryRun) {
                   result.tokens = client.getTokenUsage().current;
