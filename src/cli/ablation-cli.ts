@@ -5738,6 +5738,7 @@ export class AblationCLI {
         result.phase,
         result.model,
         result.run,
+        result.chatFile,
       );
       const count = this.ablationManager.restoreRunOutputs(phaseDir);
       totalRestored += count;
@@ -5771,7 +5772,7 @@ export class AblationCLI {
 
         // Load and restore chat for the first aborted phase
         const firstResult = abortedResults[0];
-        const firstPhaseDir = this.ablationManager.getRunOutputsDir(runDir, firstResult.phase, firstResult.model, firstResult.run);
+        const firstPhaseDir = this.ablationManager.getRunOutputsDir(runDir, firstResult.phase, firstResult.model, firstResult.run, firstResult.chatFile);
         const firstChatPath = join(firstPhaseDir, 'chat.json');
         const chatSession = existsSync(firstChatPath) ? this.ablationManager.loadChatFromFile(firstChatPath) : null;
 
@@ -5790,7 +5791,7 @@ export class AblationCLI {
           if (abortedResults.length > 1) {
             this.pendingBatchQueue = abortedResults.slice(1).map(r => ({
               runDir,
-              phaseDir: this.ablationManager.getRunOutputsDir(runDir, r.phase, r.model, r.run),
+              phaseDir: this.ablationManager.getRunOutputsDir(runDir, r.phase, r.model, r.run, r.chatFile),
               phaseName: r.phase,
               model: r.model,
               run: r.run,
@@ -5828,6 +5829,7 @@ export class AblationCLI {
         result.phase,
         result.model,
         result.run,
+        result.chatFile,
       );
       const candidatePath = join(phaseDir, 'chat.json');
       if (existsSync(candidatePath)) {
@@ -5843,6 +5845,7 @@ export class AblationCLI {
           result.phase,
           result.model,
           result.run,
+          result.chatFile,
         );
         const candidatePath = join(phaseDir, 'chat.json');
         if (existsSync(candidatePath)) {
@@ -5929,6 +5932,7 @@ export class AblationCLI {
         selectedResults[0].phase,
         selectedResults[0].model,
         selectedResults[0].run,
+        selectedResults[0].chatFile,
       );
       if (!existsSync(join(phaseDir, 'chat.json'))) {
         this.logger.log('\n  (No chat file found for this phase — likely a dry run)\n', { type: 'info' });

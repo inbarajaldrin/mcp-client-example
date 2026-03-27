@@ -1355,9 +1355,17 @@ export class AblationManager {
   }
 
   /**
-   * Get the phase directory for a specific run result (contains outputs, chat, logs)
+   * Get the phase directory for a specific run result (contains outputs, chat, logs).
+   * Supports both normal mode ({model}/(run-{N}/){phase}/) and escalation mode
+   * ({phase}/(run-{I}--)?attempt-{N}--{model}/) by deriving from chatFile when available.
    */
-  getRunOutputsDir(runDir: string, phaseName: string, model: AblationModel, runIteration?: number): string {
+  getRunOutputsDir(runDir: string, phaseName: string, model: AblationModel, runIteration?: number, chatFile?: string): string {
+    // If chatFile is available, derive phase dir from it (works for both normal and escalation layouts)
+    if (chatFile) {
+      const chatFullPath = join(runDir, chatFile);
+      return dirname(chatFullPath);
+    }
+    // Fallback: reconstruct path (only works for normal mode)
     const modelDir = this.getModelDirName(model);
     if (runIteration !== undefined) {
       return join(runDir, modelDir, `run-${runIteration}`, sanitizeFolderName(phaseName));
