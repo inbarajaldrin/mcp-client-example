@@ -1786,6 +1786,12 @@ export class AblationCLI {
       return { escalate: true };
     }
 
+    // Handle @switch — swap to next model but keep context (for log correction)
+    if (trimmedCommand === '@switch') {
+      this.logger.log(`  ⇄ @switch: switching to next model (keeping context)\n`, { type: 'warning' });
+      return { switchModel: true };
+    }
+
     // Handle @wait:<seconds> — pause execution
     const waitMatch = trimmedCommand.match(/^@wait:(\d+(?:\.\d+)?)$/);
     if (waitMatch) {
@@ -2245,6 +2251,10 @@ export class AblationCLI {
           hookMgr.resetEscalate();
           return { escalate: true };
         }
+        if (hookMgr.isSwitchModelRequested()) {
+          hookMgr.resetSwitchModel();
+          return { switchModel: true };
+        }
 
         // Consume pending directives from hooks (attachment/prompt injections)
         const pendingResult = await this.consumePendingHookDirectives(hookMgr, maxIterations, ablation, phaseName, iterationDir);
@@ -2279,6 +2289,10 @@ export class AblationCLI {
           if (hookMgr.isEscalateRequested()) {
             hookMgr.resetEscalate();
             return { escalate: true };
+        }
+        if (hookMgr.isSwitchModelRequested()) {
+          hookMgr.resetSwitchModel();
+          return { switchModel: true };
           }
           // Fallback: check if signal_phase_complete(success) was called during nudge
           // but @complete-phase hook didn't fire (batched tool calls)
@@ -2473,6 +2487,10 @@ export class AblationCLI {
         hookManager.resetEscalate();
         return { escalate: true };
       }
+      if (hookManager.isSwitchModelRequested()) {
+        hookManager.resetSwitchModel();
+        return { switchModel: true };
+      }
 
       // Consume pending directives from hooks (attachment/prompt injections)
       const pendingResult = await this.consumePendingHookDirectives(hookManager, maxIterations, ablation, phaseName, iterationDir);
@@ -2507,6 +2525,10 @@ export class AblationCLI {
         if (hookManager.isEscalateRequested()) {
           hookManager.resetEscalate();
           return { escalate: true };
+        }
+        if (hookManager.isSwitchModelRequested()) {
+          hookManager.resetSwitchModel();
+          return { switchModel: true };
         }
         // Fallback: check if signal_phase_complete(success) was called during nudge
         // but @complete-phase hook didn't fire (batched tool calls)
@@ -4525,6 +4547,29 @@ export class AblationCLI {
                 break;
               }
 
+              // Model switch requested via @switch (swap model, keep context)
+              if (cmdResult.switchModel) {
+                const currentIdx = ablation.models.findIndex(m => m.provider === model.provider && m.model === model.model);
+                const nextIdx = currentIdx + 1;
+                if (nextIdx < ablation.models.length) {
+                  const nextModel = ablation.models[nextIdx];
+                  const nextModelKey = `${nextModel.provider}/${nextModel.model}`;
+                  this.logger.log(`  ⇄ Switching model: ${modelKey} → ${nextModelKey} (keeping context)\n`, { type: 'warning' });
+                  try {
+                    const provider = this.createProviderInstance(nextModel.provider);
+                    await this.client.switchProviderAndModel(provider, nextModel.model);
+                  } catch (error: any) {
+                    this.logger.log(`  ✗ Model switch failed: ${error.message} — falling back to escalation\n`, { type: 'error' });
+                    escalateRequested = true;
+                    break;
+                  }
+                } else {
+                  this.logger.log(`  ✗ No next model for @switch — all models exhausted\n`, { type: 'error' });
+                  escalateRequested = true;
+                  break;
+                }
+              }
+
               // Execute after-hooks (only for @tool-exec/@tool commands, no recursion)
               if (cmdResult.toolExecResult) {
                 const hooks = this.ablationManager.getHooksForPhase(ablation, phase.name);
@@ -4579,6 +4624,28 @@ export class AblationCLI {
                     // @escalate hook — escalate to next model for this phase
                     if (hookResult.escalate) {
                       escalateRequested = true;
+                      break;
+                    }
+
+                    // @switch hook — swap model, keep context
+                    if (hookResult.switchModel) {
+                      const curIdx = ablation.models.findIndex(m => m.provider === model.provider && m.model === model.model);
+                      const nextIdx = curIdx + 1;
+                      if (nextIdx < ablation.models.length) {
+                        const nextModel = ablation.models[nextIdx];
+                        const nextModelKey = `${nextModel.provider}/${nextModel.model}`;
+                        this.logger.log(`  ⇄ Hook switch: ${modelKey} → ${nextModelKey} (keeping context)\n`, { type: 'warning' });
+                        try {
+                          const provider = this.createProviderInstance(nextModel.provider);
+                          await this.client.switchProviderAndModel(provider, nextModel.model);
+                        } catch (error: any) {
+                          this.logger.log(`  ✗ Model switch failed: ${error.message}\n`, { type: 'error' });
+                          escalateRequested = true;
+                        }
+                      } else {
+                        this.logger.log(`  ✗ No next model for @switch\n`, { type: 'error' });
+                        escalateRequested = true;
+                      }
                       break;
                     }
 

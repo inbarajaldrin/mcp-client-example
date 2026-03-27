@@ -479,7 +479,7 @@ export class ChatHistoryManager {
    * Records phase start, complete, and abort signals.
    */
   addPhaseEvent(
-    type: 'phase-start' | 'phase-complete' | 'phase-abort' | 'phase-escalate',
+    type: 'phase-start' | 'phase-complete' | 'phase-abort' | 'phase-escalate' | 'phase-switch',
     phaseName: string,
     trigger?: { after?: string; whenOutput?: Record<string, unknown> },
   ): void {

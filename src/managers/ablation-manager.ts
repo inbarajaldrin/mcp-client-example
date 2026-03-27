@@ -132,6 +132,8 @@ export interface AblationCommandResult {
   phaseComplete?: boolean;
   /** When true, signals escalation to the next model in the chain for the current phase */
   escalate?: boolean;
+  /** When true, signals a model switch — swap to next model but keep context and outputs */
+  switchModel?: boolean;
 }
 
 // ==================== Manager ====================

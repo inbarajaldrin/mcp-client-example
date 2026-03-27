@@ -51,7 +51,7 @@ interface HookChatLogger {
     },
   ): void;
   addPhaseEvent(
-    type: 'phase-start' | 'phase-complete' | 'phase-abort' | 'phase-escalate',
+    type: 'phase-start' | 'phase-complete' | 'phase-abort' | 'phase-escalate' | 'phase-switch',
     phaseName: string,
     trigger?: { after?: string; whenOutput?: Record<string, unknown> },
   ): void;
@@ -70,6 +70,7 @@ export class HookManager {
   private phaseCompleteRequested: boolean = false;
   private abortRunRequested: boolean = false;
   private escalateRequested: boolean = false;
+  private switchModelRequested: boolean = false;
   private pendingToolInjection: boolean = false;
 
   // Pending @ directive commands from hooks — consumed by ablation-cli after processQuery returns
@@ -242,6 +243,17 @@ export class HookManager {
   /** Reset escalation flag */
   resetEscalate(): void { this.escalateRequested = false; }
 
+  // ==================== Model Switch Signaling ====================
+
+  /** Signal that the current model should be swapped (keep context, swap model) */
+  requestSwitchModel(): void { this.switchModelRequested = true; }
+
+  /** Check if model switch has been requested */
+  isSwitchModelRequested(): boolean { return this.switchModelRequested; }
+
+  /** Reset model switch flag */
+  resetSwitchModel(): void { this.switchModelRequested = false; }
+
   // ==================== Pending Tool Injection Signaling ====================
 
   /** Check if a @tool: hook matched and is pending injection */
@@ -335,6 +347,17 @@ export class HookManager {
       this.logger.log(`[Hook escalate: escalating to next model for phase "${this.currentPhaseName || 'unknown'}"]\n`, { type: 'warning' });
       this.escalateRequested = true;
       this.chatLogger?.addPhaseEvent('phase-escalate', this.currentPhaseName || 'unknown', {
+        after: triggerTool,
+        whenOutput,
+      });
+      return true;
+    }
+
+    // @switch — swap to the next model but keep context (for log correction by a stronger model)
+    if (trimmed === '@switch') {
+      this.logger.log(`[Hook switch: switching to next model (keeping context) for phase "${this.currentPhaseName || 'unknown'}"]\n`, { type: 'warning' });
+      this.switchModelRequested = true;
+      this.chatLogger?.addPhaseEvent('phase-switch', this.currentPhaseName || 'unknown', {
         after: triggerTool,
         whenOutput,
       });
@@ -546,7 +569,7 @@ export class HookManager {
 
           // Special commands were already handled inline — skip
           const trimmed = hook.run.trim();
-          if (trimmed === '@complete-phase' || trimmed.startsWith('@complete-phase:') || trimmed === '@abort' || trimmed === '@escalate') {
+          if (trimmed === '@complete-phase' || trimmed.startsWith('@complete-phase:') || trimmed === '@abort' || trimmed === '@escalate' || trimmed === '@switch') {
             continue;
           }
 
