@@ -5857,8 +5857,14 @@ export class AblationCLI {
         this.logger.log('  No chat files found.\n', { type: 'info' });
       } else {
         for (let i = 0; i < chatCandidates.length; i++) {
+          const r = chatCandidates[i].result;
+          const status = r.status === 'completed' ? '✓' : r.status === 'escalated' ? '⤴' : '○';
+          const model = `${r.model.provider}/${r.model.model}`;
+          const attempt = r.attempt ? ` attempt ${r.attempt}` : '';
+          const run = r.run ? ` run ${r.run}` : '';
+          const dur = r.durationFormatted ? ` │ ${r.durationFormatted}` : '';
           this.logger.log(
-            `  ${i + 1}. ${chatCandidates[i].result.phase}\n`,
+            `  ${i + 1}. ${status} ${r.phase}${run}${attempt} │ ${model}${dur}\n`,
             { type: 'info' },
           );
         }
