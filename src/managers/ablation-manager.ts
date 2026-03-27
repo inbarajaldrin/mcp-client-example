@@ -659,12 +659,16 @@ export class AblationManager {
 
   /**
    * Create escalation attempt directory within a run.
-   * Structure: {runDir}/{phase}/attempt-{N}--{provider}--{model}/
+   * Structure (single iteration):  {runDir}/{phase}/attempt-{N}--{provider}--{model}/
+   * Structure (multi-iteration):   {runDir}/{phase}/run-{I}--attempt-{N}--{provider}--{model}/
    */
-  createEscalationAttemptDir(runDir: string, phaseName: string, attempt: number, model: AblationModel): string {
+  createEscalationAttemptDir(runDir: string, phaseName: string, attempt: number, model: AblationModel, runIteration?: number): string {
     const phaseDir = sanitizeFolderName(phaseName);
     const modelDir = this.getModelDirName(model);
-    const attemptDir = join(runDir, phaseDir, `attempt-${attempt}--${modelDir}`);
+    const dirName = runIteration !== undefined
+      ? `run-${runIteration}--attempt-${attempt}--${modelDir}`
+      : `attempt-${attempt}--${modelDir}`;
+    const attemptDir = join(runDir, phaseDir, dirName);
     mkdirSync(attemptDir, { recursive: true });
     return attemptDir;
   }

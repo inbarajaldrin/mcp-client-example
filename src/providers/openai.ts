@@ -14,6 +14,7 @@ import type {
 
 import type { ToolExecutionResult } from '../core/tool-executor.js';
 import { isReasoningModel } from '../utils/model-capabilities.js';
+import { getModelInfo } from '../utils/models-dev.js';
 
 // Tool Executor Type - function that executes tools on your system
 // Returns ToolExecutionResult with display text and content blocks (including images)
@@ -1055,14 +1056,15 @@ export class OpenAIProvider implements ModelProvider {
       // Filter to only chat completion models and map to ModelInfo
       const chatModels = response.data
         .filter((model) => {
-          // Only include models that support chat completions
-          // OpenAI models typically have 'gpt-' prefix or 'o1-' prefix
+          // Exclude known non-chat models (embeddings, TTS, image gen, legacy, etc.)
+          // This is more future-proof than allowlisting — new model families (o3, o4, etc.) work automatically
           const id = model.id.toLowerCase();
-          return (
-            id.startsWith('gpt-') ||
-            id.startsWith('o1-') ||
-            id.includes('chat')
-          );
+          const NON_CHAT_PREFIXES = [
+            'dall-e', 'tts-', 'whisper', 'text-embedding', 'text-moderation',
+            'davinci', 'babbage', 'curie', 'ada', 'text-davinci', 'code-',
+            'text-search-', 'text-similarity-', 'codex-', 'ft:', 'chatgpt-',
+          ];
+          return !NON_CHAT_PREFIXES.some(prefix => id.startsWith(prefix));
         })
         .map((model) => {
           const modelId = model.id;
@@ -1092,6 +1094,14 @@ export class OpenAIProvider implements ModelProvider {
             contextWindow = OPENAI_MODEL_CONTEXT_WINDOWS[modelId];
             this.contextWindowCache.set(modelId, contextWindow);
           }
+          // Final fallback: models.dev database
+          if (contextWindow === undefined) {
+            const info = getModelInfo(modelId, 'openai');
+            if (info?.limit?.context) {
+              contextWindow = info.limit.context;
+              this.contextWindowCache.set(modelId, contextWindow);
+            }
+          }
           
           let description = '';
           let capabilities: string[] = ['text', 'tools'];
@@ -1106,7 +1116,7 @@ export class OpenAIProvider implements ModelProvider {
             }
           } else if (modelId.startsWith('gpt-3.5')) {
             description = 'Fast and efficient GPT-3.5 model';
-          } else if (modelId.startsWith('o1')) {
+          } else if (modelId.startsWith('o1') || modelId.startsWith('o3') || modelId.startsWith('o4')) {
             description = 'Reasoning model optimized for complex problem-solving';
           } else if (modelId.startsWith('gpt-5')) {
             description = 'Latest GPT-5 model with extended context';
@@ -1148,7 +1158,9 @@ export class OpenAIProvider implements ModelProvider {
  */
 function getModelPriority(modelId: string): number {
   if (modelId.startsWith('gpt-5')) return 100;
-  if (modelId.startsWith('o1')) return 90;
+  if (modelId.startsWith('o4')) return 95;
+  if (modelId.startsWith('o3')) return 90;
+  if (modelId.startsWith('o1')) return 85;
   if (modelId.startsWith('gpt-4o')) return 80;
   if (modelId.startsWith('gpt-4')) return 70;
   if (modelId.startsWith('gpt-3.5')) return 60;

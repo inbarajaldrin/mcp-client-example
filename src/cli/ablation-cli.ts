@@ -237,7 +237,7 @@ export class AblationCLI {
 
     if (chatMetadata) {
       // Compute relative chat path from runDir to phaseDir
-      // Escalation mode: phaseDir = {runDir}/{phase}/attempt-N--{model}/
+      // Escalation mode: phaseDir = {runDir}/{phase}/(run-{I}--)?attempt-N--{model}/
       // Normal mode:     phaseDir = {runDir}/{model}/(run-N/){phase}/
       const relativeChatPath = phaseDir.startsWith(runDir)
         ? phaseDir.slice(runDir.length + 1) + '/chat.json'
@@ -3538,7 +3538,7 @@ export class AblationCLI {
 
           // Create attempt directory
           const attemptDir = this.ablationManager.createEscalationAttemptDir(
-            runDir, phase.name, attempt, model,
+            runDir, phase.name, attempt, model, getRunIter(iteration),
           );
 
           // Save snapshots to attempt dir
