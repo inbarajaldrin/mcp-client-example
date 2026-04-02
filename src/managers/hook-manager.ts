@@ -471,9 +471,10 @@ export class HookManager {
           continue;
         }
 
-        // Special commands (@complete-phase, @abort) always fire immediately for cancellation
+        // Special commands (@complete-phase, @abort, @escalate, @switch) fire immediately.
+        // These are mutually exclusive lifecycle actions — break after the first match.
         if (hook.run && this.handleSpecialCommand(hook.run, toolName, hook.whenOutput as Record<string, unknown>, hook.whenInput as Record<string, unknown>)) {
-          continue;
+          break;
         }
 
         const parsed = hook.run ? parseDirectToolCall(hook.run) : null;
@@ -668,8 +669,10 @@ export class HookManager {
     await this.executeGateCommands(commands, triggerTool, executeTool, gateResult.displayText);
 
     // 4. Queue gate prompt for injection by ablation-cli (if present)
+    //    Apply {{gate_output}} substitution so the agent sees the actual failure details.
     if (gate.prompt) {
-      this.pendingClientPrompt = { text: gate.prompt, source: `gate: ${gateParsed.toolName}` };
+      const promptText = gate.prompt.replace(/\{\{gate_output\}\}/g, gateResult.displayText);
+      this.pendingClientPrompt = { text: promptText, source: `gate: ${gateParsed.toolName}` };
     }
   }
 

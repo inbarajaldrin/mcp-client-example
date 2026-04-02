@@ -4557,7 +4557,7 @@ export class AblationCLI {
                   this.logger.log(`  ⇄ Switching model: ${modelKey} → ${nextModelKey} (keeping context)\n`, { type: 'warning' });
                   try {
                     const provider = this.createProviderInstance(nextModel.provider);
-                    await this.client.switchProviderAndModel(provider, nextModel.model);
+                    await this.client.switchModel(provider, nextModel.model);
                   } catch (error: any) {
                     this.logger.log(`  ✗ Model switch failed: ${error.message} — falling back to escalation\n`, { type: 'error' });
                     escalateRequested = true;
@@ -4637,7 +4637,7 @@ export class AblationCLI {
                         this.logger.log(`  ⇄ Hook switch: ${modelKey} → ${nextModelKey} (keeping context)\n`, { type: 'warning' });
                         try {
                           const provider = this.createProviderInstance(nextModel.provider);
-                          await this.client.switchProviderAndModel(provider, nextModel.model);
+                          await this.client.switchModel(provider, nextModel.model);
                         } catch (error: any) {
                           this.logger.log(`  ✗ Model switch failed: ${error.message}\n`, { type: 'error' });
                           escalateRequested = true;
