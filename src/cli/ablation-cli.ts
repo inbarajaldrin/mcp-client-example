@@ -2271,7 +2271,9 @@ export class AblationCLI {
 
         // Nudge it once — if it still doesn't signal, abort.
         if (ablation && phaseName && !this.callbacks.isAbortRequested()) {
-          const nudgeMsg = `You stopped without signaling phase completion. Call signal_phase_complete with status "success" if the phase objectives were met, or status "failure" if they were not. Do not continue working — just signal.`;
+          const nudgeMsg = this.client.lastQueryHitIterationLimit()
+            ? `You stopped without signaling phase completion. Call signal_phase_complete with status "success" if the phase objectives were met, or status "failure" if they were not. Do not continue working — just signal.`
+            : `You stopped without signaling phase completion. Call signal_phase_complete with status "success" if the phase objectives were met, if not continue finishing the objective. If you are not able to complete the objective signal failure.`;
           this.logger.log(`  ℹ Phase "${phaseName}": nudging agent to signal phase completion\n`, { type: 'info' });
           this.client.getChatHistoryManager().addUserMessage(nudgeMsg);
           const nudgeCancel = () => hookMgr.isPhaseCompleteRequested() || hookMgr.isAbortRunRequested() || this.callbacks.isAbortRequested();
@@ -2507,7 +2509,9 @@ export class AblationCLI {
 
       // Nudge it once — if it still doesn't signal, abort.
       if (ablation && phaseName && !this.callbacks.isAbortRequested()) {
-        const nudgeMsg = `You stopped without signaling phase completion. Call signal_phase_complete with status "success" if the phase objectives were met, or status "failure" if they were not. Do not continue working — just signal.`;
+        const nudgeMsg = this.client.lastQueryHitIterationLimit()
+          ? `You stopped without signaling phase completion. Call signal_phase_complete with status "success" if the phase objectives were met, or status "failure" if they were not. Do not continue working — just signal.`
+          : `You stopped without signaling phase completion. Call signal_phase_complete with status "success" if the phase objectives were met, if not continue finishing the objective. If you are not able to complete the objective signal failure.`;
         this.logger.log(`  ℹ Phase "${phaseName}": nudging agent to signal phase completion\n`, { type: 'info' });
         this.client.getChatHistoryManager().addUserMessage(nudgeMsg);
         const nudgeCancel = () => hookManager.isPhaseCompleteRequested() || hookManager.isAbortRunRequested() || this.callbacks.isAbortRequested();

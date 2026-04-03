@@ -135,6 +135,7 @@ export class MCPClient {
   private toolApprovalCallback?: (toolName: string, toolInput: Record<string, any>) => Promise<'execute' | { decision: 'reject'; message?: string }>;
   private webElicitationCallback?: (request: ElicitRequest) => Promise<import('@modelcontextprotocol/sdk/types.js').ElicitResult>;
   private systemPrompt: string | null = null;
+  private _lastQueryHitIterationLimit: boolean = false;
 
   constructor(
     serverConfigs: StdioServerParameters | StdioServerParameters[],
@@ -1480,6 +1481,10 @@ export class MCPClient {
     return this.chatHistoryManager;
   }
 
+  lastQueryHitIterationLimit(): boolean {
+    return this._lastQueryHitIterationLimit;
+  }
+
   getServerLogManager(): ServerLogManager {
     return this.serverLogManager;
   }
@@ -2524,6 +2529,7 @@ export class MCPClient {
       
       // Handle max_iterations_reached event (from provider)
       if (chunk.type === 'max_iterations_reached') {
+        this._lastQueryHitIterationLimit = true;
         this.logger.log(
           `\n⚠️  Maximum iterations reached (${chunk.iterations}/${chunk.maxIterations}). Stopping agent loop.\n`,
           { type: 'warning' },
@@ -3252,6 +3258,7 @@ export class MCPClient {
     // Track message count before adding new message (for cleanup on abort)
     const messagesBeforeQuery = this.messages.length;
     const tokenCountBeforeQuery = this.currentTokenCount;
+    this._lastQueryHitIterationLimit = false;
 
     // Reset token tracking for this query
     // This ensures we track tokens per callback correctly
