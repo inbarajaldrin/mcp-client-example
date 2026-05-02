@@ -3927,6 +3927,9 @@ export class AblationCLI {
       ? ablation.settings.mcpConfigPath
       : defaultMcpConfigPath;
 
+    // TODO: Hard-exit (not warn-and-continue) when the MCP config path is invalid,
+    // missing, or fails to load — same for required ablation settings. Today we fall
+    // through to the default config (lines below), silently changing run semantics.
     if (effectiveConfigPath !== defaultMcpConfigPath) {
       if (this.lastAblationMcpConfigPath !== effectiveConfigPath) {
         const resolvedPath = this.ablationManager.resolveMcpConfigPath(ablation);
