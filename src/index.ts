@@ -22,7 +22,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import chalk from 'chalk';
 import { consoleStyles, Logger, LoggerOptions } from './logger.js';
 import { TodoManager } from './managers/todo-manager.js';
-import { ROS2VideoRecordingManager } from './managers/ros2-video-recording-manager.js';
+import { VideoRecordingManager } from './managers/video-recording-manager.js';
 import { ToolManager } from './managers/tool-manager.js';
 import { PromptManager } from './managers/prompt-manager.js';
 import { ResourceManager } from './managers/resource-manager.js';
@@ -107,7 +107,7 @@ export class MCPClient {
   private currentTokenCount: number = 0;
   private model: string;
   private todoManager: TodoManager;
-  private ros2VideoRecordingManager: ROS2VideoRecordingManager;
+  private videoRecordingManager: VideoRecordingManager;
   private todoModeInitialized: boolean = false;
   private todoClearUserCallback?: (todosList: string) => Promise<'clear' | 'skip' | 'leave'>;
   private todoCompletionUserCallback?: (todosList: string) => Promise<'clear' | 'leave'>;
@@ -189,7 +189,7 @@ export class MCPClient {
     this.todoManager = new TodoManager(this.logger);
 
     // Initialize ROS2 video recording manager
-    this.ros2VideoRecordingManager = new ROS2VideoRecordingManager(this.logger);
+    this.videoRecordingManager = new VideoRecordingManager(this.logger);
 
     // Initialize tool manager
     this.preferencesManager = new PreferencesManager(this.logger);
@@ -298,7 +298,7 @@ export class MCPClient {
       getModel: () => client.model,
     });
     client.todoManager = new TodoManager(client.logger);
-    client.ros2VideoRecordingManager = new ROS2VideoRecordingManager(client.logger);
+    client.videoRecordingManager = new VideoRecordingManager(client.logger);
     client.preferencesManager = new PreferencesManager(client.logger);
     client.toolManager = new ToolManager(client.logger);
     client.hookManager = new HookManager(client.logger);
@@ -534,14 +534,15 @@ export class MCPClient {
    * Call this before ending the chat session so video paths can be included in history
    */
   async cleanupVideoRecording(): Promise<void> {
-    if (this.servers.has(this.ros2VideoRecordingManager.getServerName())) {
-      const connection = this.servers.get(this.ros2VideoRecordingManager.getServerName())!;
-      this.ros2VideoRecordingManager.setConnection(connection);
-      try {
-        await this.ros2VideoRecordingManager.cleanup();
-      } catch (error) {
-        // Ignore errors during cleanup
+    for (const serverName of this.videoRecordingManager.getServerNames()) {
+      if (this.servers.has(serverName)) {
+        this.videoRecordingManager.setConnection(serverName, this.servers.get(serverName)!);
       }
+    }
+    try {
+      await this.videoRecordingManager.cleanup();
+    } catch (error) {
+      // Ignore errors during cleanup
     }
   }
 
