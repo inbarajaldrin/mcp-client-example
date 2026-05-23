@@ -24,7 +24,7 @@ import { initModelsDevCache } from '../src/utils/models-dev.js';
 import { isReasoningModel } from '../src/utils/model-capabilities.js';
 
 const PROVIDER_DEFAULTS: Record<string, { model: string; level: string }> = {
-  anthropic: { model: 'claude-sonnet-4-5-20250514', level: 'adaptive' },
+  anthropic: { model: 'claude-sonnet-4-6',           level: 'adaptive' },
   openai:    { model: 'gpt-5-mini',                 level: 'medium' },
   google:    { model: 'gemini-2.5-flash',            level: 'dynamic' },
   xai:       { model: 'grok-3-mini-fast',            level: 'low' },

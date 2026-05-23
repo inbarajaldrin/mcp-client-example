@@ -1,6 +1,5 @@
 import { Anthropic } from '@anthropic-ai/sdk';
-import { Tool as AnthropicTool } from '@anthropic-ai/sdk/resources/index.mjs';
-import { Stream } from '@anthropic-ai/sdk/streaming.mjs';
+import type { Tool as AnthropicTool, RawMessageStreamEvent } from '@anthropic-ai/sdk/resources/messages';
 import { encoding_for_model } from 'tiktoken';
 import type {
   ModelProvider,
@@ -442,17 +441,16 @@ export class AnthropicProvider implements ModelProvider {
       }));
 
     const thinkingParam = isReasoningModel(model, 'anthropic') ? this.resolveThinkingParam() : undefined;
-    const createParams: any = {
+    const streamParams: any = {
       messages: anthropicMessages,
       model: model,
       max_tokens: maxTokens,
       tools: anthropicTools,
-      stream: true,
     };
-    if (thinkingParam) createParams.thinking = thinkingParam;
-    const stream: any = await this.anthropicClient.messages.create(createParams);
+    if (thinkingParam) streamParams.thinking = thinkingParam;
+    const stream = this.anthropicClient.messages.stream(streamParams);
 
-    // Yield events from Anthropic stream
+    // Yield typed stream events (SDK's discriminated union)
     for await (const chunk of stream) {
       yield chunk as MessageStreamEvent;
     }
@@ -539,49 +537,21 @@ export class AnthropicProvider implements ModelProvider {
       if (thinkingParam) streamParams.thinking = thinkingParam;
       const stream = this.anthropicClient.messages.stream(streamParams);
 
-      // Stream events to user (they see text in real-time)
-      // Also accumulate thinking content and signature manually because the SDK (v0.32.x)
-      // does not assemble thinking_delta or signature_delta events into finalMessage()
-      // content blocks — it only handles text_delta and input_json_delta.
-      let accumulatedThinking = '';
-      let accumulatedSignature = '';
-      // Capture raw tool input JSON fragments before SDK's partialParse processes them.
+      // Capture raw tool-input JSON fragments before the SDK's partialParse processes them.
       // The SDK's partial JSON parser cannot handle scientific notation (e.g. 1e-6 → 16),
       // so we accumulate the raw deltas to preserve the model's original output.
       const rawToolInputJsonBuffers: Record<number, string> = {};
-      for await (const chunk of stream) {
-        const delta = (chunk as any).delta;
-        if ((chunk as any).type === 'content_block_delta') {
-          if (delta?.type === 'thinking_delta') {
-            accumulatedThinking += delta.thinking || '';
-          } else if (delta?.type === 'signature_delta') {
-            accumulatedSignature += delta.signature || '';
-          } else if (delta?.type === 'input_json_delta') {
-            const idx = (chunk as any).index ?? 0;
-            rawToolInputJsonBuffers[idx] = (rawToolInputJsonBuffers[idx] || '') + (delta.partial_json || '');
-          }
+      for await (const chunk of stream as AsyncIterable<RawMessageStreamEvent>) {
+        if (chunk.type === 'content_block_delta' && chunk.delta.type === 'input_json_delta') {
+          rawToolInputJsonBuffers[chunk.index] =
+            (rawToolInputJsonBuffers[chunk.index] || '') + chunk.delta.partial_json;
         }
         yield chunk as MessageStreamEvent;
       }
 
-      // Get the final complete message
+      // SDK >=0.40 natively assembles thinking_delta / signature_delta into
+      // ThinkingBlock content blocks of finalMessage(). No manual patching needed.
       const response = await stream.finalMessage();
-
-      // Patch thinking blocks: the SDK doesn't assemble thinking_delta/signature_delta
-      // into content blocks, so thinking blocks from finalMessage() have empty fields.
-      // Replace with the manually accumulated content. Both thinking text and signature
-      // are required for valid multi-turn conversations (API verifies signature).
-      if (accumulatedThinking) {
-        for (const block of response.content as any[]) {
-          if (block.type === 'thinking' && !block.thinking) {
-            block.thinking = accumulatedThinking;
-            if (accumulatedSignature) {
-              block.signature = accumulatedSignature;
-            }
-            break; // Only one thinking block per response
-          }
-        }
-      }
 
       // Map raw tool input JSON to tool_use block IDs (before partialParse corruption).
       // Stored separately — cannot attach to content blocks as API rejects extra fields.
