@@ -1312,6 +1312,9 @@ export class OpenAIProvider implements ModelProvider {
         }
 
         case 'response.reasoning_summary_text.delta': {
+          // Note the event name: this is a SUMMARY of the reasoning, not raw CoT.
+          // OpenAI bills for raw reasoning tokens (output_tokens_details.reasoning_tokens
+          // below) but never streams them. There is no event for raw reasoning text.
           for (const e of ensureStarted()) yield e;
           yield {
             type: 'content_block_delta',

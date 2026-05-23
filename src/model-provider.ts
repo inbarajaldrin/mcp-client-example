@@ -75,11 +75,21 @@ export interface ThinkingConfig {
   level: string;
 }
 
-// Thinking content block from model responses (Anthropic extended thinking)
+// Thinking content block from model responses.
+//
+// IMPORTANT — summary vs raw chain-of-thought:
+//   The `thinking` field holds a model-generated SUMMARY of the reasoning,
+//   not the raw chain-of-thought tokens. Both Anthropic (Claude 4.x) and
+//   OpenAI (gpt-5, o-series via Responses API) bill for the raw reasoning
+//   tokens but only expose this summary on the wire. Older Anthropic models
+//   (claude-3-7-sonnet with extended thinking) exposed the full text — so a
+//   long `thinking` field there is the real CoT, not a summary. Implication
+//   for ablation studies: reasoning *token counts* are comparable across
+//   providers; reasoning *text* is not (you're comparing summarizers).
 export interface ThinkingBlock {
   type: 'thinking';
-  thinking: string;      // Thinking/reasoning text (summary for Claude 4 models)
-  signature?: string;    // Encrypted full thinking content (for multi-turn verification)
+  thinking: string;      // Summary of model reasoning (raw CoT for legacy Claude 3.x)
+  signature?: string;    // Encrypted full thinking content (Anthropic multi-turn verification)
 }
 
 // Redacted thinking block (when content is filtered)
