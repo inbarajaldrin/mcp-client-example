@@ -1,4 +1,5 @@
 import OpenAI from 'openai';
+import type { ResponseStreamEvent, Response as ResponsesResponse } from 'openai/resources/responses/responses';
 import { encoding_for_model } from 'tiktoken';
 import type {
   ModelProvider,
@@ -1272,15 +1273,17 @@ export class OpenAIProvider implements ModelProvider {
     if (responsesTools) params.tools = responsesTools;
     if (reasoningArg) params.reasoning = reasoningArg;
 
-    const stream: any = await this.openaiClient.responses.create(params);
+    // params is typed `any` (request-shape flexibility), so the SDK's
+    // streaming overload doesn't auto-resolve. Cast the result instead.
+    const stream = (await this.openaiClient.responses.create(params)) as unknown as AsyncIterable<ResponseStreamEvent>;
 
     // Track in-progress function call items: item.id → { name, call_id, argsBuf }
     const fnCalls = new Map<string, { name: string; callId: string; args: string }>();
     let messageStarted = false;
     let assistantText = '';
-    let finalResponse: any = null;
+    let finalResponse: ResponsesResponse | null = null;
 
-    const ensureStarted = () => {
+    const ensureStarted = (): MessageStreamEvent[] => {
       if (!messageStarted) {
         messageStarted = true;
         return [{ type: 'message_start' } as MessageStreamEvent];
@@ -1288,73 +1291,79 @@ export class OpenAIProvider implements ModelProvider {
       return [];
     };
 
-    for await (const event of stream as AsyncIterable<any>) {
-      const t = event.type as string;
-
-      if (t === 'response.output_item.added') {
-        const item = event.item;
-        if (item?.type === 'message') {
-          for (const e of ensureStarted()) yield e;
-        } else if (item?.type === 'function_call') {
-          for (const e of ensureStarted()) yield e;
-          // item.id is stream correlation; item.call_id is the round-trip id
-          fnCalls.set(item.id, { name: item.name, callId: item.call_id, args: '' });
-          yield {
-            type: 'content_block_start',
-            content_block: { type: 'tool_use', name: item.name, id: item.call_id },
-          } as MessageStreamEvent;
+    for await (const event of stream) {
+      switch (event.type) {
+        case 'response.output_item.added': {
+          const item = event.item;
+          if (item.type === 'message') {
+            for (const e of ensureStarted()) yield e;
+          } else if (item.type === 'function_call') {
+            for (const e of ensureStarted()) yield e;
+            // item.id is stream correlation; item.call_id is the round-trip id
+            if (item.id) {
+              fnCalls.set(item.id, { name: item.name, callId: item.call_id, args: '' });
+            }
+            yield {
+              type: 'content_block_start',
+              content_block: { type: 'tool_use', name: item.name, id: item.call_id },
+            } as MessageStreamEvent;
+          }
+          break;
         }
-        continue;
-      }
 
-      if (t === 'response.reasoning_summary_text.delta') {
-        for (const e of ensureStarted()) yield e;
-        yield {
-          type: 'content_block_delta',
-          delta: { type: 'thinking_delta', thinking: event.delta || '' },
-        } as MessageStreamEvent;
-        continue;
-      }
+        case 'response.reasoning_summary_text.delta': {
+          for (const e of ensureStarted()) yield e;
+          yield {
+            type: 'content_block_delta',
+            delta: { type: 'thinking_delta', thinking: event.delta },
+          } as MessageStreamEvent;
+          break;
+        }
 
-      if (t === 'response.output_text.delta') {
-        for (const e of ensureStarted()) yield e;
-        const text = event.delta || '';
-        assistantText += text;
-        yield {
-          type: 'content_block_delta',
-          delta: { type: 'text_delta', text },
-        } as MessageStreamEvent;
-        continue;
-      }
+        case 'response.output_text.delta': {
+          for (const e of ensureStarted()) yield e;
+          assistantText += event.delta;
+          yield {
+            type: 'content_block_delta',
+            delta: { type: 'text_delta', text: event.delta },
+          } as MessageStreamEvent;
+          break;
+        }
 
-      if (t === 'response.function_call_arguments.delta') {
-        const fc = fnCalls.get(event.item_id);
-        if (fc) fc.args += (event.delta || '');
-        yield {
-          type: 'content_block_delta',
-          delta: { type: 'input_json_delta', partial_json: event.delta || '' },
-        } as MessageStreamEvent;
-        continue;
-      }
+        case 'response.function_call_arguments.delta': {
+          const fc = fnCalls.get(event.item_id);
+          if (fc) fc.args += event.delta;
+          yield {
+            type: 'content_block_delta',
+            delta: { type: 'input_json_delta', partial_json: event.delta },
+          } as MessageStreamEvent;
+          break;
+        }
 
-      if (t === 'response.function_call_arguments.done') {
-        // Authoritative final arguments — overwrite any partial accumulation
-        const fc = fnCalls.get(event.item_id);
-        if (fc && typeof event.arguments === 'string') fc.args = event.arguments;
-        continue;
-      }
+        case 'response.function_call_arguments.done': {
+          // Authoritative final arguments — overwrite any partial accumulation
+          const fc = fnCalls.get(event.item_id);
+          if (fc) fc.args = event.arguments;
+          break;
+        }
 
-      if (t === 'response.completed') {
-        finalResponse = event.response;
-        continue;
-      }
+        case 'response.completed': {
+          finalResponse = event.response;
+          break;
+        }
 
-      if (t === 'response.failed') {
-        const err = event.response?.error;
-        throw new Error(`OpenAI Responses API error: ${err?.message || JSON.stringify(err)}`);
-      }
-      if (t === 'error') {
-        throw new Error(`OpenAI Responses stream error: ${event.message || JSON.stringify(event)}`);
+        case 'response.failed': {
+          const err = event.response.error;
+          throw new Error(`OpenAI Responses API error: ${err?.message || JSON.stringify(err)}`);
+        }
+
+        case 'error': {
+          throw new Error(`OpenAI Responses stream error: ${event.message || JSON.stringify(event)}`);
+        }
+
+        // All other events (response.created, in_progress, content_part.*,
+        // reasoning_summary_part.*, output_item.done, completed sub-events,
+        // queued, etc.) are ignored — we don't need them for our protocol.
       }
     }
 
