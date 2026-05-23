@@ -1220,7 +1220,18 @@ export class OpenAIProvider implements ModelProvider {
         continue;
       }
 
+      // Assistant turn — replay prior reasoning items first so the model
+      // can continue from cached reasoning state instead of re-deriving
+      // (mirrors Anthropic's thinking-block round-trip at anthropic.ts:871-890).
+      // Stripped when thinking is currently disabled, matching that pattern.
+      const thinkingActive = !!this.thinkingConfig;
+
       if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        if (thinkingActive && msg.content_blocks) {
+          for (const b of msg.content_blocks as any[]) {
+            if (b?.type === 'reasoning') items.push(b);
+          }
+        }
         if (msg.content && msg.content.length > 0) {
           items.push({ role: 'assistant', content: msg.content });
         }
@@ -1230,6 +1241,12 @@ export class OpenAIProvider implements ModelProvider {
         continue;
       }
 
+      // Assistant fallback (text only, no tool calls) — still replay reasoning
+      if (thinkingActive && msg.role === 'assistant' && msg.content_blocks) {
+        for (const b of msg.content_blocks as any[]) {
+          if (b?.type === 'reasoning') items.push(b);
+        }
+      }
       items.push({ role: 'assistant', content: msg.content || '' });
     }
     return items;
@@ -1246,7 +1263,7 @@ export class OpenAIProvider implements ModelProvider {
     tools: Tool[],
     maxOutputTokens: number,
     system?: string,
-    collector?: { content: string; toolCalls: Array<{ id: string; name: string; arguments: string }> },
+    collector?: { content: string; toolCalls: Array<{ id: string; name: string; arguments: string }>; reasoningItems: any[] },
   ): AsyncIterable<MessageStreamEvent> {
     const effort = this.resolveReasoningEffort();
     const reasoningArg = effort !== 'none' ? { effort, summary: 'auto' as const } : undefined;
@@ -1279,6 +1296,9 @@ export class OpenAIProvider implements ModelProvider {
 
     // Track in-progress function call items: item.id → { name, call_id, argsBuf }
     const fnCalls = new Map<string, { name: string; callId: string; args: string }>();
+    // Capture completed reasoning items so the agentic loop can replay them
+    // on the next turn (preserves cached reasoning state — see convertToResponsesInput).
+    const reasoningItems: any[] = [];
     let messageStarted = false;
     let assistantText = '';
     let finalResponse: ResponsesResponse | null = null;
@@ -1350,6 +1370,14 @@ export class OpenAIProvider implements ModelProvider {
           break;
         }
 
+        case 'response.output_item.done': {
+          // Capture completed reasoning items for cross-turn replay
+          if (event.item.type === 'reasoning') {
+            reasoningItems.push(event.item);
+          }
+          break;
+        }
+
         case 'response.completed': {
           finalResponse = event.response;
           break;
@@ -1365,8 +1393,8 @@ export class OpenAIProvider implements ModelProvider {
         }
 
         // All other events (response.created, in_progress, content_part.*,
-        // reasoning_summary_part.*, output_item.done, completed sub-events,
-        // queued, etc.) are ignored — we don't need them for our protocol.
+        // reasoning_summary_part.*, completed sub-events, queued, etc.)
+        // are ignored — we don't need them for our protocol.
       }
     }
 
@@ -1376,6 +1404,7 @@ export class OpenAIProvider implements ModelProvider {
       collector.toolCalls = Array.from(fnCalls.values()).map((fc) => ({
         id: fc.callId, name: fc.name, arguments: fc.args || '{}',
       }));
+      collector.reasoningItems = reasoningItems;
     }
 
     // Derive stop reason from Response.status + incomplete_details (no finish_reason in Responses)
@@ -1418,10 +1447,10 @@ export class OpenAIProvider implements ModelProvider {
    * Agentic loop using the Responses API. Mirrors createMessageStreamWithToolUse
    * (Chat Completions path) but uses streamResponsesAPI for each turn.
    *
-   * Known limitation: prior reasoning items are NOT replayed in subsequent
-   * turns, so the model re-derives reasoning context (paying reasoning tokens
-   * again). To preserve it, persist `{type:'reasoning'}` items in
-   * content_blocks and re-emit them in convertToResponsesInput. Deferred.
+   * Reasoning items captured each turn are persisted in `content_blocks` and
+   * replayed on subsequent turns via convertToResponsesInput, so the model
+   * continues from cached reasoning instead of re-deriving (parity with the
+   * Anthropic provider's thinking-block round-trip).
    */
   private async *agenticLoopResponses(
     messages: Message[],
@@ -1443,16 +1472,23 @@ export class OpenAIProvider implements ModelProvider {
 
       iterations++;
 
-      const collector = { content: '', toolCalls: [] as Array<{ id: string; name: string; arguments: string }> };
+      const collector = {
+        content: '',
+        toolCalls: [] as Array<{ id: string; name: string; arguments: string }>,
+        reasoningItems: [] as any[],
+      };
       for await (const ev of this.streamResponsesAPI(conversationMessages, model, tools, maxTokens, system, collector)) {
         yield ev;
       }
 
-      // Persist assistant message + tool calls for next turn
+      // Persist assistant message + tool calls + reasoning items for next turn.
+      // reasoningItems → content_blocks so convertToResponsesInput can replay them,
+      // letting the model continue from cached reasoning state.
       conversationMessages.push({
         role: 'assistant',
         content: collector.content,
         tool_calls: collector.toolCalls.length > 0 ? collector.toolCalls : undefined,
+        ...(collector.reasoningItems.length > 0 && { content_blocks: collector.reasoningItems }),
       });
 
       // If we just sent pending tool results and are cancelled, stop here
