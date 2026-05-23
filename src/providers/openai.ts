@@ -174,21 +174,21 @@ export class OpenAIProvider implements ModelProvider {
   }
 
   /**
-   * Resolve reasoning params for the API call (Chat Completions API).
-   * GPT-5.2 supports none|low|medium|high reasoning_effort. Default is 'none'.
-   * Note: reasoning_summary and include are Responses API only — not supported in Chat Completions.
-   * The reasoning_content field streams automatically when reasoning_effort is set.
+   * Resolve reasoning effort level. Returns 'none' when thinking is off,
+   * otherwise the configured level (low/medium/high), defaulting to medium.
+   *
+   * Chat Completions accepts `reasoning_effort` but does NOT stream reasoning
+   * text (only counts). Reasoning-capable models route to the Responses API
+   * for streamed reasoning summary text (see streamResponsesAPI).
    */
-  private resolveReasoningParams(): Record<string, any> | undefined {
-    if (!this.thinkingConfig) {
-      return { reasoning_effort: 'none' }; // No reasoning when thinking is off
-    }
+  private resolveReasoningEffort(): 'none' | 'low' | 'medium' | 'high' {
+    if (!this.thinkingConfig) return 'none';
     const level = this.thinkingConfig.level;
-    const validLevels = ['low', 'medium', 'high'];
-    if (!validLevels.includes(level)) {
-      return { reasoning_effort: 'medium' };
-    }
-    return { reasoning_effort: level };
+    return (['low', 'medium', 'high'] as const).includes(level as any) ? level as any : 'medium';
+  }
+
+  private resolveReasoningParams(): Record<string, any> | undefined {
+    return { reasoning_effort: this.resolveReasoningEffort() };
   }
 
   getProviderName(): string {
@@ -274,6 +274,13 @@ export class OpenAIProvider implements ModelProvider {
     tools: Tool[],
     maxTokens: number,
   ): AsyncIterable<MessageStreamEvent> {
+    // Reasoning models route to Responses API to expose streamed reasoning summary text.
+    // Chat Completions only exposes reasoning token counts, never the text itself.
+    if (isReasoningModel(model, 'openai')) {
+      yield* this.streamResponsesAPI(messages, model, tools, maxTokens);
+      return;
+    }
+
     // Convert generic Tool[] to OpenAI function format
     const openaiTools = tools.map((tool) => ({
       type: 'function' as const,
@@ -351,11 +358,6 @@ export class OpenAIProvider implements ModelProvider {
       }
 
       const delta = choice.delta;
-
-      // TODO: OpenAI Chat Completions API does not expose reasoning text in streaming deltas.
-      // To display reasoning, switch reasoning models to the Responses API (openai.responses.create())
-      // which streams reasoning via 'response.reasoning_summary_text.delta' events.
-      // See: https://platform.openai.com/docs/guides/reasoning
 
       if (delta.content) {
         yield {
@@ -476,6 +478,15 @@ export class OpenAIProvider implements ModelProvider {
     onIterationLimit?: (iterations: number, maxIterations: number) => Promise<number | null>,
     system?: string,
   ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
+    // Reasoning models route to Responses API to expose streamed reasoning summary text.
+    if (isReasoningModel(model, 'openai')) {
+      yield* this.agenticLoopResponses(
+        messages, model, tools, maxTokens, toolExecutor,
+        maxIterations, cancellationCheck, onIterationLimit, system,
+      );
+      return;
+    }
+
     // Convert generic Tool[] to OpenAI function format
     const openaiTools = tools.map((tool) => ({
       type: 'function' as const,
@@ -555,11 +566,6 @@ export class OpenAIProvider implements ModelProvider {
         }
 
         const delta = choice.delta;
-
-        // TODO: OpenAI Chat Completions API does not expose reasoning text in streaming deltas.
-        // To display reasoning, switch reasoning models to the Responses API (openai.responses.create())
-        // which streams reasoning via 'response.reasoning_summary_text.delta' events.
-        // See: https://platform.openai.com/docs/guides/reasoning
 
         // Text content - stream to user
         if (delta.content) {
@@ -1149,6 +1155,388 @@ export class OpenAIProvider implements ModelProvider {
         `Failed to fetch models from OpenAI API: ${error instanceof Error ? error.message : String(error)}`
       );
     }
+  }
+
+  // ──────────────────────────────────────────────────────────────────────────
+  // Responses API path (reasoning models only)
+  //
+  // OpenAI's hosted Chat Completions does not stream reasoning text — only
+  // token counts. The Responses API streams reasoning summaries as
+  // `response.reasoning_summary_text.delta` events, which we map to our
+  // internal `thinking_delta` protocol (same shape Anthropic / xAI / Google
+  // use). See: https://developers.openai.com/api/docs/guides/reasoning
+  // ──────────────────────────────────────────────────────────────────────────
+
+  /**
+   * Convert internal Message[] to Responses API input items.
+   * Tool calls become top-level `function_call` items; tool results become
+   * `function_call_output` items. Critically, `call_id` (not `id`) is the
+   * round-trip identifier — our internal `ToolCall.id` already holds the
+   * value the model gave us, so it's used directly as call_id.
+   */
+  private convertToResponsesInput(messages: Message[]): any[] {
+    const items: any[] = [];
+    for (const msg of messages) {
+      // Anthropic-restore format: user message carrying tool_results
+      if (msg.role === 'user' && msg.tool_results && msg.tool_results.length > 0) {
+        for (const tr of msg.tool_results) {
+          const output = typeof tr.content === 'string'
+            ? tr.content
+            : tr.content.map((b: any) => b.type === 'text' ? b.text : JSON.stringify(b)).join('\n');
+          items.push({ type: 'function_call_output', call_id: tr.tool_use_id, output });
+        }
+        continue;
+      }
+
+      // User message with attachments (content_blocks)
+      if (msg.role === 'user' && msg.content_blocks && msg.content_blocks.length > 0) {
+        const content = msg.content_blocks.map((b: any) => {
+          if (b.type === 'image') {
+            const mediaType = b.source?.media_type || 'image/png';
+            const data = b.source?.data || '';
+            return { type: 'input_image', image_url: `data:${mediaType};base64,${data}`, detail: 'auto' };
+          }
+          if (b.type === 'text') return { type: 'input_text', text: b.text || '' };
+          if (b.type === 'document') return { type: 'input_text', text: '[PDF File: not supported by OpenAI]' };
+          return { type: 'input_text', text: JSON.stringify(b) };
+        });
+        items.push({ role: 'user', content });
+        continue;
+      }
+
+      if (msg.role === 'user') {
+        items.push({ role: 'user', content: msg.content || '' });
+        continue;
+      }
+
+      if (msg.role === 'system') {
+        items.push({ role: 'system', content: msg.content || '' });
+        continue;
+      }
+
+      if (msg.role === 'tool' && msg.tool_call_id) {
+        items.push({ type: 'function_call_output', call_id: msg.tool_call_id, output: msg.content || '' });
+        continue;
+      }
+
+      if (msg.role === 'assistant' && msg.tool_calls && msg.tool_calls.length > 0) {
+        if (msg.content && msg.content.length > 0) {
+          items.push({ role: 'assistant', content: msg.content });
+        }
+        for (const tc of msg.tool_calls) {
+          items.push({ type: 'function_call', call_id: tc.id, name: tc.name, arguments: tc.arguments });
+        }
+        continue;
+      }
+
+      items.push({ role: 'assistant', content: msg.content || '' });
+    }
+    return items;
+  }
+
+  /**
+   * One Responses API call → yields internal MessageStreamEvents.
+   * Optional `collector` mutates to surface accumulated assistant content and
+   * tool calls, so the agentic loop can persist them to conversation history.
+   */
+  private async *streamResponsesAPI(
+    messages: Message[],
+    model: string,
+    tools: Tool[],
+    maxOutputTokens: number,
+    system?: string,
+    collector?: { content: string; toolCalls: Array<{ id: string; name: string; arguments: string }> },
+  ): AsyncIterable<MessageStreamEvent> {
+    const effort = this.resolveReasoningEffort();
+    const reasoningArg = effort !== 'none' ? { effort, summary: 'auto' as const } : undefined;
+
+    const responsesTools = tools.length > 0
+      ? tools.map((t) => ({
+          type: 'function' as const,
+          name: t.name,
+          description: t.description,
+          parameters: t.input_schema as any,
+          strict: null,
+        }))
+      : undefined;
+
+    const input = this.convertToResponsesInput(messages);
+
+    const params: any = {
+      model,
+      input,
+      max_output_tokens: maxOutputTokens,
+      stream: true,
+    };
+    if (system) params.instructions = system;
+    if (responsesTools) params.tools = responsesTools;
+    if (reasoningArg) params.reasoning = reasoningArg;
+
+    const stream: any = await this.openaiClient.responses.create(params);
+
+    // Track in-progress function call items: item.id → { name, call_id, argsBuf }
+    const fnCalls = new Map<string, { name: string; callId: string; args: string }>();
+    let messageStarted = false;
+    let assistantText = '';
+    let finalResponse: any = null;
+
+    const ensureStarted = () => {
+      if (!messageStarted) {
+        messageStarted = true;
+        return [{ type: 'message_start' } as MessageStreamEvent];
+      }
+      return [];
+    };
+
+    for await (const event of stream as AsyncIterable<any>) {
+      const t = event.type as string;
+
+      if (t === 'response.output_item.added') {
+        const item = event.item;
+        if (item?.type === 'message') {
+          for (const e of ensureStarted()) yield e;
+        } else if (item?.type === 'function_call') {
+          for (const e of ensureStarted()) yield e;
+          // item.id is stream correlation; item.call_id is the round-trip id
+          fnCalls.set(item.id, { name: item.name, callId: item.call_id, args: '' });
+          yield {
+            type: 'content_block_start',
+            content_block: { type: 'tool_use', name: item.name, id: item.call_id },
+          } as MessageStreamEvent;
+        }
+        continue;
+      }
+
+      if (t === 'response.reasoning_summary_text.delta') {
+        for (const e of ensureStarted()) yield e;
+        yield {
+          type: 'content_block_delta',
+          delta: { type: 'thinking_delta', thinking: event.delta || '' },
+        } as MessageStreamEvent;
+        continue;
+      }
+
+      if (t === 'response.output_text.delta') {
+        for (const e of ensureStarted()) yield e;
+        const text = event.delta || '';
+        assistantText += text;
+        yield {
+          type: 'content_block_delta',
+          delta: { type: 'text_delta', text },
+        } as MessageStreamEvent;
+        continue;
+      }
+
+      if (t === 'response.function_call_arguments.delta') {
+        const fc = fnCalls.get(event.item_id);
+        if (fc) fc.args += (event.delta || '');
+        yield {
+          type: 'content_block_delta',
+          delta: { type: 'input_json_delta', partial_json: event.delta || '' },
+        } as MessageStreamEvent;
+        continue;
+      }
+
+      if (t === 'response.function_call_arguments.done') {
+        // Authoritative final arguments — overwrite any partial accumulation
+        const fc = fnCalls.get(event.item_id);
+        if (fc && typeof event.arguments === 'string') fc.args = event.arguments;
+        continue;
+      }
+
+      if (t === 'response.completed') {
+        finalResponse = event.response;
+        continue;
+      }
+
+      if (t === 'response.failed') {
+        const err = event.response?.error;
+        throw new Error(`OpenAI Responses API error: ${err?.message || JSON.stringify(err)}`);
+      }
+      if (t === 'error') {
+        throw new Error(`OpenAI Responses stream error: ${event.message || JSON.stringify(event)}`);
+      }
+    }
+
+    // Publish accumulated state for the agentic loop
+    if (collector) {
+      collector.content = assistantText;
+      collector.toolCalls = Array.from(fnCalls.values()).map((fc) => ({
+        id: fc.callId, name: fc.name, arguments: fc.args || '{}',
+      }));
+    }
+
+    // Derive stop reason from Response.status + incomplete_details (no finish_reason in Responses)
+    const status = finalResponse?.status;
+    const incompleteReason = finalResponse?.incomplete_details?.reason;
+    const hasToolCalls = fnCalls.size > 0;
+    let stopReason: string;
+    if (status === 'incomplete' && incompleteReason === 'max_output_tokens') {
+      stopReason = 'max_tokens';
+    } else if (hasToolCalls) {
+      stopReason = 'tool_use';
+    } else {
+      stopReason = 'stop';
+    }
+
+    yield { type: 'message_delta', delta: { stop_reason: stopReason } } as MessageStreamEvent;
+    yield { type: 'message_stop' } as MessageStreamEvent;
+
+    if (finalResponse?.usage) {
+      const u = finalResponse.usage;
+      const inputTokens = u.input_tokens || 0;
+      const outputTokens = u.output_tokens || 0;
+      const cachedTokens = u.input_tokens_details?.cached_tokens || 0;
+      const reasoningTokens = u.output_tokens_details?.reasoning_tokens || 0;
+      yield {
+        type: 'token_usage',
+        input_tokens: inputTokens,
+        output_tokens: outputTokens,
+        input_tokens_breakdown: {
+          input_tokens: inputTokens - cachedTokens,
+          cache_creation_input_tokens: 0,
+          cache_read_input_tokens: cachedTokens,
+        },
+        reasoning_tokens: reasoningTokens,
+      } as MessageStreamEvent;
+    }
+  }
+
+  /**
+   * Agentic loop using the Responses API. Mirrors createMessageStreamWithToolUse
+   * (Chat Completions path) but uses streamResponsesAPI for each turn.
+   *
+   * Known limitation: prior reasoning items are NOT replayed in subsequent
+   * turns, so the model re-derives reasoning context (paying reasoning tokens
+   * again). To preserve it, persist `{type:'reasoning'}` items in
+   * content_blocks and re-emit them in convertToResponsesInput. Deferred.
+   */
+  private async *agenticLoopResponses(
+    messages: Message[],
+    model: string,
+    tools: Tool[],
+    maxTokens: number,
+    toolExecutor: ToolExecutor,
+    maxIterations: number,
+    cancellationCheck?: () => boolean,
+    onIterationLimit?: (iterations: number, maxIterations: number) => Promise<number | null>,
+    system?: string,
+  ): AsyncIterable<MessageStreamEvent | { type: 'tool_use_complete'; toolName: string; toolInput: Record<string, any>; result: string }> {
+    let conversationMessages = [...messages];
+    let iterations = 0;
+    let hasPendingToolResults = false;
+
+    while (true) {
+      if (cancellationCheck && cancellationCheck() && !hasPendingToolResults) break;
+
+      iterations++;
+
+      const collector = { content: '', toolCalls: [] as Array<{ id: string; name: string; arguments: string }> };
+      for await (const ev of this.streamResponsesAPI(conversationMessages, model, tools, maxTokens, system, collector)) {
+        yield ev;
+      }
+
+      // Persist assistant message + tool calls for next turn
+      conversationMessages.push({
+        role: 'assistant',
+        content: collector.content,
+        tool_calls: collector.toolCalls.length > 0 ? collector.toolCalls : undefined,
+      });
+
+      // If we just sent pending tool results and are cancelled, stop here
+      if (hasPendingToolResults && cancellationCheck && cancellationCheck()) break;
+      hasPendingToolResults = false;
+
+      // No tool calls → conversation turn is complete
+      if (collector.toolCalls.length === 0) break;
+
+      // Execute tools
+      const toolImageParts: Array<{ type: 'input_image'; image_url: string; detail: 'auto' }> = [];
+      for (const tc of collector.toolCalls) {
+        if (cancellationCheck && cancellationCheck()) {
+          const cancelMsg = '[Tool execution cancelled by user]';
+          yield {
+            type: 'tool_use_complete',
+            toolName: tc.name,
+            toolCallId: tc.id,
+            toolInput: tc.arguments ? this.safeJsonParse(tc.arguments) : {},
+            result: cancelMsg,
+            hasImages: false,
+          } as any;
+          conversationMessages.push({ role: 'tool', tool_call_id: tc.id, content: cancelMsg });
+          continue;
+        }
+
+        try {
+          const toolInput = this.safeJsonParse(tc.arguments);
+          const result = await toolExecutor(tc.name, toolInput);
+          yield {
+            type: 'tool_use_complete',
+            toolName: tc.name,
+            toolCallId: tc.id,
+            toolInput,
+            result: result.displayText,
+            hasImages: result.hasImages,
+          } as any;
+
+          const textContent = result.contentBlocks
+            .filter((b) => b.type === 'text')
+            .map((b) => (b as { type: 'text'; text: string }).text)
+            .join('\n');
+          conversationMessages.push({ role: 'tool', tool_call_id: tc.id, content: textContent });
+
+          if (result.hasImages) {
+            for (const img of result.contentBlocks.filter((b) => b.type === 'image')) {
+              const ib = img as { type: 'image'; data: string; mimeType: string };
+              toolImageParts.push({
+                type: 'input_image',
+                image_url: `data:${ib.mimeType || 'image/jpeg'};base64,${ib.data}`,
+                detail: 'auto',
+              });
+            }
+          }
+        } catch (error) {
+          conversationMessages.push({
+            role: 'tool',
+            tool_call_id: tc.id,
+            content: `Error executing tool: ${error instanceof Error ? error.message : String(error)}`,
+          });
+        }
+      }
+
+      // Inject any tool-returned images as a user message (OpenAI doesn't allow images in tool messages)
+      if (toolImageParts.length > 0) {
+        conversationMessages.push({
+          role: 'user',
+          content: '',
+          content_blocks: toolImageParts.map((p) => ({
+            type: 'image',
+            source: {
+              media_type: (p.image_url.match(/^data:([^;]+);/)?.[1]) || 'image/jpeg',
+              data: p.image_url.replace(/^data:[^;]+;base64,/, ''),
+            },
+          })),
+        } as any);
+      }
+
+      hasPendingToolResults = true;
+
+      if (iterations >= maxIterations) {
+        if (onIterationLimit) {
+          const newLimit = await onIterationLimit(iterations, maxIterations);
+          if (newLimit !== null) maxIterations = newLimit;
+          else break;
+        } else break;
+      }
+    }
+
+    if (iterations >= maxIterations) {
+      yield { type: 'max_iterations_reached', iterations, maxIterations } as any;
+    }
+  }
+
+  private safeJsonParse(s: string): Record<string, any> {
+    try { return JSON.parse(s || '{}'); } catch { return {}; }
   }
 }
 
