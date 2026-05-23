@@ -2504,6 +2504,13 @@ export class MCPClient {
     // OpenAI requires assistant messages to have tool_calls before tool role messages
     const pendingToolCalls = new Map<string, { id: string; name: string; arguments: string }>();
 
+    // Track reasoning items yielded by the OpenAI Responses provider so we can
+    // persist them in the assistant message's content_blocks. On the next user
+    // turn convertToResponsesInput replays them, letting the model continue from
+    // cached reasoning state instead of paying reasoning tokens to re-derive.
+    // Parity with the Anthropic path which round-trips thinking blocks the same way.
+    const pendingReasoningItems: any[] = [];
+
     // Track token usage per callback
     let tokenCountBeforeCallback = initialTokenCount !== undefined ? initialTokenCount : this.currentTokenCount;
     let lastTokenUsage: {
@@ -2774,6 +2781,15 @@ export class MCPClient {
         continue;
       }
 
+      // OpenAI Responses: capture reasoning items for cross-turn echo-back.
+      // The provider yields one of these per completed reasoning item; we replay
+      // them in the next user turn via assistantMessage.content_blocks so the
+      // model continues from cached reasoning instead of re-deriving.
+      if (chunk.type === 'reasoning_item_captured' && (chunk as any).item) {
+        pendingReasoningItems.push((chunk as any).item);
+        continue;
+      }
+
       // Handle token usage from OpenAI, Anthropic, and Ollama (exact counts from API)
       if (chunk.type === 'token_usage' && chunk.input_tokens !== undefined) {
         // Store token usage for this callback
@@ -2866,8 +2882,15 @@ export class MCPClient {
           // Build content_blocks for providers that need them (Gemini uses function_call format)
           // This also serves as the canonical format for chat history storage
           let contentBlocks: Array<{ type: string; [key: string]: any }> | undefined;
+          // Reasoning items get persisted on every OpenAI turn (even text-only, no tools)
+          // so cross-user-turn echo-back works in interactive chat too.
+          const hasReasoningItems = pendingReasoningItems.length > 0;
           if (hasToolCalls && toolCallsArray) {
             contentBlocks = [];
+            // Reasoning items come BEFORE text/tool blocks so convertToResponsesInput
+            // emits them first when building the next turn's input — matches the order
+            // the Responses API itself produces in response.output.
+            for (const r of pendingReasoningItems) contentBlocks.push(r);
             if (currentMessage.trim()) {
               contentBlocks.push({ type: 'text', text: currentMessage });
             }
@@ -2890,6 +2913,13 @@ export class MCPClient {
                 ? { type: 'function_call', name: tc.name, args: parsedInput, id: tc.id }
                 : { type: 'tool_use', id: tc.id, name: tc.name, input: parsedInput }
               );
+            }
+          } else if (hasReasoningItems) {
+            // Text-only turn with reasoning (no tool calls): still preserve
+            // reasoning items so the next user turn can echo them back.
+            contentBlocks = [...pendingReasoningItems];
+            if (currentMessage.trim()) {
+              contentBlocks.push({ type: 'text', text: currentMessage });
             }
           }
 
@@ -2927,6 +2957,8 @@ export class MCPClient {
           if (hasToolCalls) {
             pendingToolCalls.clear();
           }
+          // Reasoning items have been baked into content_blocks; clear for next turn.
+          pendingReasoningItems.length = 0;
 
           // Note: For OpenAI, tool results are added immediately at tool_use_complete events
           // (tools execute AFTER message_stop, so pendingToolResults would be empty here)

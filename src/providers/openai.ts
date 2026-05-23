@@ -1371,9 +1371,16 @@ export class OpenAIProvider implements ModelProvider {
         }
 
         case 'response.output_item.done': {
-          // Capture completed reasoning items for cross-turn replay
+          // Capture completed reasoning items for cross-turn replay.
+          // Internally: agenticLoopResponses uses these via the collector.
+          // Externally: index.ts consumes the yielded event to persist them
+          // in this.messages so cross-USER-TURN echo-back works too.
           if (event.item.type === 'reasoning') {
             reasoningItems.push(event.item);
+            yield {
+              type: 'reasoning_item_captured',
+              item: event.item,
+            } as MessageStreamEvent;
           }
           break;
         }
