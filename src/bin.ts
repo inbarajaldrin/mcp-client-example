@@ -7,34 +7,15 @@ import { join, dirname, resolve } from 'path';
 import { fileURLToPath } from 'url';
 import dotenv from 'dotenv';
 import readline from 'readline';
-import { AnthropicProvider, PROVIDER_INFO as ANTHROPIC } from './providers/anthropic.js';
-import { OpenAIProvider, PROVIDER_INFO as OPENAI } from './providers/openai.js';
-import { OllamaProvider, PROVIDER_INFO as OLLAMA } from './providers/ollama.js';
-import { GeminiProvider, PROVIDER_INFO as GOOGLE } from './providers/google.js';
-import { GrokProvider, PROVIDER_INFO as XAI } from './providers/xai.js';
 import type { ModelProvider, ModelInfo } from './model-provider.js';
+import type { OllamaProvider } from './providers/ollama.js';
+import { PROVIDERS, createProvider } from './provider-registry.js';
 import { isReasoningModel } from './utils/model-capabilities.js';
 
-// Assembled from individual provider exports - single source of truth
-export const PROVIDERS = [ANTHROPIC, OPENAI, GOOGLE, XAI, OLLAMA];
-
-// Create provider instance - exported for use by other modules
-export function createProvider(providerName: string): ModelProvider | undefined {
-  switch (providerName.toLowerCase()) {
-    case 'anthropic':
-      return new AnthropicProvider();
-    case 'openai':
-      return new OpenAIProvider();
-    case 'google':
-      return new GeminiProvider();
-    case 'xai':
-      return new GrokProvider();
-    case 'ollama':
-      return new OllamaProvider(process.env.OLLAMA_HOST);
-    default:
-      return undefined;
-  }
-}
+// PROVIDERS + createProvider were moved to provider-registry.ts (a leaf module) so core
+// code can resolve providers without importing this entry point (which would create an
+// import cycle). Re-exported here so existing importers (e.g. the web API) keep working.
+export { PROVIDERS, createProvider };
 
 // Load .env file from mcp-client directory
 const __filename = fileURLToPath(import.meta.url);

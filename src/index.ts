@@ -31,6 +31,8 @@ import { ServerLogManager } from './managers/server-log-manager.js';
 import { AttachmentManager } from './managers/attachment-manager.js';
 import { PreferencesManager } from './managers/preferences-manager.js';
 import { HookManager } from './managers/hook-manager.js';
+import { AgentRegistry } from './managers/agent-registry.js';
+import { registerCoreAgentActions } from './agent-actions.js';
 import type {
   ModelProvider,
   Tool,
@@ -125,6 +127,11 @@ export class MCPClient {
   private ipcListenersSetup: boolean = false; // Track if IPC listeners are already set up
   private _disableHistoryRecording: boolean = false; // Flag to disable chat history recording (for replay mode)
   private toolInputTimes: Map<string, string> = new Map(); // Track tool input times by tool name/id
+  // Buffer for IPC child tool calls made during an execute_composed_code run. Children are still
+  // displayed in the terminal in real time, but their chat-history records are buffered here and
+  // flushed AFTER the parent execute_composed_code result (see flushPendingIPCChildren), so the
+  // stored messages[] order is [parent, child1..childN] instead of [child1..childN, parent].
+  private pendingIPCChildren: Array<{ toolName: string; args: Record<string, any>; output: string; toolInputTime?: string; fixedArgs?: string[] }> = [];
   private elicitationHandler: ElicitationHandler;
   private toolExecutor: MCPToolExecutor;
   private hookManager: HookManager;
@@ -352,6 +359,10 @@ export class MCPClient {
   }
 
   async start() {
+    // Register the core agent automation actions (idempotent; keyed by action id) so the
+    // web /agent/* surface and the CLI /agent-do command share exactly one action set.
+    registerCoreAgentActions(this);
+
     // Initialize token counter from provider (async, fetches context window from API)
     await this.tokenManager.ensureTokenCounter();
 
@@ -497,6 +508,16 @@ export class MCPClient {
     this.logger.log(
       `Connected to ${this.servers.size} server(s): ${Array.from(this.servers.keys()).join(', ')}\n`,
       { type: 'info' },
+    );
+
+    // Publish connection state to the agent automation surface (read-side observability):
+    // an external driver can see which servers attached and which failed without tailing logs.
+    AgentRegistry.shared.setViewState('servers.connected', Array.from(this.servers.keys()));
+    AgentRegistry.shared.setViewState(
+      'servers.connectError',
+      connectionErrors.length > 0
+        ? connectionErrors.map((e) => ({ name: e.name, error: String(e.error?.message ?? e.error) }))
+        : null,
     );
 
     // Start chat session with full server/tool metadata (after connections are established)
@@ -1273,6 +1294,53 @@ export class MCPClient {
   // Public method to get token usage status (for testing/debugging)
   getTokenUsage() {
     return this.tokenManager.getTokenUsage();
+  }
+
+  /**
+   * Aggregate live status snapshot shared by every automation surface (web GET /status,
+   * CLI /agent-state). Transport-specific extras (e.g. the web's isProcessing flag) are
+   * merged on top by the adapter; everything here is core so the two surfaces agree.
+   * Includes the AgentRegistry viewState snapshot under `views` for run observability.
+   */
+  getStatusSnapshot(): Record<string, any> {
+    const tokenUsage = this.getTokenUsage();
+    const session = this.chatHistoryManager.getCurrentSession();
+    const allCalls: any[] = session?.tokenUsagePerCallback ?? [];
+    const recentCalls = allCalls.slice(-10).map((c: any) => ({
+      timestamp: c.timestamp,
+      inputTokens: c.inputTokens ?? 0,
+      outputTokens: c.outputTokens ?? 0,
+      cacheCreationTokens: c.cacheCreationTokens ?? 0,
+      cacheReadTokens: c.cacheReadTokens ?? 0,
+      estimatedCost: c.estimatedCost ?? 0,
+    }));
+    return {
+      provider: this.getProviderName(),
+      model: this.getModel(),
+      tokenUsage: {
+        current: tokenUsage.current,
+        contextWindow: tokenUsage.limit,
+        percentage: tokenUsage.percentage,
+        suggestion: tokenUsage.suggestion,
+      },
+      cost: {
+        totalCost: session?.metadata?.totalCost ?? 0,
+        cumulativeTokens: session?.metadata?.cumulativeTokens ?? 0,
+        toolUseCount: session?.metadata?.toolUseCount ?? 0,
+        callCount: allCalls.length,
+        recentCalls,
+      },
+      orchestrator: {
+        enabled: this.isOrchestratorModeEnabled(),
+        configured: this.isOrchestratorServerConfigured(),
+      },
+      todo: {
+        enabled: this.isTodoModeEnabled(),
+        configured: this.isTodoServerConfigured(),
+      },
+      sessionId: session?.sessionId ?? null,
+      views: AgentRegistry.shared.viewStateSnapshot(),
+    };
   }
 
   // Public method to manually trigger summarization (for testing)
@@ -2229,21 +2297,45 @@ export class MCPClient {
       // Skip recording if history recording is disabled (e.g., during tool replay)
       if (!this._disableHistoryRecording) {
         const ipcFixedArgs = this.toolExecutor.consumeClientFixedArgs();
-        this.chatHistoryManager.addToolExecution(
-          event.toolName,
-          event.args || {},
-          event.error || resultStr || '',
-          true, // orchestratorMode - IPC calls are in orchestrator mode
-          true, // isIPCCall - this is an automatic IPC call
-          toolInputTime, // Pass the input time
-          undefined, // toolUseId - IPC calls don't have one
-          ipcFixedArgs.length > 0 ? ipcFixedArgs : undefined,
-        );
+        // Buffer this IPC child instead of recording it immediately. It is flushed to chat history
+        // AFTER its parent execute_composed_code result (see flushPendingIPCChildren), so the stored
+        // messages[] order is [parent, child1..childN]. consumeClientFixedArgs() consumes per-call
+        // state, so its result must be captured here at enqueue time, not at flush time.
+        this.pendingIPCChildren.push({
+          toolName: event.toolName,
+          args: event.args || {},
+          output: event.error || resultStr || '',
+          toolInputTime, // Input time captured during execution (used for time-window grouping)
+          fixedArgs: ipcFixedArgs.length > 0 ? ipcFixedArgs : undefined,
+        });
       }
     });
 
     // Mark listeners as set up
     this.ipcListenersSetup = true;
+  }
+
+  /**
+   * Flush IPC child tool calls buffered during an execute_composed_code run into chat history.
+   * Called immediately after a parent tool result is recorded, producing messages[] order
+   * [parent, child1..childN]. For non-orchestrator tools the buffer is empty, so this is a no-op.
+   */
+  private flushPendingIPCChildren(): void {
+    if (this.pendingIPCChildren.length === 0) return;
+    const children = this.pendingIPCChildren;
+    this.pendingIPCChildren = [];
+    for (const c of children) {
+      this.chatHistoryManager.addToolExecution(
+        c.toolName,
+        c.args,
+        c.output,
+        true, // orchestratorMode - IPC calls are in orchestrator mode
+        true, // isIPCCall - this is an automatic IPC call
+        c.toolInputTime, // Preserve the original input time captured during execution
+        undefined, // toolUseId - IPC calls don't have one
+        c.fixedArgs,
+      );
+    }
   }
 
   /**
@@ -2668,6 +2760,11 @@ export class MCPClient {
           (chunk as any).rawInputJson, // Raw JSON before SDK partialParse (Anthropic) or SDK-parsed args (Google)
           (chunk as any).rawHttpResponse, // Raw HTTP response JSON (Google only, GEMINI_RAW_CAPTURE=1)
         );
+
+        // Flush any IPC children buffered during this tool's execution so their chat-history
+        // records land AFTER this parent (the execute_composed_code result). Empty/no-op for
+        // ordinary tools that made no IPC calls.
+        this.flushPendingIPCChildren();
 
         // Collect tool completion data for deferred hook processing after agent response.
         // Conditional hooks and @tool: hooks fire after the agent's full response ends,

@@ -8,6 +8,7 @@ import fs from 'fs';
 import type { MCPClient, WebStreamEvent } from '../index.js';
 import type { AttachmentInfo } from '../managers/attachment-manager.js';
 import { createProvider, PROVIDERS } from '../bin.js';
+import { AgentRegistry } from '../managers/agent-registry.js';
 import { AblationManager } from '../managers/ablation-manager.js';
 import { isReasoningModel, getThinkingLevelsForProvider, isValidThinkingLevel, getDefaultThinkingLevel } from '../utils/model-capabilities.js';
 
@@ -308,49 +309,9 @@ export function createApiRouter(client: MCPClient): Router {
   // GET /api/status — returns provider, model, token usage, cost
   router.get('/status', (_req: Request, res: Response) => {
     try {
-      const tokenUsage = client.getTokenUsage();
-      const histMgr = client.getChatHistoryManager();
-      const session = histMgr.getCurrentSession();
-
-      const totalCost = session?.metadata?.totalCost ?? 0;
-      const cumulativeTokens = session?.metadata?.cumulativeTokens ?? 0;
-      const toolUseCount = session?.metadata?.toolUseCount ?? 0;
-      const allCalls: any[] = session?.tokenUsagePerCallback ?? [];
-      const recentCalls = allCalls.slice(-10).map((c: any) => ({
-        timestamp: c.timestamp,
-        inputTokens: c.inputTokens ?? 0,
-        outputTokens: c.outputTokens ?? 0,
-        cacheCreationTokens: c.cacheCreationTokens ?? 0,
-        cacheReadTokens: c.cacheReadTokens ?? 0,
-        estimatedCost: c.estimatedCost ?? 0,
-      }));
-
-      res.json({
-        provider: client.getProviderName(),
-        model: client.getModel(),
-        tokenUsage: {
-          current: tokenUsage.current,
-          contextWindow: tokenUsage.limit,
-          percentage: tokenUsage.percentage,
-          suggestion: tokenUsage.suggestion,
-        },
-        cost: {
-          totalCost,
-          cumulativeTokens,
-          toolUseCount,
-          callCount: allCalls.length,
-          recentCalls,
-        },
-        isProcessing,
-        orchestrator: {
-          enabled: client.isOrchestratorModeEnabled(),
-          configured: client.isOrchestratorServerConfigured(),
-        },
-        todo: {
-          enabled: client.isTodoModeEnabled(),
-          configured: client.isTodoServerConfigured(),
-        },
-      });
+      // Core snapshot (shared with the CLI /agent-state command) plus the web-only
+      // isProcessing flag. Keeping this on getStatusSnapshot() keeps web/CLI at parity.
+      res.json({ ...client.getStatusSnapshot(), isProcessing });
     } catch {
       res.json({
         provider: client.getProviderName(),
@@ -368,6 +329,39 @@ export function createApiRouter(client: MCPClient): Router {
         },
       });
     }
+  });
+
+  // ─── Agent automation surface (element-registry pattern) ───
+  // Gated by MCP_CLIENT_AGENT_API. The read side also lives on GET /status (enriched with
+  // `views`); these expose the self-describing action manifest + invocation, shared 1:1 with
+  // the CLI's /agent-actions and /agent-do commands through AgentRegistry.
+  const agentGate = (res: Response): boolean => {
+    if (!AgentRegistry.shared.isEnabled()) {
+      res.status(403).json({ error: 'agent API disabled; set MCP_CLIENT_AGENT_API=1 to enable' });
+      return false;
+    }
+    return true;
+  };
+
+  router.get('/agent/state', (_req: Request, res: Response) => {
+    if (!agentGate(res)) return;
+    res.json(client.getStatusSnapshot());
+  });
+
+  router.get('/agent/actions', (_req: Request, res: Response) => {
+    if (!agentGate(res)) return;
+    res.json({ actions: AgentRegistry.shared.listActions() });
+  });
+
+  router.post('/agent/action', async (req: Request, res: Response) => {
+    if (!agentGate(res)) return;
+    const { id, params } = req.body || {};
+    if (!id) {
+      res.status(400).json({ error: 'id is required' });
+      return;
+    }
+    const result = await AgentRegistry.shared.invokeAction(String(id), params || {});
+    res.status(result.ok ? 200 : 400).json(result);
   });
 
   // ─── Orchestrator ───

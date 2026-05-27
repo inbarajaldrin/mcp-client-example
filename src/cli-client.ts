@@ -2,6 +2,7 @@ import { StdioServerParameters } from '@modelcontextprotocol/sdk/client/stdio.js
 import readline from 'readline/promises';
 import * as readlineSync from 'readline';
 import { MCPClient } from './index.js';
+import { AgentRegistry } from './managers/agent-registry.js';
 import { consoleStyles, Logger } from './logger.js';
 import { runHeadless } from './cli/headless-runner.js';
 import type { ModelProvider } from './model-provider.js';
@@ -27,6 +28,7 @@ import { createProvider, validateProviderEnv, PROVIDERS } from './bin.js';
 const CLI_COMMANDS = [
   '/help', '/exit', '/clear', '/clear-context',
   '/token-status', '/tokens', '/summarize', '/summarize-now',
+  '/agent-state', '/agent-actions', '/agent-do',
   '/settings', '/refresh', '/refresh-servers', '/refresh-select',
   '/set-timeout', '/set-max-iterations', '/set-ipc-limit', '/set-thinking',
   '/switch-model',
@@ -1085,6 +1087,54 @@ export class MCPClientCLI {
         `  Status: ${usage.suggestion}\n` +
         `  Messages: ${this.client['messages'].length}\n`,
         { type: 'info' },
+      );
+      return true;
+    }
+
+    if (lowerQuery === '/agent-state') {
+      // Agent automation read-side: same core snapshot as the web GET /status route
+      // (minus the web-only isProcessing flag), printed as JSON so a CLI-driving agent
+      // can parse it. Includes the AgentRegistry viewState under `views`.
+      this.logger.log(
+        JSON.stringify(this.client.getStatusSnapshot(), null, 2) + '\n',
+        { type: 'info' },
+      );
+      return true;
+    }
+
+    if (lowerQuery === '/agent-actions') {
+      // Self-describing action manifest — identical to web GET /agent/actions.
+      this.logger.log(
+        JSON.stringify(AgentRegistry.shared.listActions(), null, 2) + '\n',
+        { type: 'info' },
+      );
+      return true;
+    }
+
+    if (lowerQuery === '/agent-do' || lowerQuery.startsWith('/agent-do ')) {
+      // Invoke a registered action: /agent-do <id> [json-params]
+      // Mirrors web POST /agent/action through the same AgentRegistry (parity).
+      const rest = query.trim().slice('/agent-do'.length).trim();
+      if (!rest) {
+        this.logger.log('Usage: /agent-do <action-id> [json-params]\n', { type: 'warning' });
+        return true;
+      }
+      const sp = rest.indexOf(' ');
+      const id = sp === -1 ? rest : rest.slice(0, sp);
+      let params: Record<string, any> = {};
+      if (sp !== -1) {
+        const raw = rest.slice(sp + 1).trim();
+        try {
+          params = JSON.parse(raw);
+        } catch {
+          this.logger.log(`Invalid JSON params: ${raw}\n`, { type: 'error' });
+          return true;
+        }
+      }
+      const result = await AgentRegistry.shared.invokeAction(id, params);
+      this.logger.log(
+        JSON.stringify(result, null, 2) + '\n',
+        { type: result.ok ? 'info' : 'error' },
       );
       return true;
     }
