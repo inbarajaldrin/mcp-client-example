@@ -5,6 +5,54 @@ Foundation committed: `2628448` (src/ablation-runner.ts — the seam contract, c
 Live engine (src/cli/ablation-cli.ts) is UNTOUCHED and working. The switch happens only after the
 runner compiles standalone and is verified — strangler-fig migration (copy → switch → verify → delete).
 
+---
+
+## ✅ EXECUTION STATUS (updated 2026-05-27) — Pass A substantially COMPLETE
+
+The engine now lives in `src/ablation-runner.ts` and ALL THREE surfaces call it: the CLI
+(`runSingleAblation` thin wrapper), the web (`POST /ablations/:name/run`), and the agent API
+(`run.start/run.abort/run.status`). The divergent web inline loop is deleted — the
+@escalate/@switch divergence is structurally impossible now.
+
+**Commits (GitHub origin/main + a4500 + dist/ all at `97c1869`):**
+| Commit | What |
+|---|---|
+| `cc33e2b` | Engine relocated into AblationRunner (inert; ~2360 lines + 19 helpers; mechanical rewrites) |
+| `3d7cff2` | CLI runSingleAblation → thin wrapper (control/observer/host adapters; persistent runner; continuation re-fire adapter) |
+| `ee455b4` | Web route → shared runner; inline loop deleted; observer→SSE; MCPClient.getLogger() |
+| `af5097c` | 4 GPT adversarial-review fixes (headless force-stop, SSE totalScenarios counter, skip-surfacing, double-error) |
+| `97c1869` | run.start/run.abort/run.status agent actions (src/agent-run-actions.ts) |
+
+**Seam deviations from the original plan (evidence-based):**
+- RunHost gained `getReadline?` + `routeSlashCommand?` (engine uses both via stale-ref recovery
+  + handlePauseInput); `getHILManager` dropped (engine never calls it).
+- NormalizedHost built at run() entry from optional RunHost with headless defaults (risk #2).
+- run() returns the old `shouldBreak` ("aborted") polarity; the seam doc that said the opposite
+  was corrected (caller at ablation-cli.ts:2984 names it `aborted`).
+- Observer events emitted: run-start / phase-start / result / done / error (enough for the
+  frontend's progress/result/error). command/escalate/switch-model deferred to Pass B.
+
+**Verification done:**
+- `tsc --noEmit` green at every step; `npx tsc` emits dist/ clean.
+- GPT adversarial wiring review: SHIP-WITH-FIXES → all 4 findings fixed + re-verified.
+- WEB runtime (dry-run, a4500): 2-phase completion → correct progress/result/done SSE + full
+  run-dir + summary.json persisted; ABORT → status:aborted, remaining phase skipped, done:{aborted:true}.
+- AGENT-API runtime (a4500, MCP_CLIENT_AGENT_API=1): run.start (non-blocking) → run.status
+  progresses phase alpha→beta to status:done with lastGateVerdict; run.abort stops after the
+  current phase (status:aborted, remaining phase skipped).
+
+**Verification REMAINING (the Step 9 deletion gate):**
+- CLI INTERACTIVE path (`/ablation-run`) with a REAL model + Isaac Sim. NOTE: this is a DIFFERENT
+  entry point from the agent-API `run.start` already verified — `/ablation-run` builds CLI-backed
+  adapters (real keyboard abort/pause, readline stale-ref prompts, force-stop) whereas the agent
+  surface uses a headless host. The shared ENGINE is identical (web/agent-verified); the untested
+  surface is the CLI's bespoke interactive adapters under a live model. This is the data-collection
+  critical path, so verify it before deleting the old engine.
+
+**Steps status:** 1–5 ✅ · 6 (CLI real-run) ⏳ GATE · 7 ✅ · 8 ✅ · 9 (delete dead CLI methods) ⏳
+BLOCKED on step 6 · 10 ✅. Rollback if step 6 fails: `git revert 3d7cff2` restores the old CLI
+engine while the runner stays. Pass B (dedupe shared helpers, retire RunHost) is separate/later.
+
 ## Goal
 Both the CLI and the web (`POST /ablations/:name/run`) call ONE engine (AblationRunner), killing the
 divergent inline web loop that silently skips @escalate/@switch. Then run.start/run.abort/run.status
