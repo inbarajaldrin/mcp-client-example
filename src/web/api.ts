@@ -327,6 +327,9 @@ export function createApiRouter(client: MCPClient): Router {
           enabled: false,
           configured: client.isTodoServerConfigured(),
         },
+        // Keep the new fields present even on the error path so consumers see a stable shape.
+        sessionId: null,
+        views: {},
       });
     }
   });
@@ -335,33 +338,73 @@ export function createApiRouter(client: MCPClient): Router {
   // Gated by MCP_CLIENT_AGENT_API. The read side also lives on GET /status (enriched with
   // `views`); these expose the self-describing action manifest + invocation, shared 1:1 with
   // the CLI's /agent-actions and /agent-do commands through AgentRegistry.
-  const agentGate = (res: Response): boolean => {
+  // Guard = enabled-gate + auth. Localhost is trusted (the local CLI/tools), so local use needs
+  // no token. Remote callers (e.g. over Tailscale) must present MCP_CLIENT_AGENT_TOKEN via
+  // `Authorization: Bearer <token>` or `X-Agent-Token`. Without a configured token, remote access
+  // is refused outright — the agent surface is a powerful control API, not a public one.
+  const agentGuard = (req: Request, res: Response): boolean => {
     if (!AgentRegistry.shared.isEnabled()) {
       res.status(403).json({ error: 'agent API disabled; set MCP_CLIENT_AGENT_API=1 to enable' });
+      return false;
+    }
+    const ip = req.socket?.remoteAddress || '';
+    const isLocal = ip === '127.0.0.1' || ip === '::1' || ip === '::ffff:127.0.0.1';
+    if (isLocal) return true;
+    const token = process.env.MCP_CLIENT_AGENT_TOKEN;
+    if (!token) {
+      res.status(403).json({ error: 'remote agent access requires MCP_CLIENT_AGENT_TOKEN to be set' });
+      return false;
+    }
+    const provided = (
+      req.get('authorization')?.replace(/^Bearer\s+/i, '') ||
+      req.get('x-agent-token') ||
+      ''
+    ).trim();
+    if (!provided || provided !== token) {
+      res.status(401).json({ error: 'invalid or missing agent token' });
       return false;
     }
     return true;
   };
 
-  router.get('/agent/state', (_req: Request, res: Response) => {
-    if (!agentGate(res)) return;
+  // Serialize agent actions so overlapping stateful/expensive invocations (servers.refresh,
+  // model.select, …) cannot race against each other.
+  let agentActionInFlight = false;
+
+  router.get('/agent/state', (req: Request, res: Response) => {
+    if (!agentGuard(req, res)) return;
     res.json(client.getStatusSnapshot());
   });
 
-  router.get('/agent/actions', (_req: Request, res: Response) => {
-    if (!agentGate(res)) return;
+  router.get('/agent/actions', (req: Request, res: Response) => {
+    if (!agentGuard(req, res)) return;
     res.json({ actions: AgentRegistry.shared.listActions() });
   });
 
   router.post('/agent/action', async (req: Request, res: Response) => {
-    if (!agentGate(res)) return;
-    const { id, params } = req.body || {};
+    if (!agentGuard(req, res)) return;
+    const body = req.body || {};
+    // Bound the request: params are arbitrary JSON from the network.
+    if (JSON.stringify(body).length > 64 * 1024) {
+      res.status(413).json({ error: 'request body too large' });
+      return;
+    }
+    if (agentActionInFlight) {
+      res.status(429).json({ error: 'an agent action is already in progress' });
+      return;
+    }
+    const { id, params } = body;
     if (!id) {
       res.status(400).json({ error: 'id is required' });
       return;
     }
-    const result = await AgentRegistry.shared.invokeAction(String(id), params || {});
-    res.status(result.ok ? 200 : 400).json(result);
+    agentActionInFlight = true;
+    try {
+      const result = await AgentRegistry.shared.invokeAction(String(id), params || {});
+      res.status(result.ok ? 200 : 400).json(result);
+    } finally {
+      agentActionInFlight = false;
+    }
   });
 
   // ─── Orchestrator ───

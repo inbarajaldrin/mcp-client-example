@@ -84,6 +84,10 @@ export class AgentRegistry {
   }
 
   // ─── Action side: registry ───
+  // NOTE: AgentRegistry.shared is process-global. Registration is idempotent per action id,
+  // but assumes a SINGLE MCPClient per process: if two clients each called
+  // registerCoreAgentActions, the later one's handlers (closed over its client) would replace
+  // the earlier's. The bin.ts client lifecycle upholds one-client-per-process.
   registerAction(def: AgentActionDef): void {
     this.actions.set(def.id, def);
   }
@@ -105,9 +109,18 @@ export class AgentRegistry {
   ): Promise<{ ok: boolean; result?: any; error?: string }> {
     const action = this.actions.get(id);
     if (!action) return { ok: false, error: `Unknown action: ${id}` };
+    // A network caller can send anything; params must be a plain object before we index it.
+    if (typeof params !== 'object' || params === null || Array.isArray(params)) {
+      return { ok: false, error: 'params must be a plain object' };
+    }
     for (const p of action.params ?? []) {
-      if (p.required && params[p.name] === undefined) {
+      const value = params[p.name];
+      if (p.required && value === undefined) {
         return { ok: false, error: `Missing required param: ${p.name}` };
+      }
+      // Enforce the declared type so a handler never receives a shape it doesn't expect.
+      if (value !== undefined && !AgentRegistry.matchesType(value, p.type)) {
+        return { ok: false, error: `Param '${p.name}' must be of type ${p.type}` };
       }
     }
     try {
@@ -115,6 +128,22 @@ export class AgentRegistry {
       return { ok: true, result };
     } catch (err: any) {
       return { ok: false, error: err?.message || String(err) };
+    }
+  }
+
+  /** Validate a value against an AgentActionParam's declared type. */
+  private static matchesType(value: any, type: AgentActionParam['type']): boolean {
+    switch (type) {
+      case 'string':
+        return typeof value === 'string';
+      case 'number':
+        return typeof value === 'number' && Number.isFinite(value);
+      case 'boolean':
+        return typeof value === 'boolean';
+      case 'object':
+        return typeof value === 'object' && value !== null && !Array.isArray(value);
+      default:
+        return true;
     }
   }
 }
