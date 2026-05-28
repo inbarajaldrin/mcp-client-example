@@ -355,6 +355,20 @@ export class MCPClient {
         output: process.stdout,
       })
     );
+    // Mirror the class-field initializers that Object.create() bypasses (the constructor never
+    // runs on this path). Any initialized field omitted here is left undefined on factory-built
+    // clients — pendingIPCChildren in particular crashed flushPendingIPCChildren on `.length`
+    // (a latent regression from the IPC-logging change 9705b62, surfaced by the first real
+    // tool-executing CLI run). The booleans/systemPrompt were benign (undefined ≈ false/null) but
+    // are mirrored too so the factory and constructor paths stay in lockstep.
+    client.pendingIPCChildren = [];
+    client.todoModeInitialized = false;
+    client.todosLeftAsIs = false;
+    client.todosWereSkipped = false;
+    client.orchestratorModeEnabled = false;
+    client._disableHistoryRecording = false;
+    client._lastQueryHitIterationLimit = false;
+    client.systemPrompt = null;
     client.elicitationHandler.setChatLogger(client.chatHistoryManager);
     return client;
   }
