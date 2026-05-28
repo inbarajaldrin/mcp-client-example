@@ -33,6 +33,7 @@ import { PreferencesManager } from './managers/preferences-manager.js';
 import { HookManager } from './managers/hook-manager.js';
 import { AgentRegistry } from './managers/agent-registry.js';
 import { registerCoreAgentActions } from './agent-actions.js';
+import { registerRunActions } from './agent-run-actions.js';
 import type {
   ModelProvider,
   Tool,
@@ -362,6 +363,8 @@ export class MCPClient {
     // Register the core agent automation actions (idempotent; keyed by action id) so the
     // web /agent/* surface and the CLI /agent-do command share exactly one action set.
     registerCoreAgentActions(this);
+    // Run-lifecycle actions (run.start/run.abort/run.status), backed by the shared AblationRunner.
+    registerRunActions(this);
 
     // Initialize token counter from provider (async, fetches context window from API)
     await this.tokenManager.ensureTokenCounter();
