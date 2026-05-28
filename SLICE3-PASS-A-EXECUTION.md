@@ -41,17 +41,38 @@ The engine now lives in `src/ablation-runner.ts` and ALL THREE surfaces call it:
   progresses phase alpha→beta to status:done with lastGateVerdict; run.abort stops after the
   current phase (status:aborted, remaining phase skipped).
 
-**Verification REMAINING (the Step 9 deletion gate):**
-- CLI INTERACTIVE path (`/ablation-run`) with a REAL model + Isaac Sim. NOTE: this is a DIFFERENT
-  entry point from the agent-API `run.start` already verified — `/ablation-run` builds CLI-backed
-  adapters (real keyboard abort/pause, readline stale-ref prompts, force-stop) whereas the agent
-  surface uses a headless host. The shared ENGINE is identical (web/agent-verified); the untested
-  surface is the CLI's bespoke interactive adapters under a live model. This is the data-collection
-  critical path, so verify it before deleting the old engine.
+**CLI real-run (Step 6 gate) — DONE ✅ (a4500, anthropic_fmb1_sim, runs:1).** Launched Isaac Sim
+ur5e-dt (ROS_DOMAIN_ID=7) via `isaac-sim-extension-dev/scripts/isaacsim_launch.sh launch ur5e-dt`,
+ran the study through the interactive `/ablation-run` path. Verified live: real agent phases (haiku
+reasoning + Isaac Sim tool calls), the executeAblationCommand nudge logic, signal_phase_complete
+handling, LEGITIMATE agent-driven `@escalate` (haiku→sonnet, not a crash), `Ctrl+C` graceful abort
+(CLI keyboard monitor → control.isAbortRequested), results table + output restoration. The CLI-backed
+adapters (the surface the headless web/agent runs couldn't exercise) all work through the wrapper.
 
-**Steps status:** 1–5 ✅ · 6 (CLI real-run) ⏳ GATE · 7 ✅ · 8 ✅ · 9 (delete dead CLI methods) ⏳
-BLOCKED on step 6 · 10 ✅. Rollback if step 6 fails: `git revert 3d7cff2` restores the old CLI
-engine while the runner stays. Pass B (dedupe shared helpers, retire RunHost) is separate/later.
+**Two findings from the real-run (both addressed / noted):**
+1. **FIXED — separate pre-existing crash (commit `0482d59`):** every tool-executing query crashed in
+   `MCPClient.flushPendingIPCChildren` on `this.pendingIPCChildren.length` (undefined). Root cause:
+   `MCPClient.create()` uses `Object.create(prototype)`, bypassing the constructor's class-field
+   initializers; the IPC-logging change (`9705b62`) added `pendingIPCChildren = []` as a field but
+   never mirrored it in that factory. Reproduced in plain chat (independent of the ablation refactor).
+   Fix mirrors pendingIPCChildren + 7 sibling initialized fields in the factory. Surfaced only because
+   this was the first real tool-executing CLI run since 9705b62.
+2. **NOTED — ROS/sim environment gap (NOT a code bug):** the agent could not complete the assembly
+   task — reported "UR robot driver not running" / "cannot access object poses from /objects_poses_sim".
+   The engine correctly propagated this to escalation. Likely a sim/ROS setup matter (pose-publisher /
+   driver topics under ROS_DOMAIN_ID=7); needs attention before the pipeline produces SUCCESSFUL data,
+   but it is orthogonal to the AblationRunner extraction.
+
+**Step 9 (delete dead CLI engine) — DONE ✅ (commit `1f4c222`).** Removed the 12 now-dead methods
+(executeAblationCommand, runEscalationLoop, consumePendingHookDirectives, savePhaseChatHistory,
+displayFinalResults, renderPhaseTable, formatTokenCount, handlePauseInput, promptDryRunPause,
+promptRewindPicker, renderRewindList, askForceStopPrompt + orphaned REWIND_VISIBLE_WINDOW), ~1774
+lines. ablation-cli.ts: 7897 → 5066 lines. Shared helpers + CLI-only methods retained. tsc green.
+
+**Steps status:** ALL COMPLETE — 1–10 ✅. Final commit `1f4c222` (origin/main + a4500 synced + dist
+rebuilt). Rollback if ever needed: `git revert 1f4c222` restores the dead methods; `git revert 3d7cff2`
+reverts the CLI to the old inline engine (the runner stays). Pass B (dedupe duplicated shared helpers
+into a module, retire RunHost toward the pure ~6-field seam) is separate/later.
 
 ## Goal
 Both the CLI and the web (`POST /ablations/:name/run`) call ONE engine (AblationRunner), killing the
