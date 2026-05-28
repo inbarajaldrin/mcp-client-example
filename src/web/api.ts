@@ -10,6 +10,7 @@ import type { AttachmentInfo } from '../managers/attachment-manager.js';
 import { createProvider, PROVIDERS } from '../bin.js';
 import { AgentRegistry } from '../managers/agent-registry.js';
 import { AblationManager } from '../managers/ablation-manager.js';
+import { AblationRunner, type RunControl, type RunObserver, type RunHost } from '../ablation-runner.js';
 import { isReasoningModel, getThinkingLevelsForProvider, isValidThinkingLevel, getDefaultThinkingLevel } from '../utils/model-capabilities.js';
 
 const upload = multer({ dest: path.join(tmpdir(), 'mcp-client-uploads') });
@@ -1226,10 +1227,28 @@ export function createApiRouter(client: MCPClient): Router {
 
   // ────────────────────────────────────────────────────────────────
   // POST /api/ablations/:name/run — Execute an ablation study (SSE)
+  //
+  // Slice 3 Pass A: the divergent inline loop (which silently skipped @escalate/@switch)
+  // is gone. The web now calls the SAME AblationRunner the CLI calls, so escalation/switch
+  // behave identically by construction. This handler only owns web-surface concerns:
+  // the running flag, SSE plumbing, the cancel flag, and chat-model state save/restore.
   // ────────────────────────────────────────────────────────────────
 
   let ablationRunning = false;
   let ablationCancelRequested = false;
+  let webAblationRunner: AblationRunner | null = null;
+  const getWebAblationRunner = (): AblationRunner => {
+    if (!webAblationRunner) {
+      webAblationRunner = new AblationRunner({
+        client,
+        logger: client.getLogger(),
+        ablationManager,
+        preferencesManager: client.getPreferencesManager(),
+        attachmentManager: client.getAttachmentManager(),
+      });
+    }
+    return webAblationRunner;
+  };
 
   router.post('/ablations/:name/run', async (req: Request, res: Response) => {
     const ablationName = req.params.name;
@@ -1253,10 +1272,6 @@ export function createApiRouter(client: MCPClient): Router {
     ablationRunning = true;
     ablationCancelRequested = false;
 
-    // Suspend client-side hooks during ablation runs to prevent double-triggering
-    const hookManager = client.getHookManager();
-    hookManager.suspend();
-
     // SSE headers
     res.setHeader('Content-Type', 'text/event-stream');
     res.setHeader('Cache-Control', 'no-cache');
@@ -1276,344 +1291,71 @@ export function createApiRouter(client: MCPClient): Router {
       }
     };
 
-    // Helper: format duration
-    const fmtDur = (ms: number) => {
-      const s = Math.floor(ms / 1000);
-      const h = Math.floor(s / 3600);
-      const m = Math.floor((s % 3600) / 60);
-      const sec = s % 60;
-      if (h > 0) return `${h}h ${m}m ${sec}s`;
-      if (m > 0) return `${m}m ${sec}s`;
-      return `${sec}s`;
+    // Save chat-model state to restore after the run (outer-loop responsibility — the engine
+    // switches models during the run but does not restore the user's chat model afterward).
+    const originalProviderName = client.getProviderName();
+    const originalModel = client.getModel();
+    const prefs = client.getPreferencesManager();
+    const originalThinkingLevels = { ...prefs.getThinkingLevels() };
+    const savedState = client.saveState();
+
+    // Surface adapters: flag-backed control, SSE observer, headless host.
+    const control: RunControl = {
+      isAbortRequested: () => ablationCancelRequested,
+      isInterruptRequested: () => false,
+      resetAbort: () => { ablationCancelRequested = false; },
+      resetInterrupt: () => {},
+      setAbortMode: () => {},
     };
 
-    // Helper: parse @tool: / @tool-exec: commands
-    const parseToolCall = (cmd: string) => {
-      let inject = true;
-      let rest: string;
-      if (cmd.startsWith('@tool-exec:')) { inject = false; rest = cmd.slice(11).trim(); }
-      else if (cmd.startsWith('@tool:')) { inject = true; rest = cmd.slice(6).trim(); }
-      else return null;
-      // JSON syntax: tool_name {"arg": "value"}
-      const m = rest.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*(\{.*\})?\s*$/);
-      if (m) {
-        try {
-          return { toolName: m[1], args: JSON.parse(m[2] || '{}'), inject };
-        } catch { return null; }
-      }
-      // Simple tool name
-      const sm = rest.match(/^([a-zA-Z0-9_-]+__[a-zA-Z0-9_]+)\s*$/);
-      if (sm) return { toolName: sm[1], args: {}, inject };
-      return null;
+    let runNumber = 0;
+    let webTotalRuns = 0;
+    const parseModelKey = (key: string): { provider: string; model: string } => {
+      const i = key.indexOf('/');
+      return i < 0 ? { provider: key, model: key } : { provider: key.slice(0, i), model: key.slice(i + 1) };
     };
-
-    // Helper: execute a single ablation command
-    class AbortRunSignal extends Error { constructor() { super('@abort'); } }
-    class PhaseCompleteSignal extends Error { constructor() { super('@complete-phase'); } }
-
-    // Current phase context for hook loading
-    let currentAblationDef: any = null;
-    let currentPhaseName: string = '';
-
-    const execCmd = async (command: string, dryRun: boolean, hookType: 'on-start' | 'before' | 'after' = 'before') => {
-      const trimmed = command.trim();
-
-      // @abort — signal to skip remaining phases for current model
-      if (trimmed === '@abort') throw new AbortRunSignal();
-
-      // @complete-phase — signal to advance to next phase
-      if (trimmed === '@complete-phase' || trimmed.startsWith('@complete-phase:')) throw new PhaseCompleteSignal();
-
-      // @tool: / @tool-exec:
-      if (trimmed.startsWith('@tool:') || trimmed.startsWith('@tool-exec:')) {
-        const parsed = parseToolCall(trimmed);
-        if (!parsed) throw new Error(`Invalid tool call syntax: ${trimmed}`);
-        const result = await client.executeMCPTool(parsed.toolName, parsed.args as Record<string, unknown>);
-        if (parsed.inject && result.contentBlocks?.length > 0) {
-          client.injectToolResult(parsed.toolName, parsed.args, result);
+    const observer: RunObserver = {
+      on: (event) => {
+        switch (event.type) {
+          case 'run-start':
+            webTotalRuns = event.totalRuns;
+            break;
+          case 'phase-start':
+            runNumber++;
+            send({ type: 'progress', runNumber, totalRuns: webTotalRuns, phase: event.phase, model: parseModelKey(event.model), status: 'running' });
+            break;
+          case 'result': {
+            const r = event.result;
+            send({ type: 'result', runNumber, totalRuns: webTotalRuns, phase: r.phase, model: r.model, status: r.status, attempt: r.attempt, run: r.run, duration: r.duration, durationFormatted: r.durationFormatted, tokens: r.tokens, error: r.error });
+            break;
+          }
+          case 'error':
+            send({ type: 'error', message: event.error });
+            break;
+          // command/escalate/switch-model/phase-complete/abort/continuation/progress/done
+          // are not surfaced to the web frontend in Pass A (it consumes only progress/result/error).
         }
-        // Log tool execution to chat history
-        client.getChatHistoryManager().addHookToolExecution(
-          parsed.toolName, parsed.args as Record<string, any>, result.displayText || '',
-          { type: hookType, action: parsed.inject ? 'tool-inject' : 'tool-exec' },
-        );
-        return;
-      }
-
-      // @shell:
-      if (trimmed.startsWith('@shell:')) {
-        const { execSync } = await import('child_process');
-        const shellCmd = trimmed.slice(7).trim();
-        if (!shellCmd) throw new Error('Empty shell command');
-        execSync(shellCmd, { encoding: 'utf-8', timeout: 300_000, stdio: ['pipe', 'pipe', 'pipe'] });
-        return;
-      }
-
-      // @wait:
-      const waitMatch = trimmed.match(/^@wait:(\d+(?:\.\d+)?)$/);
-      if (waitMatch) {
-        await new Promise(r => setTimeout(r, parseFloat(waitMatch[1]) * 1000));
-        return;
-      }
-
-      // Slash commands (skip for now — /add-prompt, /attachment-insert are complex)
-      if (trimmed.startsWith('/')) return;
-
-      // Plain text query → send to model (skip in dry run)
-      if (dryRun) return;
-
-      // Load ablation hooks for agent-driven phases
-      const hm = client.getHookManager();
-      let ablHooksLoaded = false;
-      if (currentAblationDef && currentPhaseName) {
-        const phaseHooks = ablationManager.getHooksForPhase(currentAblationDef, currentPhaseName);
-        if (phaseHooks.length > 0) {
-          hm.loadAblationHooks(phaseHooks);
-          hm.setCurrentPhaseName(currentPhaseName);
-          hm.resetPhaseComplete();
-          ablHooksLoaded = true;
-        }
-      }
-
-      try {
-        client.getChatHistoryManager().addUserMessage(trimmed);
-        await client.processQuery(trimmed, false, undefined, () => ablationCancelRequested || hm.isPhaseCompleteRequested() || hm.hasPendingInjection());
-      } finally {
-        if (ablHooksLoaded) hm.clearAblationHooks();
-      }
-
-      if (hm.isPhaseCompleteRequested()) {
-        hm.resetPhaseComplete();
-        throw new PhaseCompleteSignal();
-      }
+      },
     };
+
+    // Headless host: no keyboard monitor, readline, or slash routing — normalizeHost fills defaults.
+    const host: RunHost = {};
 
     try {
-      // Save current state
-      const originalProviderName = client.getProviderName();
-      const originalModel = client.getModel();
-      const prefs = client.getPreferencesManager();
-      const originalThinkingLevels = prefs.getThinkingLevels();
-      const savedState = client.saveState();
-
-      // Create run directory and save definition snapshot for provenance
-      const { runDir } = ablationManager.createRunDirectory(ablationName);
-      ablationManager.saveDefinitionSnapshot(runDir, ablation);
-      ablationManager.stashOutputs(runDir);
-
-      // Substitute arguments
-      const sub = (cmds: string[]) =>
-        resolvedArguments ? ablationManager.substituteArguments(cmds, resolvedArguments) : cmds;
-
-      // Determine models and iterations
-      const dryRunModel = { provider: 'none', model: 'dry-run' };
-      const modelsToRun = ablation.dryRun ? [dryRunModel] : (ablation.models || []);
-      const iterations = ablation.runs ?? 1;
-      const hasMultiIter = iterations > 1;
-      const totalRuns = ablationManager.getTotalRuns(ablation);
-
-      interface RunResult { phase: string; model: { provider: string; model: string }; run?: number; status: string; tokens?: number; duration?: number; durationFormatted?: string; error?: string }
-      const results: RunResult[] = [];
-      const totalStartTime = Date.now();
-      let runNumber = 0;
-      let shouldBreak = false;
-
-      // Execute: iteration > model > phase
-      for (let iteration = 1; iteration <= iterations && !shouldBreak; iteration++) {
-
-        for (const model of modelsToRun) {
-          if (shouldBreak || ablationCancelRequested) break;
-
-          const modelKey = `${model.provider}/${model.model}`;
-
-          // Clear outputs per model (each model starts with clean outputs)
-          ablationManager.clearOutputs();
-
-          // Switch model once per model (skip in dry run)
-          if (!ablation.dryRun) {
-            const provider = createProvider(model.provider);
-            if (!provider) throw new Error(`Unknown provider: ${model.provider}`);
-            await client.switchProviderAndModel(provider, model.model);
-
-            // Apply per-model thinking config (off by default unless specified)
-            if ((model as any).thinking && (model as any).thinking !== 'off') {
-              prefs.setThinkingLevel(model.provider, (model as any).thinking);
-            }
-          }
-
-          let modelAborted = false;
-
-          for (const phase of ablation.phases) {
-            if (shouldBreak || ablationCancelRequested || modelAborted) break;
-
-            // Apply per-phase tool filter (merged top-level + phase-level)
-            const phaseToolFilter = ablationManager.getToolFilterForPhase(ablation, phase.name);
-            if (phaseToolFilter) {
-              client.applyAblationToolFilter(
-                tools => ablationManager.applyToolFilter(tools, phaseToolFilter),
-              );
-            }
-
-            // Conditional context clearing between phases (not for first phase)
-            const isFirstPhase = phase === ablation.phases[0];
-            if (!isFirstPhase && !ablation.dryRun) {
-              if (ablation.settings.clearContextBetweenPhases !== false) {
-                client.clearContext();
-              }
-            }
-
-            ablationManager.createPhaseDirectory(runDir, model, phase.name, hasMultiIter ? iteration : undefined);
-
-            runNumber++;
-
-            const result: RunResult = { phase: phase.name, model, status: 'running' };
-            if (hasMultiIter) result.run = iteration;
-
-            send({ type: 'progress', runNumber, totalRuns, phase: phase.name, model, status: 'running', iteration: hasMultiIter ? iteration : undefined });
-
-            const startTime = Date.now();
-            const phaseCommands = sub(phase.commands);
-            const phaseOnStart = phase.onStart ? sub(phase.onStart) : undefined;
-            const phaseOnEnd = phase.onEnd ? sub(phase.onEnd) : undefined;
-
-            try {
-              // Set phase context for hook loading in execCmd
-              currentAblationDef = ablation;
-              currentPhaseName = phase.name;
-
-              // Log phase-start event to chat history
-              client.getChatHistoryManager().addPhaseEvent('phase-start', phase.name);
-
-              // Execute onStart hooks
-              if (phaseOnStart) {
-                for (const cmd of phaseOnStart) {
-                  if (ablationCancelRequested) break;
-                  await execCmd(cmd, ablation.dryRun || false, 'on-start');
-                }
-              }
-
-              // Execute commands
-              let phaseCompleted = false;
-              for (let i = 0; i < phaseCommands.length; i++) {
-                if (ablationCancelRequested) break;
-                send({ type: 'command', runNumber, totalRuns, phase: phase.name, commandIndex: i, totalCommands: phaseCommands.length, command: phaseCommands[i] });
-                try {
-                  await execCmd(phaseCommands[i], ablation.dryRun || false);
-                } catch (cmdErr: any) {
-                  if (cmdErr instanceof PhaseCompleteSignal) {
-                    phaseCompleted = true;
-                    break;
-                  }
-                  throw cmdErr; // re-throw other errors
-                }
-              }
-
-              // Execute onEnd hooks (run even after @complete-phase, skip on cancel)
-              if (!ablationCancelRequested && phaseOnEnd) {
-                for (const cmd of phaseOnEnd) {
-                  if (ablationCancelRequested) break;
-                  await execCmd(cmd, ablation.dryRun || false);
-                }
-              }
-
-              if (ablationCancelRequested) {
-                result.status = 'aborted';
-                client.getChatHistoryManager().addPhaseEvent('phase-abort', phase.name);
-                shouldBreak = true;
-              } else {
-                result.status = 'completed';
-                // Log implicit phase completion if not already logged by @complete-phase hook
-                if (!phaseCompleted) {
-                  // Check if signal_phase_complete(success) was called with requires_response: false
-                  // but @complete-phase hook didn't fire (can happen with batched tool calls)
-                  if (client.getChatHistoryManager().hasRecentSuccessfulPhaseSignal()) {
-                    client.getChatHistoryManager().addPhaseEvent('phase-complete', phase.name, { after: 'signal-fallback' });
-                  } else {
-                    client.getChatHistoryManager().addPhaseEvent('phase-abort', phase.name, { after: 'agent-stopped' });
-                  }
-                }
-                if (!ablation.dryRun) {
-                  result.tokens = client.getTokenUsage().current;
-                }
-              }
-            } catch (err: any) {
-              if (err instanceof AbortRunSignal) {
-                // @abort: skip remaining phases for this model
-                result.status = 'aborted';
-                client.getChatHistoryManager().addPhaseEvent('phase-abort', phase.name);
-                modelAborted = true;
-              } else {
-                result.status = 'failed';
-                result.error = err.message || String(err);
-                modelAborted = true;
-              }
-            }
-
-            result.duration = Date.now() - startTime;
-            result.durationFormatted = fmtDur(result.duration);
-            results.push(result);
-
-            // Restore tool list after phase filter
-            client.restoreAblationToolFilter();
-
-            send({ type: 'result', runNumber, totalRuns, ...result });
-
-            // End chat session per phase (only when clearing context between phases)
-            if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases !== false) {
-              try {
-                client.getChatHistoryManager().endSession(`Ablation: ${phase.name} with ${model.provider}/${model.model}`);
-              } catch { /* ignore */ }
-            }
-
-            // On failure: skip remaining phases for this model
-            if (result.status === 'failed') {
-              break;
-            }
-
-            // Capture outputs produced during this phase
-            ablationManager.captureRunOutputs(runDir, phase.name, model, hasMultiIter ? iteration : undefined);
-          }
-
-          // Save cumulative chat when context persists across phases
-          if (!ablation.dryRun && ablation.settings.clearContextBetweenPhases === false) {
-            try {
-              client.getChatHistoryManager().endSession(`Ablation: all phases with ${model.provider}/${model.model}`);
-            } catch { /* ignore */ }
-          }
-        }
-
-      }
-
-      // Save run results
-      const totalDuration = Date.now() - totalStartTime;
-      const run = {
-        ablationName,
-        startedAt: new Date(totalStartTime).toISOString(),
-        completedAt: new Date().toISOString(),
-        ...(resolvedArguments && Object.keys(resolvedArguments).length > 0 ? { resolvedArguments } : {}),
-        results,
-        totalTokens: results.reduce((s, r) => s + (r.tokens || 0), 0),
-        totalDuration,
-        totalDurationFormatted: fmtDur(totalDuration),
-      };
-      ablationManager.saveRunResults(runDir, run as any);
-      ablationManager.unstashOutputs(runDir);
-
-      // Restore original state
+      const aborted = await getWebAblationRunner().run(ablation, resolvedArguments, { control, observer, host });
+      send({ type: 'done', aborted });
+    } catch (err: any) {
+      send({ type: 'error', message: err.message || String(err) });
+    } finally {
+      // Restore the user's chat-model state.
       try {
         const originalProvider = createProvider(originalProviderName);
         await client.restoreState(savedState, originalProvider, originalModel);
         for (const [provider, level] of Object.entries(originalThinkingLevels)) {
-          prefs.setThinkingLevel(provider, level);
+          prefs.setThinkingLevel(provider, level as string);
         }
       } catch { /* best effort */ }
-
-      send({ type: 'done', summary: run });
-    } catch (err: any) {
-      send({ type: 'error', message: err.message || String(err) });
-    } finally {
       ablationRunning = false;
-      hookManager.resume();
       if (!connectionClosed) res.end();
     }
   });

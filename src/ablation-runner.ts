@@ -132,10 +132,18 @@ export class AblationRunner {
   private host!: NormalizedHost;
   /** Cross-run state: last custom MCP config path loaded, to skip redundant server refreshes. */
   private lastAblationMcpConfigPath: string | null = null;
+  /** Total scheduled runs for the active study (set at run() entry; used by phase-start events). */
+  private totalRuns = 0;
   /** Visible window size for the dry-run rewind picker (mirror of the CLI constant). */
   private static readonly REWIND_VISIBLE_WINDOW = 15;
 
   constructor(private readonly deps: RunDeps) {}
+
+  /** Record a finished phase result and surface it to the observer (SSE/console/registry). */
+  private emitResult(run: AblationRun, result: AblationRunResult): void {
+    run.results.push(result);
+    this.observer.on({ type: 'result', result, phase: result.phase });
+  }
 
   /** Build an all-required host from the optional RunHost, supplying headless defaults. */
   private normalizeHost(h?: RunHost): NormalizedHost {
@@ -165,10 +173,11 @@ export class AblationRunner {
     this.control = opts.control;
     this.observer = opts.observer;
     this.host = this.normalizeHost(opts.host);
+    this.totalRuns = this.deps.ablationManager.getTotalRuns(ablation);
     this.observer.on({
       type: 'run-start',
       ablation: ablation.name,
-      totalRuns: this.deps.ablationManager.getTotalRuns(ablation),
+      totalRuns: this.totalRuns,
       totalScenarios: this.deps.ablationManager.getTotalScenarios(ablation),
     });
     try {
@@ -551,6 +560,7 @@ export class AblationRunner {
           if (hasMultipleIterations) {
             result.run = iteration;
           }
+          this.observer.on({ type: 'phase-start', phase: phase.name, model: `${model.provider}/${model.model}`, runIndex: run.results.length + 1, totalRuns: this.totalRuns });
 
           const startTime = Date.now();
 
@@ -1016,7 +1026,7 @@ export class AblationRunner {
                 this.deps.client.getServerLogManager().copyLogsToDir(phaseDir);
               }
 
-              run.results.push(result);
+              this.emitResult(run, result);
               break;
             }
 
@@ -1057,7 +1067,7 @@ export class AblationRunner {
               );
 
               modelAborted = true;
-              run.results.push(result);
+              this.emitResult(run, result);
               break; // break phase loop, continue to next model
             }
 
@@ -1089,7 +1099,7 @@ export class AblationRunner {
                 { type: 'warning' },
               );
 
-              run.results.push(result);
+              this.emitResult(run, result);
               break; // break phase loop — escalation handled by outer logic
             }
 
@@ -1164,7 +1174,7 @@ export class AblationRunner {
             });
           }
 
-          run.results.push(result);
+          this.emitResult(run, result);
 
           // Restore tool list after phase filter
           this.deps.client.restoreAblationToolFilter();
@@ -1434,6 +1444,7 @@ export class AblationRunner {
           if (hasMultipleIterations) {
             result.run = iteration;
           }
+          this.observer.on({ type: 'phase-start', phase: phase.name, model: `${model.provider}/${model.model}`, runIndex: run.results.length + 1, totalRuns: this.totalRuns });
 
           const startTime = Date.now();
 
@@ -1697,7 +1708,7 @@ export class AblationRunner {
           // Restore tool filter
           this.deps.client.restoreAblationToolFilter();
 
-          run.results.push(result);
+          this.emitResult(run, result);
 
           // Handle result
           if (result.status === 'completed') {

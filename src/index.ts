@@ -1562,6 +1562,11 @@ export class MCPClient {
     return this.attachmentManager;
   }
 
+  /** Expose the logger so surface-agnostic engines (e.g. AblationRunner) can be injected it. */
+  getLogger(): Logger {
+    return this.logger;
+  }
+
   getHookManager(): HookManager {
     return this.hookManager;
   }
