@@ -368,7 +368,7 @@ export class AblationRunner {
             // Record all phases as skipped for this model
             for (const phase of ablation.phases) {
               if (phase.enabled !== false) {
-                run.results.push({ phase: phase.name, model, status: 'skipped', error: error.message });
+                this.emitResult(run, { phase: phase.name, model, status: 'skipped', error: error.message });
               }
             }
             runNumber++;
@@ -486,7 +486,7 @@ export class AblationRunner {
           // Skip disabled phases
           if (phase.enabled === false) {
             this.deps.logger.log(`\n  ⤳ Skipping disabled phase: ${phase.name}\n`, { type: 'info' });
-            run.results.push({ phase: phase.name, model, status: 'skipped' });
+            this.emitResult(run, { phase: phase.name, model, status: 'skipped' });
             continue;
           }
 
@@ -1329,7 +1329,7 @@ export class AblationRunner {
         // Skip disabled phases
         if (phase.enabled === false) {
           this.deps.logger.log(`\n  ⤳ Skipping disabled phase: ${phase.name}\n`, { type: 'info' });
-          run.results.push({ phase: phase.name, model: models[0], status: 'skipped' });
+          this.emitResult(run, { phase: phase.name, model: models[0], status: 'skipped' });
           continue;
         }
 
@@ -1358,7 +1358,7 @@ export class AblationRunner {
               `\n  ✗ Skipping ${modelKey}: failed to initialize — ${error.message}\n`,
               { type: 'error' },
             );
-            run.results.push({ phase: phase.name, model, status: 'skipped', attempt, error: error.message });
+            this.emitResult(run, { phase: phase.name, model, status: 'skipped', attempt, error: error.message });
             continue; // try next model
           }
 
@@ -3266,7 +3266,11 @@ export class AblationRunner {
     });
 
     const answer = (response ?? '').trim().toLowerCase();
-    const shouldStop = answer === 'y' || answer === 'yes';
+    // Headless force-stop policy (GPT review finding #1): if collectInput is unavailable
+    // (web/headless host) AND the run was already aborted by the user, force-stop the tool
+    // rather than wait indefinitely on a prompt no one will ever answer.
+    const headlessAbort = response === null && this.control.isAbortRequested();
+    const shouldStop = answer === 'y' || answer === 'yes' || headlessAbort;
 
     if (shouldStop) {
       this.deps.logger.log(`\nForce stopping tool call and restarting "${serverName}" server...\n`, { type: 'warning' });

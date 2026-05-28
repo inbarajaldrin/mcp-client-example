@@ -1318,7 +1318,10 @@ export function createApiRouter(client: MCPClient): Router {
       on: (event) => {
         switch (event.type) {
           case 'run-start':
-            webTotalRuns = event.totalRuns;
+            // GPT review finding #2: runNumber increments per phase-start, so the SSE counter
+            // must be the total number of phases (scenarios = models x phases x iterations),
+            // not models x iterations, otherwise multi-phase studies report "3/2" etc.
+            webTotalRuns = event.totalScenarios;
             break;
           case 'phase-start':
             runNumber++;
@@ -1344,8 +1347,10 @@ export function createApiRouter(client: MCPClient): Router {
     try {
       const aborted = await getWebAblationRunner().run(ablation, resolvedArguments, { control, observer, host });
       send({ type: 'done', aborted });
-    } catch (err: any) {
-      send({ type: 'error', message: err.message || String(err) });
+    } catch {
+      // GPT review finding #4: the runner already emitted {type:'error'} through the observer
+      // before rethrowing; sending another would surface the error twice on the SSE stream.
+      // Swallow the rethrow here and let the finally{} block handle cleanup.
     } finally {
       // Restore the user's chat-model state.
       try {
