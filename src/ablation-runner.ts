@@ -13,7 +13,7 @@
 // the web supplies headless defaults). Pass B will retire RunHost toward the pure ~6-field seam.
 
 import chalk from 'chalk';
-import { cpSync, existsSync, mkdirSync } from 'fs';
+import { cpSync, existsSync, mkdirSync, readFileSync } from 'fs';
 import { join } from 'path';
 import { execSync } from 'child_process';
 import type { MCPClient } from './index.js';
@@ -191,6 +191,43 @@ export class AblationRunner {
   }
 
   // ───────── moved from AblationCLI.runSingleAblation (Slice 3 Pass A) ─────────
+  /**
+   * Tool-surface manifest preflight (#1). If `.mcp-client-data/paper-tool-manifest.json`
+   * exists, assert the live enabled agent toolset EXACTLY matches its `expected_enabled`
+   * list and refuse to run on drift: EXTRA = an undocumented tool leaked in (contamination
+   * that would alter the logged sequence the gate replays); MISSING = a paper tool got
+   * disabled. Absent manifest -> unarmed (skipped). Bypass: MCP_CLIENT_SKIP_TOOL_PREFLIGHT=1.
+   */
+  private toolManifestPreflightOK(): boolean {
+    const manifestPath = join(process.cwd(), '.mcp-client-data', 'paper-tool-manifest.json');
+    if (!existsSync(manifestPath)) return true; // unarmed
+    if (process.env.MCP_CLIENT_SKIP_TOOL_PREFLIGHT === '1') {
+      this.deps.logger.log('  \u26a0 Tool-manifest preflight BYPASSED (MCP_CLIENT_SKIP_TOOL_PREFLIGHT=1)\n', { type: 'warning' });
+      return true;
+    }
+    let expected: string[];
+    try {
+      expected = (JSON.parse(readFileSync(manifestPath, 'utf-8')).expected_enabled ?? []) as string[];
+    } catch (e: any) {
+      this.deps.logger.log(`  \u26a0 Tool-manifest unreadable (${e?.message}); preflight skipped\n`, { type: 'warning' });
+      return true;
+    }
+    const expectedSet = new Set(expected);
+    const liveEnabled = this.deps.client.getAllToolsWithState().filter(t => t.enabled).map(t => t.name);
+    const liveSet = new Set(liveEnabled);
+    const extra = liveEnabled.filter(n => !expectedSet.has(n)).sort();
+    const missing = expected.filter(n => !liveSet.has(n)).sort();
+    if (extra.length === 0 && missing.length === 0) {
+      this.deps.logger.log(`  \u2713 Tool-manifest preflight OK (${expected.length} agent tools match paper)\n`, { type: 'success' });
+      return true;
+    }
+    this.deps.logger.log('  \u2717 TOOL-MANIFEST DRIFT \u2014 refusing to run (data-integrity guard)\n', { type: 'error' });
+    if (extra.length) this.deps.logger.log(`    EXTRA enabled (not in paper manifest): ${extra.join(', ')}\n`, { type: 'error' });
+    if (missing.length) this.deps.logger.log(`    MISSING (manifest expects enabled): ${missing.join(', ')}\n`, { type: 'error' });
+    this.deps.logger.log('    Fix tool-states.yaml or update paper-tool-manifest.json, or set MCP_CLIENT_SKIP_TOOL_PREFLIGHT=1 to override.\n', { type: 'info' });
+    return false;
+  }
+
   private async runSingleAblation(ablation: AblationDefinition, resolvedArguments?: Record<string, string>): Promise<boolean> {
     const totalRuns = this.deps.ablationManager.getTotalRuns(ablation);
     const totalScenarios = this.deps.ablationManager.getTotalScenarios(ablation);
@@ -227,6 +264,12 @@ export class AblationRunner {
       } else {
         this.deps.logger.log(`  Servers already connected for this config, skipping refresh\n`, { type: 'info' });
       }
+    }
+
+    // Tool-surface manifest preflight (#1) — refuse to collect on a contaminated toolset.
+    if (!this.toolManifestPreflightOK()) {
+      this.observer.on({ type: 'error', error: 'tool-manifest preflight failed' });
+      return true; // aborted
     }
 
     // Create run directory

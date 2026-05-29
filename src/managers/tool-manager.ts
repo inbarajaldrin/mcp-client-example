@@ -109,15 +109,30 @@ export class ToolManager {
   }
 
   updateStateForNewTools(tools: Tool[]): boolean {
+    // STRICT_TOOLS: in a data-collection rig a newly-appeared tool must never
+    // silently enter the agent's toolset. With MCP_CLIENT_STRICT_TOOLS=1, default
+    // new tools to DISABLED and warn, so enabling one is an explicit operator
+    // decision. Env unset preserves the prior enable-by-default (web/dev) behavior.
+    const strict = process.env.MCP_CLIENT_STRICT_TOOLS === '1';
+    const defaultState = !strict;
     let hasNewTools = false;
+    const newlySeen: string[] = [];
     for (const tool of tools) {
       if (!(tool.name in this.toolStates)) {
-        this.toolStates[tool.name] = true;
+        this.toolStates[tool.name] = defaultState;
         hasNewTools = true;
+        newlySeen.push(tool.name);
       }
     }
     if (hasNewTools) {
       this.saveState();
+      if (strict) {
+        this.logger.log(
+          `STRICT_TOOLS: ${newlySeen.length} new tool(s) defaulted to DISABLED ` +
+          `(enable explicitly in tool-states.yaml if intended): ${newlySeen.join(', ')}\n`,
+          { type: 'warning' },
+        );
+      }
     }
     return hasNewTools;
   }

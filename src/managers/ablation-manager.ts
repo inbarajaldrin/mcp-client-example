@@ -1,5 +1,7 @@
 import { readFileSync, existsSync, writeFileSync, mkdirSync, readdirSync, unlinkSync, statSync, cpSync, rmSync } from 'fs';
 import { join, dirname } from 'path';
+import { execSync } from 'child_process';
+import { createHash } from 'crypto';
 import { fileURLToPath } from 'url';
 import { Logger } from '../logger.js';
 import * as yaml from 'yaml';
@@ -737,7 +739,46 @@ export class AblationManager {
    */
   saveRunResults(runDir: string, run: AblationRun): void {
     const summaryPath = join(runDir, 'summary.json');
-    writeFileSync(summaryPath, JSON.stringify(run, null, 2), 'utf-8');
+    const provenance = this.collectProvenance();
+    writeFileSync(summaryPath, JSON.stringify({ ...run, provenance }, null, 2), 'utf-8');
+  }
+
+  /**
+   * Provenance stamp (#2). Records the exact stack a run was collected on so a run
+   * self-dates and self-audits: git SHAs (+ dirty flag) of the three repos, the
+   * tool-states hash, and the enabled agent toolset. Eliminates the need to date
+   * runs by archaeology (e.g. pre/post the 2026-05-28 physics fix).
+   */
+  private collectProvenance(): Record<string, unknown> {
+    const sha = (dir: string): string => {
+      try { return execSync(`git -C "${dir}" rev-parse --short HEAD`, { encoding: 'utf-8' }).trim(); }
+      catch { return 'unknown'; }
+    };
+    const dirty = (dir: string): boolean => {
+      try { return execSync(`git -C "${dir}" status --porcelain`, { encoding: 'utf-8' }).trim().length > 0; }
+      catch { return false; }
+    };
+    const home = process.env.HOME || '';
+    const clientDir = process.cwd();
+    const isaacDir = process.env.ISAAC_SIM_MCP_DIR || join(home, 'Documents/isaac-sim-mcp');
+    const rosDir = process.env.ROS_MCP_SERVER_DIR || join(home, 'Documents/ros-mcp-server');
+    let toolStatesHash = 'unknown';
+    let enabledTools: string[] = [];
+    try {
+      const raw = readFileSync(join(clientDir, '.mcp-client-data', 'tool-states.yaml'), 'utf-8');
+      toolStatesHash = createHash('sha256').update(raw).digest('hex').slice(0, 12);
+      const parsed = (yaml.parse(raw) ?? {}) as Record<string, boolean>;
+      enabledTools = Object.entries(parsed).filter(([, v]) => v !== false).map(([k]) => k).sort();
+    } catch { /* leave defaults */ }
+    return {
+      collected_at: new Date().toISOString(),
+      stack: {
+        mcp_client_example: { sha: sha(clientDir), dirty: dirty(clientDir) },
+        isaac_sim_mcp: { dir: isaacDir, sha: sha(isaacDir), dirty: dirty(isaacDir) },
+        ros_mcp_server: { dir: rosDir, sha: sha(rosDir), dirty: dirty(rosDir) },
+      },
+      tool_surface: { tool_states_sha256_12: toolStatesHash, enabled_count: enabledTools.length, enabled_tools: enabledTools },
+    };
   }
 
   /**
