@@ -1,4 +1,12 @@
 #!/usr/bin/env bash
+# ⚠️ DEPRECATED (2026-05-30) — RETIRED in favor of the headless ssh path.
+#   Use:  scripts/run_study.sh <study> [provider] [model]
+#   e.g.  ssh aaugus11@a4500 'cd ~/Documents/mcp-client-example && scripts/run_study.sh verify_replay_fmb2_sim'
+# That drives the same engine via the CLI --headless path + run.start {wait:true}
+# (blocks to completion, no tmux session, no pane-scraping/polling). This script
+# needed a live CLI in a tmux session driven by `tmux send-keys`, which the ssh
+# workflow makes unnecessary. Kept for reference only; do not use for new runs.
+#
 # orchestrate_replays.sh — drive dryRun verify_replay studies through the live CLI
 # session via the agent backdoor (/agent-do run.start | run.status). FREE (no LLM).
 # Each run automatically gets the tool-manifest preflight (#1) + provenance stamp (#2).

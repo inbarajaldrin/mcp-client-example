@@ -1,0 +1,2 @@
+# headless single-study run (replaces tmux orchestrate_replays.sh)
+/agent-do run.start {"name":"verify_replay_fmb2_sim","wait":true}

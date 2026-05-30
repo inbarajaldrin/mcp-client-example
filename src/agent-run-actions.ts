@@ -69,12 +69,13 @@ export function registerRunActions(client: MCPClient): void {
 
   reg.registerAction({
     id: 'run.start',
-    description: 'Start an ablation study by name through the shared AblationRunner (the same engine the CLI and web use). Non-blocking: returns immediately; poll run.status for progress.',
+    description: 'Start an ablation study by name through the shared AblationRunner (the same engine the CLI and web use). Non-blocking by default: returns immediately; poll run.status for progress. Pass wait:true to BLOCK until the run completes and return its final status (used by headless/ssh single-run invocations — replaces the tmux orchestrate_replays.sh loop).',
     params: [
       { name: 'name', type: 'string', required: true, description: 'Ablation study name' },
       { name: 'resolvedArguments', type: 'object', required: false, description: 'Resolved argument values for parameterized studies' },
+      { name: 'wait', type: 'boolean', required: false, description: 'Block until the run finishes and return final status (headless single-run path).' },
     ],
-    handler: (p) => {
+    handler: async (p) => {
       if (running) throw new Error(`An ablation is already running: ${activeStudy}`);
       const name = String(p.name);
       const ablation = ablationManager.load(name);
@@ -103,8 +104,9 @@ export function registerRunActions(client: MCPClient): void {
 
       const resolvedArguments = (p.resolvedArguments as Record<string, string> | undefined) ?? undefined;
 
-      // Fire-and-forget: the run proceeds in the background; callers poll run.status.
-      void getRunner()
+      // The run chain always RESOLVES (errors are captured into viewState, not rejected)
+      // after state is restored and the running flag cleared.
+      const chain = getRunner()
         .run(ablation, resolvedArguments, { control, observer, host })
         .then((aborted) => { reg.setViewState('run.status', aborted ? 'aborted' : 'done'); })
         .catch((err: any) => {
@@ -123,6 +125,17 @@ export function registerRunActions(client: MCPClient): void {
           activeStudy = null;
         });
 
+      // wait:true -> block until done and return the final status (headless/ssh path).
+      if (p.wait === true || p.wait === 'true') {
+        await chain;
+        return {
+          started: true, study: name, done: true,
+          status: reg.getViewState('run.status') ?? 'done',
+          lastError: reg.getViewState('run.lastError') ?? null,
+        };
+      }
+      // Fire-and-forget (default): the run proceeds in the background; callers poll run.status.
+      void chain;
       return { started: true, study: name };
     },
   });
