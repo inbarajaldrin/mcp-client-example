@@ -11,4 +11,4 @@ dist/
 .mcp-client-data/
 
 # MCP configuration (contains user-specific paths)
-mcp_config.json
+mcp_config.jsonmcp_config_remap.json

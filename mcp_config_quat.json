@@ -19,7 +19,7 @@
       "command": "bash",
       "args": [
         "-c",
-        "source /opt/ros/humble/setup.bash && source ~/Desktop/ros2_ws/install/setup.bash && /home/aaugus11/Documents/ros-mcp-server/.venv/bin/python /home/aaugus11/Documents/ros-mcp-server/server_ablation_quat.py"
+        "source /opt/ros/humble/setup.bash && source ~/Desktop/ros2_ws/install/setup.bash && /home/aaugus11/Documents/ros-mcp-server/.venv/bin/python /home/aaugus11/Documents/ros-mcp-server/server_quat.py"
       ],
       "env": {
         "ROS_DOMAIN_ID": "0",
