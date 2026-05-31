@@ -76,7 +76,7 @@ export class MCPClientCLI {
 
   constructor(
     serverConfig: StdioServerParameters | Array<{ name: string; config: StdioServerParameters }>,
-    options?: { provider?: ModelProvider; model?: string; headless?: string },
+    options?: { provider?: ModelProvider; model?: string; headless?: string; enableOrchestratorIPC?: boolean },
   ) {
     this.headlessScript = options?.headless;
     if (Array.isArray(serverConfig)) {
@@ -84,12 +84,14 @@ export class MCPClientCLI {
       this.client = MCPClient.createMultiServer(serverConfig, {
         provider: options?.provider,
         model: options?.model,
+        enableOrchestratorIPC: options?.enableOrchestratorIPC,
       });
     } else {
       // Single server (backward compatibility)
       this.client = new MCPClient(serverConfig, {
         provider: options?.provider,
         model: options?.model,
+        enableOrchestratorIPC: options?.enableOrchestratorIPC,
       });
     }
     this.logger = new Logger({ mode: 'verbose' });

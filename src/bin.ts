@@ -484,6 +484,13 @@ async function main() {
         'web-port': { type: 'string' },
         'web-host': { type: 'string' },
         'headless': { type: 'string' },
+        // Start the orchestrator IPC server at init even when the startup config has
+        // mcp-tools-orchestrator disabled. Needed for the headless run path: a study
+        // whose own config enables the orchestrator (e.g. verify_replay's
+        // execute_composed_code -> setup_and_replay) requires MCP_CLIENT_IPC_URL,
+        // which is otherwise never set because the run.start config-reload doesn't
+        // start IPC. Additive only: does NOT change the agent tool surface.
+        'enable-orchestrator-ipc': { type: 'boolean' },
       },
       allowPositionals: true,
     });
@@ -650,6 +657,7 @@ async function main() {
         provider: finalProvider,
         model: selectedModel,
         headless: args.values['headless'],
+        enableOrchestratorIPC: args.values['enable-orchestrator-ipc'] as boolean | undefined,
       });
       await cli.start();
       return;

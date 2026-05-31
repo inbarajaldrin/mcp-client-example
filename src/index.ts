@@ -789,7 +789,9 @@ export class MCPClient {
   private mergeEnvironment(customEnv?: Record<string, string>): Record<string, string> {
     const defaultEnvVars = process.platform === 'win32'
       ? ['APPDATA', 'HOMEDRIVE', 'HOMEPATH', 'LOCALAPPDATA', 'PATH', 'PROCESSOR_ARCHITECTURE', 'SYSTEMDRIVE', 'SYSTEMROOT', 'TEMP', 'USERNAME', 'USERPROFILE']
-      : ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'TERM', 'USER'];
+      // INSTRUMENT_OFF: pass the observe-only telemetry kill-switch through to spawned
+      // servers/primitives so it actually disables instrumentation end-to-end.
+      : ['HOME', 'LOGNAME', 'PATH', 'SHELL', 'TERM', 'USER', 'INSTRUMENT_OFF'];
 
     const mergedEnv: Record<string, string> = {};
     for (const key of defaultEnvVars) {
@@ -900,12 +902,49 @@ export class MCPClient {
     }
   }
 
+  /**
+   * Ensure the orchestrator IPC server is running IF the active config enables
+   * mcp-tools-orchestrator. Config-driven: any entry point that reloads a config
+   * enabling the orchestrator (e.g. run.start with a study mcpConfigPath) gets a
+   * working MCP_CLIENT_IPC_URL so execute_composed_code can call back. Does NOT
+   * enable orchestrator MODE — the agent tool surface is unchanged. No-op if IPC
+   * already running or orchestrator disabled. Never throws.
+   * (The --enable-orchestrator-ipc CLI flag is an init-time override of the same.)
+   */
+  private async ensureOrchestratorIPCServerStarted(): Promise<void> {
+    if (this.orchestratorIPCServer) return;
+    const orchestratorEnabled = this.serverConfigs.some(
+      (cfg) => cfg.name === 'mcp-tools-orchestrator' && !cfg.disabledInConfig,
+    );
+    if (!orchestratorEnabled) return;
+    try {
+      this.orchestratorIPCServer = new OrchestratorIPCServer(this, this.logger);
+      const port = await this.orchestratorIPCServer.start();
+      process.env.MCP_CLIENT_IPC_URL = `http://localhost:${port}`;
+      this.orchestratorIPCServer.setMaxIpcCalls(this.preferencesManager.getMaxIpcCalls());
+      this.logger.log(
+        `Orchestrator IPC enabled (config-driven): ${process.env.MCP_CLIENT_IPC_URL}\n`,
+        { type: 'info' },
+      );
+      this.setupIPCEventListeners();
+    } catch (error) {
+      this.logger.log(
+        `Failed to start Orchestrator IPC server (config-driven): ${error}\n`,
+        { type: 'warning' },
+      );
+    }
+  }
+
   async refreshServers(skipConfigReload = false) {
     // Reload config from disk to pick up any changes
     // Skip when a custom config was already loaded (e.g. ablation with custom mcpConfigPath)
     if (!skipConfigReload) {
       this.reloadConfigFromDisk();
     }
+
+    // Config-driven: bring up orchestrator IPC before reconnecting if the active
+    // config enables it (correct for ALL entry points, not just the CLI flag).
+    await this.ensureOrchestratorIPCServerStarted();
 
     this.logger.log('Refreshing server connections...\n', { type: 'info' });
 

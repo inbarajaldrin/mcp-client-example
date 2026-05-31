@@ -30,16 +30,37 @@ printf '/agent-do run.start {"name":"%s","wait":true}\n' "$STUDY" > "$SCRIPT"
 : "${ROS_DOMAIN_ID:=7}"
 export MCP_CLIENT_STRICT_TOOLS ROS_DOMAIN_ID
 
-node dist/bin.js --all --provider "$PROVIDER" --model "$MODEL" --headless "$SCRIPT"
+# Marker so we can tell whether THIS run actually persisted a fresh run dir
+# (vs. silently falling back to a stale pre-existing one — the bug that caused
+# hours of confusion 2026-05-30: a preflight refusal / connect failure left the
+# run un-persisted, and this script used to echo the newest STALE dir as success).
+# fast-fail >> silent fallback.
+PRE_MARKER=$(date +%s)
+RUN_LOG="$(mktemp "/tmp/run_study-${STUDY}-XXXXXX.log")"
 
-# Report the newest run dir + per-phase status from summary.json.
-NEW="$(ls -t "$RUNS" 2>/dev/null | head -1 || true)"
-if [ -n "$NEW" ] && [ -f "$RUNS/$NEW/summary.json" ]; then
-  echo "=== run dir: $RUNS/$NEW ==="
-  python3 - "$RUNS/$NEW/summary.json" <<'PY' || true
+# --enable-orchestrator-ipc: start the orchestrator IPC server at init so a study whose
+# config enables mcp-tools-orchestrator (verify_replay's execute_composed_code ->
+# setup_and_replay) actually works headless. Additive — does NOT change the agent tool surface.
+set +e
+node dist/bin.js --all --enable-orchestrator-ipc --provider "$PROVIDER" --model "$MODEL" --headless "$SCRIPT" 2>&1 | tee "$RUN_LOG"
+NODE_RC=${PIPESTATUS[0]}
+set -e
+
+# FAST-FAIL: did THIS run create a fresh run dir? (mtime newer than the pre-run marker)
+FRESH="$(find "$RUNS" -mindepth 1 -maxdepth 1 -type d -newermt "@$PRE_MARKER" 2>/dev/null | head -1 || true)"
+if [ -z "$FRESH" ] || [ ! -f "$FRESH/summary.json" ]; then
+  echo "=== run_study FAILED: '$STUDY' produced NO fresh run dir — the run did not persist (node exit=$NODE_RC) ==="
+  echo "    NOT a valid result. This script no longer reports a stale dir as success. Likely cause:"
+  grep -iE "TOOL-MANIFEST DRIFT|MISSING \(manifest|refusing to run|failed to connect|timed out|preflight failed|Error:" "$RUN_LOG" | sed 's/^/      /' | head -10 \
+    || echo "      (no recognized error pattern — inspect $RUN_LOG)"
+  rm -f "$RUN_LOG"
+  exit 3
+fi
+rm -f "$RUN_LOG"
+echo "=== run dir: $FRESH ==="
+python3 - "$FRESH/summary.json" <<'PY' || true
 import json, sys
 d = json.load(open(sys.argv[1]))
 for r in d.get("results", []):
     print(f"  {r['phase']}: {r['status']} ({r.get('durationFormatted','')})")
 PY
-fi
