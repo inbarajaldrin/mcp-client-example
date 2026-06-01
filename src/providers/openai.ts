@@ -1266,7 +1266,18 @@ export class OpenAIProvider implements ModelProvider {
     collector?: { content: string; toolCalls: Array<{ id: string; name: string; arguments: string }>; reasoningItems: any[] },
   ): AsyncIterable<MessageStreamEvent> {
     const effort = this.resolveReasoningEffort();
-    const reasoningArg = effort !== 'none' ? { effort, summary: 'auto' as const } : undefined;
+    // Reasoning summaries (summary:'auto') require a VERIFIED OpenAI org; an unverified
+    // org gets a 400 "Your organization must be verified to generate reasoning summaries"
+    // on EVERY reasoning-model call (o3, gpt-5, ...), which breaks @switch/escalation.
+    // The summary field is optional and is the sole trigger of that 400 — omitting it lets
+    // the model still reason internally (reasoning_effort drives reasoning; tokens billed),
+    // we just lose the readable summary text. So default OFF; opt back in via env once the
+    // org is verified at platform.openai.com/settings/organization/general.
+    // Refs: https://platform.openai.com/docs/guides/reasoning , https://docs.litellm.ai/docs/providers/openai
+    const wantSummary = process.env.OPENAI_REASONING_SUMMARY === '1';
+    const reasoningArg = effort !== 'none'
+      ? (wantSummary ? { effort, summary: 'auto' as const } : { effort })
+      : undefined;
 
     const responsesTools = tools.length > 0
       ? tools.map((t) => ({
