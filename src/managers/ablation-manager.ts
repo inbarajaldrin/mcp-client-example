@@ -735,12 +735,72 @@ export class AblationManager {
   }
 
   /**
-   * Save run results
+   * Save run results.
+   *
+   * Embeds a deterministic `verdict` + `verdict_reason` so the run outcome (and WHY) is a single
+   * field read, never inferred from a missing file or an agent's self-report.
+   *
+   * AGNOSTIC BY CONSTRUCTION: the verdict is a pure ROLLUP of phase STATUSES the client already
+   * owns — it knows nothing about assembly, ground truth, or "what was supposed to happen". A
+   * phase only reaches status 'completed' because the SERVER gate (signal_phase_complete ->
+   * verify_assembly check_all vs CAD/ground-truth) let it; the client merely records that outcome.
+   * So "did every expected phase reach 'completed'" is a lifecycle fact, not a domain judgment.
+   * Domain truth stays where it lives (the server gate + the ground-truth files in their folder).
    */
-  saveRunResults(runDir: string, run: AblationRun): void {
+  saveRunResults(runDir: string, run: AblationRun, expectedPhases?: string[]): void {
     const summaryPath = join(runDir, 'summary.json');
     const provenance = this.collectProvenance();
-    writeFileSync(summaryPath, JSON.stringify({ ...run, provenance }, null, 2), 'utf-8');
+    const { verdict, verdict_reason } = this.computeVerdict(run, expectedPhases);
+    writeFileSync(summaryPath, JSON.stringify({ ...run, provenance, verdict, verdict_reason }, null, 2), 'utf-8');
+  }
+
+  /**
+   * Deterministic run verdict from phase STATUSES only (no domain/ground-truth logic).
+   * SUCCESS iff every expected phase has a 'completed' result and nothing failed / aborted /
+   * was left 'running' (the last = interrupted/killed mid-phase). Returns the per-phase reason.
+   */
+  private computeVerdict(run: AblationRun, expectedPhases?: string[]): { verdict: 'SUCCESS' | 'FAIL'; verdict_reason: string[] } {
+    const reasons: string[] = [];
+    const results = run.results || [];
+    if (results.length === 0) {
+      return { verdict: 'FAIL', verdict_reason: ['no phase results recorded — run produced nothing'] };
+    }
+
+    const completed = new Set(results.filter(r => r.status === 'completed').map(r => r.phase));
+    const terminalFail = results.filter(r => r.status === 'failed' || r.status === 'aborted');
+    const running = results.filter(r => r.status === 'running');
+
+    // one line per distinct (phase, status) — the record the verdict is derived from
+    const seen = new Set<string>();
+    for (const r of results) {
+      const key = `${r.phase}|${r.status}`;
+      if (seen.has(key)) continue;
+      seen.add(key);
+      const m = r.model ? ` (${r.model.provider}/${r.model.model})` : '';
+      reasons.push(`phase '${r.phase}': ${r.status}${r.error ? ' — ' + r.error : ''}${m}`);
+    }
+
+    let ok = true;
+    for (const r of terminalFail) {
+      ok = false;
+      reasons.push(`DECISIVE: phase '${r.phase}' ${r.status}${r.error ? ' — ' + r.error : ''}`);
+    }
+    for (const r of running) {
+      ok = false;
+      reasons.push(`DECISIVE: phase '${r.phase}' left 'running' — run interrupted/killed mid-phase`);
+    }
+    if (expectedPhases && expectedPhases.length) {
+      const missing = expectedPhases.filter(p => !completed.has(p));
+      if (missing.length) {
+        ok = false;
+        reasons.push(`DECISIVE: phase(s) never completed: ${missing.join(', ')} (expected ${expectedPhases.length}, completed ${completed.size})`);
+      }
+    } else {
+      reasons.push('note: expected-phase list not provided — verdict from observed results only');
+      if (completed.size === 0) ok = false;
+    }
+    if (ok) reasons.unshift(`all ${completed.size} expected phase(s) reached status 'completed' (server gates passed)`);
+    return { verdict: ok ? 'SUCCESS' : 'FAIL', verdict_reason: reasons };
   }
 
   /**

@@ -303,6 +303,24 @@ export class AblationRunner {
     const totalStartTime = Date.now();
     let shouldBreak = false;
 
+    // ALWAYS persist the run summary — even on abort / throw / interrupt — so the run's record
+    // is never a silently-missing file (fast-fail > silent fallback). Idempotent: first call wins.
+    // The verdict embedded by saveRunResults is a pure phase-status rollup (agnostic; see there).
+    let summaryWritten = false;
+    const persistSummary = (): void => {
+      if (summaryWritten) return;
+      try {
+        run.completedAt = run.completedAt ?? new Date().toISOString();
+        run.totalDuration = Date.now() - totalStartTime;
+        run.totalDurationFormatted = formatDuration(run.totalDuration);
+        run.totalTokens = run.results.reduce((sum, r) => sum + (r.tokens || 0), 0);
+        this.deps.ablationManager.saveRunResults(runDir, run, ablation.phases.map(p => p.name));
+        summaryWritten = true;
+      } catch (e) {
+        this.deps.logger.log(`Failed to persist run summary: ${e}\n`, { type: 'error' });
+      }
+    };
+
     // Enable abort mode - Ctrl+C will set abort flag instead of exiting
     this.control.setAbortMode(true);
 
@@ -1294,19 +1312,18 @@ export class AblationRunner {
 
       // Restore CLI's iteration-limit callback (pause-and-ask behavior)
       this.host.restoreIterationLimitCallback();
+
+      // Persist the run summary on EVERY exit path — including abort / @abort / thrown error —
+      // so the run always leaves an explicit record (with verdict) instead of a missing file.
+      persistSummary();
     }
 
     // Clean up system prompt so it doesn't leak into regular chat
     this.deps.client.setSystemPrompt(null);
 
-    // Finalize run
-    run.completedAt = new Date().toISOString();
-    run.totalDuration = Date.now() - totalStartTime;
-    run.totalDurationFormatted = formatDuration(run.totalDuration);
-    run.totalTokens = run.results.reduce((sum, r) => sum + (r.tokens || 0), 0);
-
-    // Save results
-    this.deps.ablationManager.saveRunResults(runDir, run);
+    // Finalize + save the run record (idempotent: the finally above already persisted on
+    // abort/throw paths; on the normal path this is the first and only write).
+    persistSummary();
 
     // Display summary
     const completeLine = `ABLATION COMPLETE: ${ablation.name}`;
