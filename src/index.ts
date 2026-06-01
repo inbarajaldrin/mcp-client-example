@@ -3190,8 +3190,17 @@ export class MCPClient {
           await this.tokenManager.autoSummarize();
         }
 
-        // Reset for next message (if loop continues)
+        // Reset for next message (if loop continues).
+        // currentThinking MUST also reset here: processToolUseStream() runs once per provider
+        // STREAM, which emits many message_stop events when tools are called. Without this reset
+        // one streamed reasoning summary smeared onto every subsequent saved assistant message
+        // in the stream (observed 2026-05-31: 1/36/47 byte-identical `thinking` runs across 84
+        // saved messages — a logging-attribution bug that misled failure analysis). The model's
+        // re-sent reasoning is tracked separately via pendingReasoningItems (cleared at ~3119),
+        // so this only fixes the saved `thinking` metadata. Anthropic uses anthropicThinking and
+        // is unaffected.
         currentMessage = '';
+        currentThinking = '';
         messageStarted = false;
         continue;
       }
