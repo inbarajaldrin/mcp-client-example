@@ -20,7 +20,15 @@ MODEL="${3:-claude-haiku-4-5}"
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
-RUNS="$ROOT/.mcp-client-data/ablations/runs/$STUDY"
+
+# Resolve the run-dir name = the yaml `name:` field, which differs from the file stem
+# (e.g. stem 'openai_fmb1_sim' -> name 'mode2_openai_fmb1_sim'). The old code used $STUDY
+# (the stem) for RUNS, so the freshness check looked in a dir that never exists and reported
+# a fully-successful run as "did not persist" (false negative, 2026-05-31 on a 3/3 fmb1 run).
+DEF_FILE="$ROOT/.mcp-client-data/ablations/definitions/$STUDY.yaml"
+STUDY_NAME="$(awk -F: '/^[[:space:]]*name:/{sub(/^[[:space:]]*name:[[:space:]]*/,"");gsub(/["'"'"']/,"");print;exit}' "$DEF_FILE" 2>/dev/null)"
+[ -n "$STUDY_NAME" ] || STUDY_NAME="$STUDY"
+RUNS="$ROOT/.mcp-client-data/ablations/runs/$STUDY_NAME"
 
 SCRIPT="$(mktemp "/tmp/headless-${STUDY}-XXXXXX.txt")"
 trap 'rm -f "$SCRIPT"' EXIT
